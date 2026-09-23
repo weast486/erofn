@@ -3,7 +3,8 @@ import unittest
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
-from tossbot.broker import Broker, round_up_to_tick
+from tossbot.broker import Broker, round_down_to_tick, round_up_to_tick
+from tossbot.client import TossClient
 from tossbot.config import KST, Config
 from tossbot.market_calendar import TradingDay
 from tossbot.selector import Candidate, compute_metrics, parse_candles, passes_filters, score_candidates, select_stocks
@@ -108,6 +109,8 @@ class TickTest(unittest.TestCase):
         self.assertEqual(round_up_to_tick(1_999.2), 2_000)
         self.assertEqual(round_up_to_tick(12_341), 12_350)
         self.assertEqual(round_up_to_tick(71_234), 71_300)
+        self.assertEqual(round_down_to_tick(9_550), 9_550)
+        self.assertEqual(round_down_to_tick(71_234), 71_200)
 
 
 class StrategyTest(unittest.TestCase):
@@ -146,10 +149,10 @@ class StrategyTest(unittest.TestCase):
         s.tick(self.at(TUE, 10, 0), TUE)  # 같은 주 재매수 없음
         self.assertEqual(len(s.state.history), 0)
 
-        # 손절(-5%) / 익절(+15%)
-        self.client.prices["000001"] = 9_490
+        # 손절(-4.5% = 9,550원) / 익절(+15% = 11,500원)
+        self.client.prices["000001"] = 9_550
         self.client.prices["000002"] = 11_500
-        self.client.prices["000003"] = 9_600  # -4%: 유지
+        self.client.prices["000003"] = 9_560  # -4.4%: 유지
         s.tick(self.at(WED, 11, 0), WED)
         reasons = {h["symbol"]: h["reason"] for h in s.state.history}
         self.assertEqual(reasons, {"000001": "STOP_LOSS", "000002": "TAKE_PROFIT"})
@@ -166,6 +169,46 @@ class StrategyTest(unittest.TestCase):
         self.assertEqual(len(s.state.positions), 0)
         self.assertEqual(sum(h["reason"] == "WEEKLY_CLOSE" for h in s.state.history), 8)
 
+    def test_conditional_orders_armed_and_cancelled(self):
+        s = self.strategy
+        s.tick(self.at(TUE, 9, 10), TUE)
+        conds = s.broker._dry_conditionals
+        p1 = s.state.positions["000001"]
+        stop, tp = conds[p1.stop_co_id], conds[p1.tp_co_id]
+        # 손절: 9,550원 감시 → 시장가 / 익절: 11,500원 감시 → 11,500원 지정가, 만료일은 그 주 금요일
+        self.assertEqual((stop["triggerPrice"], stop["orderType"], stop["orderPrice"]), (9_550, "MARKET", None))
+        self.assertEqual((tp["triggerPrice"], tp["orderType"], tp["orderPrice"]), (11_500, "LIMIT", 11_500))
+        self.assertEqual(len(conds), 20)
+
+        # 손절 발동 → 익절 조건주문은 봇이 취소
+        stop_id, tp_id = p1.stop_co_id, p1.tp_co_id
+        self.client.prices["000001"] = 9_500
+        s.tick(self.at(WED, 10, 0), WED)
+        self.assertNotIn("000001", s.state.positions)
+        self.assertEqual(conds[stop_id]["status"], "ORDERED")
+        self.assertEqual(conds[tp_id]["status"], "EXPIRED")  # 모의 취소 상태
+        self.assertEqual(s.state.history[-1]["reason"], "STOP_LOSS")
+
+        # 금요일 15:10: 남은 조건주문 전부 취소 후 시장가 매도
+        s.tick(self.at(FRI, 15, 10), FRI)
+        self.assertEqual(len(s.state.positions), 0)
+        self.assertFalse([c for c in conds.values() if c["status"] == "WATCHING"])
+        self.assertEqual(sum(h["reason"] == "WEEKLY_CLOSE" for h in s.state.history), 9)
+
+    def test_bot_polling_when_conditional_disabled(self):
+        self.cfg.use_conditional_orders = False
+        s = self.strategy
+        s.tick(self.at(TUE, 9, 10), TUE)
+        self.assertFalse(s.broker._dry_conditionals)
+        self.client.prices["000001"] = 9_540
+        self.client.prices["000002"] = 11_600
+        s.tick(self.at(WED, 10, 0), WED)
+        reasons = {h["symbol"]: (h["reason"], h["exit_price"]) for h in s.state.history}
+        # 손절은 시장가(현재가), 익절은 11,500원 지정가 이상으로 체결
+        self.assertEqual(reasons["000001"], ("STOP_LOSS", 9_540))
+        self.assertEqual(reasons["000002"][0], "TAKE_PROFIT")
+        self.assertGreaterEqual(reasons["000002"][1], 11_500)
+
     def test_state_persists_across_restart(self):
         self.strategy.tick(self.at(TUE, 9, 10), TUE)
         reloaded = WeeklyStrategy(self.cfg, Broker(self.client, dry_run=True), StateStore(self.cfg.state_file))
@@ -175,3 +218,37 @@ class StrategyTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ClientConditionalOrderTest(unittest.TestCase):
+    def test_request_shapes(self):
+        calls = []
+
+        class Resp:
+            def __init__(self, code, body=None):
+                self.status_code, self._body, self.headers = code, body, {}
+                self.content = b"" if body is None else b"{}"
+                self.text = ""
+
+            def json(self):
+                return self._body
+
+        class Session:
+            def post(self, url, data=None, timeout=None):
+                return Resp(200, {"access_token": "t", "token_type": "Bearer", "expires_in": 3600})
+
+            def request(self, method, url, params=None, json=None, headers=None, timeout=None):
+                calls.append((method, url.split(".com")[1], json))
+                if method == "DELETE":
+                    return Resp(204)
+                return Resp(200, {"result": {"conditionalOrderId": "co-1", "clientOrderId": None}})
+
+        c = TossClient("id", "secret", account_seq=1, session=Session())
+        c.create_conditional_order("005930", 3, "SELL", 68_000, "2026-09-25")
+        c.create_conditional_order("005930", 3, "SELL", 82_000, "2026-09-25", order_type="LIMIT", order_price=82_000)
+        self.assertIsNone(c.cancel_conditional_order("co-1"))
+        self.assertEqual(calls[0][2]["first"], {"orderSide": "SELL", "triggerPrice": "68000"})
+        self.assertEqual(calls[0][2]["orderType"], "MARKET")
+        self.assertEqual(calls[0][2]["type"], "SINGLE")
+        self.assertEqual(calls[1][2]["first"]["orderPrice"], "82000")
+        self.assertEqual(calls[2][:2], ("DELETE", "/api/v1/conditional-orders/co-1"))

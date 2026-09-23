@@ -2,17 +2,22 @@
 
 - 매수: 매주 화요일(휴장·연휴 전날이면 그 주 다음 거래일) 정규장 시작 N분 후,
         선정 종목 10개를 종목당 동일 금액(10만원)으로 매수
-- 매도: 평균 체결가 대비 -5% 손절 / +15% 익절 (장중 주기적으로 감시)
-- 청산: 금요일 또는 공휴일 전날, 종가 단일가 시작 N분 전 봇 보유 종목 전량 매도
+- 매수 체결 즉시 토스증권 조건주문(SINGLE) 2건을 서버에 등록
+    · 손절: 평균 체결가 -4.5% 도달 시 시장가 매도
+    · 익절: 평균 체결가 +15% 도달 시 지정가(+15% 가격) 매도
+  한쪽이 발동되면 봇이 반대쪽 조건주문을 취소한다.
+  (토스 OCO 는 지정가만 지원해 '손절 시장가 + 익절 지정가' 조합이 불가능하므로 SINGLE 2건 사용)
+- 봇의 가격 감시는 백업: 조건주문 등록 실패 등으로 서버 감시가 없는 경우에만 직접 매도
+- 청산: 금요일 또는 공휴일 전날 15:10, 조건주문·미체결 매도주문 취소 후 전량 시장가 매도
 """
 from __future__ import annotations
 
 import logging
 from dataclasses import asdict
-from datetime import datetime, timedelta
+from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 
-from .broker import TERMINAL_STATUSES, Broker, round_up_to_tick
+from .broker import CONDITIONAL_DONE, TERMINAL_STATUSES, Broker, round_down_to_tick, round_up_to_tick
 from .config import KST, Config
 from .market_calendar import TradingDay
 from .selector import Candidate, load_universe, select_stocks
@@ -22,11 +27,17 @@ log = logging.getLogger(__name__)
 
 # 시장성 지정가 매수 시 현재가 대비 허용 슬리피지
 BUY_LIMIT_SLIPPAGE = 0.005
+# 조건주문 등록 실패 시 재시도 횟수 (초과하면 봇 가격 감시로만 대응)
+MAX_ARM_FAILURES = 3
 
 
 def week_key(d) -> str:
     y, w, _ = d.isocalendar()
     return f"{y}-W{w:02d}"
+
+
+def week_friday(d: date) -> date:
+    return d + timedelta(days=4 - d.weekday())
 
 
 def _dec(value) -> float | None:
@@ -41,13 +52,24 @@ class WeeklyStrategy:
         self.select = selector
         self.state: State = store.load()
 
+    # ------------------------------------------------------------ prices
+    def stop_price(self, entry: float) -> int:
+        """손절 감시가: 진입가 -4.5% 이하의 가장 가까운 호가."""
+        return round_down_to_tick(entry * (1 - self.cfg.stop_loss_pct / 100))
+
+    def take_profit_price(self, entry: float) -> int:
+        """익절 감시가 겸 지정가: 진입가 +15% 이상의 가장 가까운 호가."""
+        return round_up_to_tick(entry * (1 + self.cfg.take_profit_pct / 100))
+
     # ------------------------------------------------------------ schedule
     def buy_time(self, day: TradingDay) -> datetime:
         return day.market_open + timedelta(minutes=self.cfg.buy_delay_minutes)
 
     def liquidation_time(self, day: TradingDay) -> datetime:
-        anchor = day.closing_auction_start or (day.market_close - timedelta(minutes=10))
-        return anchor - timedelta(minutes=self.cfg.liquidation_lead_minutes)
+        hh, mm = (int(x) for x in self.cfg.liquidation_time.split(":"))
+        target = datetime.combine(day.today, time(hh, mm), KST)
+        # 단축 운영일 등으로 장이 일찍 끝나는 경우 종료 20분 전으로 당긴다
+        return min(target, day.market_close - timedelta(minutes=20))
 
     def tick(self, now: datetime, day: TradingDay) -> None:
         """스케줄러가 주기적으로 호출. 현재 시각에 해야 할 일을 판단해 실행한다."""
@@ -60,6 +82,7 @@ class WeeklyStrategy:
             self.liquidate_all("WEEKLY_CLOSE" if day.today.weekday() == 4 else "PRE_HOLIDAY_CLOSE")
             return
 
+        self.arm_protection(day.today)
         self.check_exits()
 
         if (
@@ -121,43 +144,137 @@ class WeeklyStrategy:
         self.state.last_buy_week = week_key(day.today)
         self.store.save(self.state)
         self.sync_orders()
+        self.arm_protection(day.today)
         return picks
+
+    # ------------------------------------------------- conditional orders
+    def arm_protection(self, today: date) -> None:
+        """매수 체결이 끝난 포지션에 손절·익절 조건주문을 건다 (이미 걸려 있으면 건너뜀)."""
+        if not self.cfg.use_conditional_orders:
+            return
+        expire = week_friday(today).isoformat()  # 청산일에 봇이 취소하지만, 만약을 위한 안전장치
+        for pos in list(self.state.positions.values()):
+            if pos.status != "OPEN" or pos.buy_open or pos.quantity <= 0 or pos.entry_price <= 0:
+                continue
+            if pos.stop_co_id is None and pos.stop_arm_failures < MAX_ARM_FAILURES:
+                try:
+                    pos.stop_co_id = self.broker.place_conditional_sell(
+                        pos.symbol, pos.quantity, self.stop_price(pos.entry_price), expire
+                    )
+                except Exception as exc:
+                    pos.stop_arm_failures += 1
+                    log.error("%s 손절 조건주문 등록 실패(%d회): %s", pos.symbol, pos.stop_arm_failures, exc)
+            if pos.tp_co_id is None and pos.tp_arm_failures < MAX_ARM_FAILURES:
+                tp = self.take_profit_price(pos.entry_price)
+                try:
+                    pos.tp_co_id = self.broker.place_conditional_sell(
+                        pos.symbol, pos.quantity, tp, expire, limit_price=tp
+                    )
+                except Exception as exc:
+                    pos.tp_arm_failures += 1
+                    log.error("%s 익절 조건주문 등록 실패(%d회): %s", pos.symbol, pos.tp_arm_failures, exc)
+            self.store.save(self.state)
+
+    def _check_conditionals(self, pos: Position) -> None:
+        """조건주문 발동 여부 확인. 발동되면 생성된 주문을 매도주문으로 추적하고 반대쪽을 취소."""
+        for leg, reason in (("stop", "STOP_LOSS"), ("tp", "TAKE_PROFIT")):
+            co_id = getattr(pos, f"{leg}_co_id")
+            if not co_id or pos.symbol not in self.state.positions:
+                continue
+            status, triggered = self.broker.conditional_status(co_id)
+            if triggered:
+                setattr(pos, f"{leg}_co_id", None)
+                log.info("%s %s 조건주문 발동 -> 주문 %s", pos.symbol, reason, triggered)
+                if leg == "stop":
+                    # 손절 발동: 익절 조건주문 취소, 익절 지정가 주문이 대기 중이면 그것도 취소
+                    self._cancel_conditional(pos, "tp")
+                    if pos.status == "SELLING" and pos.sell_order_id and pos.sell_order_id != triggered:
+                        self._abandon_sell_order(pos)
+                # 익절 발동 시 손절 조건주문은 익절 체결 완료까지 유지 (지정가 미체결 대비)
+                self._track_sell(pos, triggered, reason)
+            elif status in CONDITIONAL_DONE:
+                setattr(pos, f"{leg}_co_id", None)
+        self.store.save(self.state)
+
+    def _cancel_conditional(self, pos: Position, leg: str) -> None:
+        co_id = getattr(pos, f"{leg}_co_id")
+        if not co_id:
+            return
+        try:
+            self.broker.cancel_conditional(co_id)
+        except Exception as exc:
+            log.warning("%s 조건주문 취소 실패(이미 완료됐을 수 있음): %s", pos.symbol, exc)
+        setattr(pos, f"{leg}_co_id", None)
+        # 취소 직전에 발동됐을 수 있으므로 확인
+        try:
+            _, triggered = self.broker.conditional_status(co_id)
+        except Exception:
+            triggered = None
+        if triggered and triggered != pos.sell_order_id:
+            log.warning("%s 조건주문이 취소 직전 발동됨 -> 주문 %s 취소", pos.symbol, triggered)
+            try:
+                self.broker.cancel(triggered)
+            except Exception as exc:
+                log.warning("%s 발동 주문 취소 실패: %s", pos.symbol, exc)
+            reason = "STOP_LOSS" if leg == "stop" else "TAKE_PROFIT"
+            self._record_fill(pos, self.broker.order_status(triggered), reason)
+
+    def _cancel_all_conditionals(self, pos: Position) -> None:
+        self._cancel_conditional(pos, "stop")
+        self._cancel_conditional(pos, "tp")
 
     # --------------------------------------------------------------- exits
     def check_exits(self) -> None:
-        held = [p for p in self.state.positions.values() if p.status == "OPEN" and p.quantity > 0]
+        """봇 가격 감시 (조건주문의 백업).
+
+        - 손절: 서버에 손절 조건주문이 없는데 -4.5% 이하 → 즉시 시장가 매도
+        - 익절: 서버에 익절 조건주문이 없는데 +15% 이상 → +15% 가격에 지정가 매도
+        - 익절 지정가가 미체결인 채 -4.5% 까지 밀리고 손절 조건주문도 없으면 → 취소 후 시장가 매도
+        """
+        held = [p for p in self.state.positions.values() if p.quantity > 0 and p.entry_price > 0]
         if not held:
             return
         prices = self.broker.last_prices([p.symbol for p in held])
-        # 부동소수점 오차로 경계값(정확히 -5%/+15%)을 놓치지 않도록 Decimal 로 비교
-        sl = -Decimal(str(self.cfg.stop_loss_pct)) / 100
-        tp = Decimal(str(self.cfg.take_profit_pct)) / 100
         for pos in held:
             price = prices.get(pos.symbol)
-            if price is None or pos.entry_price <= 0:
+            if price is None or pos.symbol not in self.state.positions:
                 continue
-            ret = price / Decimal(str(pos.entry_price)) - 1
-            if ret <= sl:
-                log.info("손절 %s %s: %.2f%% (진입 %s → 현재 %s)", pos.symbol, pos.name, ret * 100, pos.entry_price, price)
-                self._sell(pos, "STOP_LOSS")
-            elif ret >= tp:
-                log.info("익절 %s %s: %.2f%% (진입 %s → 현재 %s)", pos.symbol, pos.name, ret * 100, pos.entry_price, price)
-                self._sell(pos, "TAKE_PROFIT")
+            stop, tp = self.stop_price(pos.entry_price), self.take_profit_price(pos.entry_price)
+            if pos.status == "OPEN":
+                if price <= stop and pos.stop_co_id is None:
+                    log.info("손절(봇 감시) %s %s: 현재 %s ≤ %s", pos.symbol, pos.name, price, stop)
+                    self._sell_now(pos, "STOP_LOSS")
+                elif price >= tp and pos.tp_co_id is None:
+                    log.info("익절(봇 감시) %s %s: 현재 %s ≥ %s", pos.symbol, pos.name, price, tp)
+                    self._sell_limit(pos, tp, "TAKE_PROFIT")
+            elif pos.status == "SELLING" and pos.sell_reason == "TAKE_PROFIT":
+                if price <= stop and pos.stop_co_id is None:
+                    log.info("익절 지정가 미체결 상태에서 손절가 도달 %s: 시장가 전환", pos.symbol)
+                    self._sell_now(pos, "STOP_LOSS")
 
     def liquidate_all(self, reason: str) -> None:
+        """청산: 조건주문 취소 → 미체결 매도주문 취소 → 시장가 전량 매도. 청산 시각 이후 매 tick 반복."""
         for pos in list(self.state.positions.values()):
-            if pos.status == "OPEN":
-                if pos.quantity > 0 or pos.buy_open:
-                    self._sell(pos, reason)
+            if pos.status == "SELLING" and pos.sell_reason in (reason, "STOP_LOSS"):
+                continue  # 이미 시장가 매도 주문이 나가 있음
+            self._sell_now(pos, reason)
 
-    def _sell(self, pos: Position, reason: str) -> None:
-        # 아직 진행 중인 매수 주문이 있으면 먼저 취소 (부분 체결 잔량 등)
+    def _sell_now(self, pos: Position, reason: str) -> None:
+        """조건주문·대기 주문을 정리하고 시장가로 매도."""
         if pos.buy_open and pos.buy_order_id:
             try:
                 self.broker.cancel(pos.buy_order_id)
             except Exception as exc:
                 log.warning("%s 매수 잔량 취소 실패: %s", pos.symbol, exc)
             self._sync_buy(pos)
+            if pos.symbol not in self.state.positions:
+                return
+        self._cancel_all_conditionals(pos)
+        if pos.status == "SELLING" and pos.sell_order_id:
+            if not self._abandon_sell_order(pos):
+                # 취소 처리 중 → 다음 tick 에 잔량 매도
+                self.store.save(self.state)
+                return
         if pos.quantity <= 0:
             if not pos.buy_open:
                 self.state.positions.pop(pos.symbol, None)
@@ -165,17 +282,50 @@ class WeeklyStrategy:
             return
         qty = min(pos.quantity, self.broker.sellable_quantity(pos.symbol, pos.quantity))
         if qty <= 0:
-            log.warning("%s 매도 가능 수량 0", pos.symbol)
+            log.warning("%s 매도 가능 수량 0 (대기 주문 취소 처리 중일 수 있음)", pos.symbol)
             return
         try:
-            pos.sell_order_id = self.broker.sell_market(pos.symbol, qty)
+            order_id = self.broker.sell_market(pos.symbol, qty)
         except Exception as exc:
             log.error("%s 매도 주문 실패 (%s): %s", pos.symbol, reason, exc)
             return
-        pos.status = "SELLING"
+        self._track_sell(pos, order_id, reason)
+
+    def _sell_limit(self, pos: Position, price: int, reason: str) -> None:
+        self._cancel_conditional(pos, "tp")
+        qty = min(pos.quantity, self.broker.sellable_quantity(pos.symbol, pos.quantity))
+        if qty <= 0:
+            return
+        try:
+            order_id = self.broker.sell_limit(pos.symbol, qty, price)
+        except Exception as exc:
+            log.error("%s 지정가 매도 실패 (%s): %s", pos.symbol, reason, exc)
+            return
+        self._track_sell(pos, order_id, reason)
+
+    def _track_sell(self, pos: Position, order_id: str, reason: str) -> None:
+        pos.sell_order_id = order_id
         pos.sell_reason = reason
+        pos.status = "SELLING"
         self.store.save(self.state)
         self._sync_sell(pos)
+
+    def _abandon_sell_order(self, pos: Position) -> bool:
+        """대기 중인 매도주문 취소. 종료 상태가 되면 체결분을 기록하고 True, 아직 취소 처리 중이면 False."""
+        order = self.broker.order_status(pos.sell_order_id)
+        if order.get("status") not in TERMINAL_STATUSES:
+            try:
+                self.broker.cancel(pos.sell_order_id)
+            except Exception as exc:
+                log.warning("%s 매도주문 취소 실패: %s", pos.symbol, exc)
+            order = self.broker.order_status(pos.sell_order_id)
+            if order.get("status") not in TERMINAL_STATUSES:
+                return False
+        self._record_fill(pos, order, pos.sell_reason)
+        pos.status, pos.sell_order_id = "OPEN", None
+        if pos.quantity <= 0:
+            self.state.positions.pop(pos.symbol, None)
+        return True
 
     # ---------------------------------------------------------------- sync
     def sync_orders(self) -> None:
@@ -183,7 +333,9 @@ class WeeklyStrategy:
             try:
                 if pos.buy_open:
                     self._sync_buy(pos)
-                if pos.status == "SELLING":
+                if pos.symbol in self.state.positions:
+                    self._check_conditionals(pos)
+                if pos.status == "SELLING" and pos.symbol in self.state.positions:
                     self._sync_sell(pos)
             except Exception as exc:
                 log.warning("%s 주문 상태 조회 실패: %s", pos.symbol, exc)
@@ -202,36 +354,47 @@ class WeeklyStrategy:
             if pos.quantity <= 0:
                 log.info("%s 매수 미체결 종료 (%s)", pos.symbol, order.get("status"))
                 self.state.positions.pop(pos.symbol, None)
+            else:
+                log.info("%s 매수 체결 %d주 @ %s", pos.symbol, pos.quantity, pos.entry_price)
         self.store.save(self.state)
+
+    def _record_fill(self, pos: Position, order: dict, reason: str | None) -> int:
+        """매도 주문의 체결분을 이력에 남기고 보유 수량에서 차감. 체결 수량 반환."""
+        ex = order.get("execution") or {}
+        filled = _dec(ex.get("filledQuantity"))
+        filled = int(filled) if filled is not None else (pos.quantity if order.get("status") == "FILLED" else 0)
+        filled = min(filled, pos.quantity)
+        if filled <= 0:
+            return 0
+        exit_price = _dec(ex.get("averageFilledPrice"))
+        self.state.history.append(
+            {
+                **{k: v for k, v in asdict(pos).items() if k in ("symbol", "name", "entry_price", "opened_at")},
+                "quantity": filled,
+                "exit_price": exit_price,
+                "reason": reason,
+                "closed_at": datetime.now(KST).isoformat(timespec="seconds"),
+                "return_pct": round((exit_price / pos.entry_price - 1) * 100, 2)
+                if exit_price and pos.entry_price
+                else None,
+            }
+        )
+        pos.quantity -= filled
+        return filled
 
     def _sync_sell(self, pos: Position) -> None:
         order = self.broker.order_status(pos.sell_order_id)
         if order.get("status") not in TERMINAL_STATUSES:
             return
-        ex = order.get("execution") or {}
-        filled = _dec(ex.get("filledQuantity"))
-        filled = pos.quantity if filled is None else int(filled)
-        exit_price = _dec(ex.get("averageFilledPrice"))
-        if filled > 0:
-            self.state.history.append(
-                {
-                    **{k: v for k, v in asdict(pos).items() if k in ("symbol", "name", "entry_price", "opened_at")},
-                    "quantity": filled,
-                    "exit_price": exit_price,
-                    "reason": pos.sell_reason,
-                    "closed_at": datetime.now(KST).isoformat(timespec="seconds"),
-                    "return_pct": round((exit_price / pos.entry_price - 1) * 100, 2)
-                    if exit_price and pos.entry_price
-                    else None,
-                }
-            )
-        remaining = pos.quantity - filled
-        if remaining <= 0:
+        self._record_fill(pos, order, pos.sell_reason)
+        if pos.quantity <= 0:
             log.info("%s 매도 완료 (%s)", pos.symbol, pos.sell_reason)
+            self._cancel_all_conditionals(pos)  # 남은 반대쪽 조건주문 정리
             self.state.positions.pop(pos.symbol, None)
         else:
-            log.warning("%s 매도 잔량 %d 주 (%s) - 다음 주기에 재시도", pos.symbol, remaining, order.get("status"))
-            pos.quantity = remaining
-            pos.status = "OPEN"
-            pos.sell_order_id = None
+            log.warning("%s 매도 잔량 %d 주 (%s) - 조건주문 재등록", pos.symbol, pos.quantity, order.get("status"))
+            # 수량이 바뀌었으므로 남은 조건주문을 취소하고 잔량 기준으로 다시 건다
+            self._cancel_all_conditionals(pos)
+            pos.status, pos.sell_order_id = "OPEN", None
+            pos.stop_arm_failures = pos.tp_arm_failures = 0
         self.store.save(self.state)

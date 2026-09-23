@@ -81,7 +81,11 @@ def cmd_status(cfg: Config, _c, strategy: WeeklyStrategy) -> None:
     st = strategy.state
     print(f"[{'DRY_RUN' if cfg.dry_run else 'LIVE'}] 마지막 매수 주차: {st.last_buy_week}")
     for p in st.positions.values():
-        print(f"  {p.symbol} {p.name} {p.quantity}주 @ {p.entry_price:,.0f} status={p.status} buy_open={p.buy_open}")
+        print(
+            f"  {p.symbol} {p.name} {p.quantity}주 @ {p.entry_price:,.0f} status={p.status} "
+            f"손절={strategy.stop_price(p.entry_price):,}({'조건주문' if p.stop_co_id else '봇감시'}) "
+            f"익절={strategy.take_profit_price(p.entry_price):,}({'조건주문' if p.tp_co_id else '봇감시'})"
+        )
     if st.history:
         rets = [h["return_pct"] for h in st.history if h.get("return_pct") is not None]
         print(f"청산 {len(st.history)}건, 평균 수익률 {sum(rets)/len(rets):.2f}%" if rets else f"청산 {len(st.history)}건")

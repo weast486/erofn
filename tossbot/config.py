@@ -44,11 +44,14 @@ class Config:
 
     total_budget: int = 1_000_000
     num_stocks: int = 10
-    stop_loss_pct: float = 5.0
+    stop_loss_pct: float = 4.5
     take_profit_pct: float = 15.0
 
+    # 손절/익절을 토스증권 조건주문으로 서버에 걸어둘지 (false 면 봇의 가격 감시만 사용)
+    use_conditional_orders: bool = True
+
     buy_delay_minutes: int = 10
-    liquidation_lead_minutes: int = 10
+    liquidation_time: str = "15:10"  # 금요일·공휴일 전날 전량 매도 시각 (KST)
     monitor_interval_seconds: int = 60
 
     universe_file: str = "universe.txt"
@@ -81,10 +84,9 @@ class Config:
             num_stocks=int(_get("NUM_STOCKS", str(cls.num_stocks))),
             stop_loss_pct=float(_get("STOP_LOSS_PCT", str(cls.stop_loss_pct))),
             take_profit_pct=float(_get("TAKE_PROFIT_PCT", str(cls.take_profit_pct))),
+            use_conditional_orders=_bool(os.environ.get("USE_CONDITIONAL_ORDERS"), True),
             buy_delay_minutes=int(_get("BUY_DELAY_MINUTES", str(cls.buy_delay_minutes))),
-            liquidation_lead_minutes=int(
-                _get("LIQUIDATION_LEAD_MINUTES", str(cls.liquidation_lead_minutes))
-            ),
+            liquidation_time=_get("LIQUIDATION_TIME", cls.liquidation_time),
             monitor_interval_seconds=int(
                 _get("MONITOR_INTERVAL_SECONDS", str(cls.monitor_interval_seconds))
             ),

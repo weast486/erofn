@@ -19,6 +19,11 @@ class Position:
     status: str = "OPEN"  # OPEN | SELLING
     sell_order_id: str | None = None
     sell_reason: str | None = None
+    # 증권사 서버에 걸어둔 조건주문 (SINGLE) ID
+    stop_co_id: str | None = None  # 손절: 감시가 도달 시 시장가 매도
+    tp_co_id: str | None = None  # 익절: 감시가 도달 시 지정가 매도
+    stop_arm_failures: int = 0
+    tp_arm_failures: int = 0
 
 
 @dataclass

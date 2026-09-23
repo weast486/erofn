@@ -133,6 +133,8 @@ class TossClient:
                     err.get("message", resp.text[:300]),
                     err.get("requestId", resp.headers.get("X-Request-Id", "")),
                 )
+            if resp.status_code == 204 or not resp.content:
+                return None
             return resp.json().get("result")
         raise RuntimeError("unreachable")
 
@@ -235,3 +237,40 @@ class TossClient:
 
     def cancel_order(self, order_id: str) -> dict:
         return self._request("POST", f"/api/v1/orders/{order_id}/cancel", json={}, account=True)
+
+    # ----------------------------------------------------- conditional orders
+    # (Open API v1.2 에 추가된 조건주문. 증권사 서버가 가격을 감시하다 조건 충족 시 주문을 생성)
+    def create_conditional_order(
+        self,
+        symbol: str,
+        quantity: int,
+        side: str,
+        trigger_price: int,
+        expire_date: str,
+        order_type: str = "MARKET",
+        order_price: int | None = None,
+        client_order_id: str | None = None,
+    ) -> dict:
+        """SINGLE 조건주문 생성. 현재가가 trigger_price 에 닿으면 주문이 나간다."""
+        first: dict[str, Any] = {"orderSide": side, "triggerPrice": str(int(trigger_price))}
+        if order_type == "LIMIT":
+            if order_price is None:
+                raise ValueError("LIMIT 조건주문은 order_price 가 필요합니다.")
+            first["orderPrice"] = str(int(order_price))
+        body: dict[str, Any] = {
+            "symbol": symbol,
+            "type": "SINGLE",
+            "quantity": str(int(quantity)),
+            "orderType": order_type,
+            "expireDate": expire_date,
+            "first": first,
+        }
+        if client_order_id:
+            body["clientOrderId"] = client_order_id
+        return self._request("POST", "/api/v1/conditional-orders", json=body, account=True)
+
+    def get_conditional_order(self, conditional_order_id: str) -> dict:
+        return self._request("GET", f"/api/v1/conditional-orders/{conditional_order_id}", account=True)
+
+    def cancel_conditional_order(self, conditional_order_id: str) -> None:
+        self._request("DELETE", f"/api/v1/conditional-orders/{conditional_order_id}", account=True)

@@ -1,14 +1,14 @@
-"""주간 스윙 전략.
+"""종가배팅 전략.
 
-- 매수: 매주 화요일(휴장·연휴 전날이면 그 주 다음 거래일) 정규장 시작 N분 후,
-        선정 종목 10개를 종목당 동일 금액(10만원)으로 매수
+- 매수: 매 거래일 15:10~15:20, 익일 상승이 기대되는 종목을 0~10개 선정해 종목당 10만원 매수
+        (동시 보유 최대 10종목. 이미 보유 중인 종목 수만큼 새 매수가 줄어든다)
 - 매수 체결 즉시 토스증권 조건주문(SINGLE) 2건을 서버에 등록
-    · 손절: 평균 체결가 -4.5% 도달 시 시장가 매도
+    · 손절: 평균 체결가 -4.7% 도달 시 시장가 매도
     · 익절: 평균 체결가 +15% 도달 시 지정가(+15% 가격) 매도
   한쪽이 발동되면 봇이 반대쪽 조건주문을 취소한다.
   (토스 OCO 는 지정가만 지원해 '손절 시장가 + 익절 지정가' 조합이 불가능하므로 SINGLE 2건 사용)
+- 보유 기간 제한 없음: 손절 또는 익절이 걸릴 때까지 보유. 조건주문이 만료되면 다시 등록한다.
 - 봇의 가격 감시는 백업: 조건주문 등록 실패 등으로 서버 감시가 없는 경우에만 직접 매도
-- 청산: 금요일 또는 공휴일 전날 15:10, 조건주문·미체결 매도주문 취소 후 전량 시장가 매도
 """
 from __future__ import annotations
 
@@ -16,11 +16,12 @@ import logging
 from dataclasses import asdict
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal
+from typing import Callable
 
 from .broker import CONDITIONAL_DONE, TERMINAL_STATUSES, Broker, round_down_to_tick, round_up_to_tick
 from .config import KST, Config
 from .market_calendar import TradingDay
-from .selector import Candidate, load_universe, select_stocks
+from .selector import Candidate, SelectionParams, select_stocks
 from .state import Position, State, StateStore
 
 log = logging.getLogger(__name__)
@@ -31,30 +32,34 @@ BUY_LIMIT_SLIPPAGE = 0.005
 MAX_ARM_FAILURES = 3
 
 
-def week_key(d) -> str:
-    y, w, _ = d.isocalendar()
-    return f"{y}-W{w:02d}"
-
-
-def week_friday(d: date) -> date:
-    return d + timedelta(days=4 - d.weekday())
-
-
 def _dec(value) -> float | None:
     return float(Decimal(value)) if value not in (None, "") else None
 
 
-class WeeklyStrategy:
-    def __init__(self, cfg: Config, broker: Broker, store: StateStore, selector=select_stocks):
+def _at(day: date, hhmm: str) -> datetime:
+    hh, mm = (int(x) for x in hhmm.split(":"))
+    return datetime.combine(day, time(hh, mm), KST)
+
+
+class ClosingBetStrategy:
+    def __init__(
+        self,
+        cfg: Config,
+        broker: Broker,
+        store: StateStore,
+        selector=select_stocks,
+        clock: Callable[[], datetime] = lambda: datetime.now(KST),
+    ):
         self.cfg = cfg
         self.broker = broker
         self.store = store
         self.select = selector
+        self.clock = clock
         self.state: State = store.load()
 
     # ------------------------------------------------------------ prices
     def stop_price(self, entry: float) -> int:
-        """손절 감시가: 진입가 -4.5% 이하의 가장 가까운 호가."""
+        """손절 감시가: 진입가 -4.7% 이하의 가장 가까운 호가."""
         return round_down_to_tick(entry * (1 - self.cfg.stop_loss_pct / 100))
 
     def take_profit_price(self, entry: float) -> int:
@@ -62,61 +67,59 @@ class WeeklyStrategy:
         return round_up_to_tick(entry * (1 + self.cfg.take_profit_pct / 100))
 
     # ------------------------------------------------------------ schedule
-    def buy_time(self, day: TradingDay) -> datetime:
-        return day.market_open + timedelta(minutes=self.cfg.buy_delay_minutes)
-
-    def liquidation_time(self, day: TradingDay) -> datetime:
-        hh, mm = (int(x) for x in self.cfg.liquidation_time.split(":"))
-        target = datetime.combine(day.today, time(hh, mm), KST)
-        # 단축 운영일 등으로 장이 일찍 끝나는 경우 종료 20분 전으로 당긴다
-        return min(target, day.market_close - timedelta(minutes=20))
+    def buy_window(self, day: TradingDay) -> tuple[datetime, datetime]:
+        start, end = _at(day.today, self.cfg.buy_start), _at(day.today, self.cfg.buy_end)
+        # 단축 운영일 등으로 종가 단일가가 더 일찍 시작하면 그 전까지만 매수
+        if day.closing_auction_start:
+            end = min(end, day.closing_auction_start)
+        return start, end
 
     def tick(self, now: datetime, day: TradingDay) -> None:
         """스케줄러가 주기적으로 호출. 현재 시각에 해야 할 일을 판단해 실행한다."""
         if not day.is_open or now < day.market_open or now >= day.market_close:
             return
         self.sync_orders()
-
-        liq_time = self.liquidation_time(day)
-        if day.is_liquidation_day and now >= liq_time:
-            self.liquidate_all("WEEKLY_CLOSE" if day.today.weekday() == 4 else "PRE_HOLIDAY_CLOSE")
-            return
-
         self.arm_protection(day.today)
         self.check_exits()
 
-        if (
-            day.is_buy_day
-            and self.state.last_buy_week != week_key(day.today)
-            and self.buy_time(day) <= now < liq_time
-        ):
-            self.buy_weekly(day)
+        start, end = self.buy_window(day)
+        if start <= now < end and self.state.last_buy_date != day.today.isoformat():
+            self.buy_daily(day, end)
 
     # ----------------------------------------------------------------- buy
-    def buy_weekly(self, day: TradingDay) -> list[Candidate]:
+    def buy_daily(self, day: TradingDay, deadline: datetime) -> list[Candidate]:
         cfg = self.cfg
         slots = cfg.num_stocks - len(self.state.positions)
         if slots <= 0:
-            log.info("이미 %d 종목 보유 중, 추가 매수 없음", len(self.state.positions))
-            self.state.last_buy_week = week_key(day.today)
-            self.store.save(self.state)
+            log.info("이미 %d 종목 보유 중 (최대 %d), 오늘은 매수 없음", len(self.state.positions), cfg.num_stocks)
+            self._mark_bought(day)
             return []
 
-        universe = [s for s in load_universe(cfg.universe_file) if s not in self.state.positions]
-        picks = self.select(
-            self.broker.client,
-            universe,
-            top_n=slots,
+        params = SelectionParams(
             slot_budget=cfg.slot_budget,
-            min_avg_traded_value=cfg.min_avg_traded_value,
-            max_5d_return_pct=cfg.max_5d_return_pct,
-            today=day.today,
+            min_change_pct=cfg.min_change_pct,
+            max_change_pct=cfg.max_change_pct,
+            min_trading_amount=cfg.min_trading_amount,
+            min_volume_ratio=cfg.min_volume_ratio,
+            min_close_to_high=cfg.min_close_to_high,
         )
-        log.info("이번 주 선정 종목: %s", ", ".join(f"{c.name}({c.symbol})" for c in picks) or "없음")
+        # 선정 중 API 오류가 나면 예외가 전파되어 다음 주기(매수 시간대 안)에 다시 시도한다
+        picks = self.select(self.broker.client, set(self.state.positions), slots, params, day.today)
+        # 선정이 끝나면 오늘 매수 완료로 기록 (주문 도중 오류가 나도 같은 날 다시 매수하지 않음)
+        self._mark_bought(day)
+        log.info(
+            "오늘 종가배팅 %d 종목 (빈 자리 %d): %s",
+            len(picks), slots, ", ".join(f"{c.name}({c.symbol})" for c in picks) or "없음",
+        )
+        if not picks:
+            return []
 
         prices = self.broker.last_prices([c.symbol for c in picks])
         cash = self.broker.cash_buying_power()
         for cand in picks:
+            if self.clock() >= deadline:
+                log.warning("매수 마감 시각(%s) 도달, 남은 %s 등은 매수하지 않음", deadline.strftime("%H:%M"), cand.symbol)
+                break
             last = float(prices.get(cand.symbol, cand.close))
             limit = round_up_to_tick(last * (1 + BUY_LIMIT_SLIPPAGE))
             qty = cfg.slot_budget // limit
@@ -141,18 +144,20 @@ class WeeklyStrategy:
             )
             self.store.save(self.state)
 
-        self.state.last_buy_week = week_key(day.today)
-        self.store.save(self.state)
         self.sync_orders()
         self.arm_protection(day.today)
         return picks
+
+    def _mark_bought(self, day: TradingDay) -> None:
+        self.state.last_buy_date = day.today.isoformat()
+        self.store.save(self.state)
 
     # ------------------------------------------------- conditional orders
     def arm_protection(self, today: date) -> None:
         """매수 체결이 끝난 포지션에 손절·익절 조건주문을 건다 (이미 걸려 있으면 건너뜀)."""
         if not self.cfg.use_conditional_orders:
             return
-        expire = week_friday(today).isoformat()  # 청산일에 봇이 취소하지만, 만약을 위한 안전장치
+        expire = (today + timedelta(days=self.cfg.conditional_expire_days)).isoformat()
         for pos in list(self.state.positions.values()):
             if pos.status != "OPEN" or pos.buy_open or pos.quantity <= 0 or pos.entry_price <= 0:
                 continue
@@ -227,9 +232,9 @@ class WeeklyStrategy:
     def check_exits(self) -> None:
         """봇 가격 감시 (조건주문의 백업).
 
-        - 손절: 서버에 손절 조건주문이 없는데 -4.5% 이하 → 즉시 시장가 매도
+        - 손절: 서버에 손절 조건주문이 없는데 -4.7% 이하 → 즉시 시장가 매도
         - 익절: 서버에 익절 조건주문이 없는데 +15% 이상 → +15% 가격에 지정가 매도
-        - 익절 지정가가 미체결인 채 -4.5% 까지 밀리고 손절 조건주문도 없으면 → 취소 후 시장가 매도
+        - 익절 지정가가 미체결인 채 -4.7% 까지 밀리고 손절 조건주문도 없으면 → 취소 후 시장가 매도
         """
         held = [p for p in self.state.positions.values() if p.quantity > 0 and p.entry_price > 0]
         if not held:
@@ -253,7 +258,7 @@ class WeeklyStrategy:
                     self._sell_now(pos, "STOP_LOSS")
 
     def liquidate_all(self, reason: str) -> None:
-        """청산: 조건주문 취소 → 미체결 매도주문 취소 → 시장가 전량 매도. 청산 시각 이후 매 tick 반복."""
+        """수동 청산 (`python -m tossbot liquidate`): 조건주문·미체결 매도주문 취소 후 전량 시장가 매도."""
         for pos in list(self.state.positions.values()):
             if pos.status == "SELLING" and pos.sell_reason in (reason, "STOP_LOSS"):
                 continue  # 이미 시장가 매도 주문이 나가 있음

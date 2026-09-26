@@ -7,45 +7,38 @@ from tossbot.broker import Broker, round_down_to_tick, round_up_to_tick
 from tossbot.client import TossClient
 from tossbot.config import KST, Config
 from tossbot.market_calendar import TradingDay
-from tossbot.selector import Candidate, compute_metrics, parse_candles, passes_filters, score_candidates, select_stocks
+from tossbot.selector import Candidate, SelectionParams, score_candidates, select_stocks
 from tossbot.state import StateStore
-from tossbot.strategy import WeeklyStrategy
+from tossbot.strategy import ClosingBetStrategy
+
+TODAY = date(2026, 9, 22)
 
 
-def make_candles(closes, volume=1_000_000, start=date(2026, 5, 1)):
-    out = []
-    for i, c in enumerate(closes):
-        d = start + timedelta(days=i)
-        out.append(
-            {
-                "timestamp": f"{d.isoformat()}T00:00:00+09:00",
-                "openPrice": str(c),
-                "highPrice": str(c * 1.01),
-                "lowPrice": str(c * 0.99),
-                "closePrice": str(c),
-                "volume": str(volume),
-                "currency": "KRW",
-            }
-        )
-    return list(reversed(out))  # API 는 최신순일 수 있으므로 역순으로 준다
+def candle(d, o, h, low, c, v):
+    return {
+        "timestamp": f"{d.isoformat()}T00:00:00+09:00",
+        "openPrice": str(o), "highPrice": str(h), "lowPrice": str(low), "closePrice": str(c),
+        "volume": str(v), "currency": "KRW",
+    }
 
 
-def zigzag(n, start=10_000.0):
-    """등락을 반복하며 완만히 오르는 가격 (RSI 약 58)."""
-    steps = [1.015, 0.99, 1.01, 0.992]
-    out = [start]
-    for i in range(n - 1):
-        out.append(out[-1] * steps[i % 4])
-    return out
+def history(today_bar, days=30, base=10_000.0):
+    """과거 30일은 완만한 등락, 마지막은 오늘(장중) 봉. API 처럼 최신순으로 반환."""
+    out, price = [], base
+    steps = [1.004, 0.997, 1.003, 0.998]
+    for i in range(days):
+        d = TODAY - timedelta(days=days - i)
+        price *= steps[i % 4]
+        out.append(candle(d, price, price * 1.01, price * 0.99, price, 1_000_000))
+    o, h, low, c, v = today_bar
+    out.append(candle(TODAY, o, h, low, c, v))
+    return list(reversed(out))
 
 
 class FakeClient:
-    """토스증권 API 흉내. 주문은 Broker(dry_run=True)가 처리하므로 시세만 제공."""
-
-    def __init__(self, prices):
-        self.prices = dict(prices)
-        self.candles = {}
-        self.stocks = {}
+    def __init__(self, prices=None):
+        self.prices = dict(prices or {})
+        self.candles, self.stocks, self.rankings = {}, {}, []
 
     def get_prices(self, symbols):
         return [{"symbol": s, "lastPrice": str(self.prices[s]), "currency": "KRW"} for s in symbols if s in self.prices]
@@ -53,171 +46,185 @@ class FakeClient:
     def get_stocks(self, symbols):
         return [self.stocks[s] for s in symbols if s in self.stocks]
 
-    def get_candles(self, symbol, interval="1d", count=120):
+    def get_candles(self, symbol, interval="1d", count=60):
         return self.candles[symbol]
 
+    def get_rankings(self, ranking_type, duration):
+        return self.rankings
 
-def trading_day(today: date, prev: date, nxt: date) -> TradingDay:
-    t = datetime(today.year, today.month, today.day, tzinfo=KST)
-    return TradingDay(
-        today=today,
-        is_open=True,
-        previous_business_day=prev,
-        next_business_day=nxt,
-        market_open=t.replace(hour=9),
-        closing_auction_start=t.replace(hour=15, minute=20),
-        market_close=t.replace(hour=15, minute=30),
-    )
-
-
-TUE = trading_day(date(2026, 9, 15), date(2026, 9, 14), date(2026, 9, 16))
-WED = trading_day(date(2026, 9, 16), date(2026, 9, 15), date(2026, 9, 17))
-FRI = trading_day(date(2026, 9, 18), date(2026, 9, 17), date(2026, 9, 21))
+    def add(self, sym, change, amount, today_bar, **stock):
+        self.rankings.append({
+            "symbol": sym, "tradingAmount": str(amount), "tradingVolume": "0",
+            "price": {"lastPrice": str(today_bar[3]), "basePrice": "10000", "changeRate": str(change)},
+        })
+        self.stocks[sym] = {"symbol": sym, "name": f"종목{sym}", "status": "ACTIVE", "securityType": "STOCK",
+                            "isCommonShare": True, "koreanMarketDetail": {}, **stock}
+        self.candles[sym] = history(today_bar)
 
 
 class SelectorTest(unittest.TestCase):
-    def test_uptrend_passes_downtrend_fails(self):
-        up = zigzag(80)
-        down = [20_000 * (0.997**i) for i in range(80)]
-        m_up = compute_metrics(parse_candles(make_candles(up, volume=1_000_000)))
-        m_down = compute_metrics(parse_candles(make_candles(down, volume=1_000_000)))
-        self.assertIsNone(passes_filters(m_up, 100_000, 1e9, 15), m_up)
-        self.assertEqual(passes_filters(m_down, 100_000, 1e9, 15), "정배열 아님")
-        # 주가가 종목당 예산보다 비싸면 제외
-        self.assertIsNotNone(passes_filters(m_up, 5_000, 1e9, 15))
+    def test_closing_bet_filters(self):
+        c = FakeClient()
+        strong = (10_100, 10_700, 10_050, 10_650, 3_000_000)  # 양봉, 고가 근처 마감, 거래량 3배
+        c.add("000001", 0.065, 20e9, strong)
+        c.add("000002", 0.065, 30e9, (10_100, 10_700, 10_050, 10_600, 5_000_000))  # 더 강함
+        c.add("000003", 0.065, 20e9, (10_100, 11_800, 10_050, 10_650, 3_000_000))  # 긴 윗꼬리
+        c.add("000004", 0.065, 20e9, (10_100, 10_700, 10_050, 10_650, 1_200_000))  # 거래량 부족
+        c.add("000005", 0.25, 20e9, strong)  # 등락률 과다 (상한가 근처)
+        c.add("000006", 0.065, 5e9, strong)  # 거래대금 부족
+        c.add("000007", 0.065, 20e9, strong, koreanMarketDetail={"krxTradingSuspended": True})  # 거래정지
+        c.add("000008", 0.065, 20e9, (10_700, 10_750, 10_500, 10_650, 3_000_000))  # 음봉
+        picks = select_stocks(c, set(), 10, SelectionParams(), TODAY, request_interval=0)
+        self.assertEqual([p.symbol for p in picks], ["000002", "000001"])
+        # 이미 보유 중인 종목은 제외, 빈 자리 수만큼만 선정
+        self.assertEqual([p.symbol for p in select_stocks(c, {"000002"}, 1, SelectionParams(), TODAY, 0)], ["000001"])
+        self.assertEqual(select_stocks(c, set(), 0, SelectionParams(), TODAY, 0), [])
+
+    def test_no_candidates_means_zero(self):
+        c = FakeClient()
+        c.add("000001", 0.01, 20e9, (10_000, 10_100, 9_950, 10_050, 3_000_000))  # +1%: 조건 미달
+        self.assertEqual(select_stocks(c, set(), 10, SelectionParams(), TODAY, 0), [])
 
     def test_score_ranking(self):
-        a = Candidate("A", "A", 1, {"ret20": 0.2, "vol_ratio": 2.0, "high_prox": 1.0})
-        b = Candidate("B", "B", 1, {"ret20": 0.1, "vol_ratio": 1.0, "high_prox": 0.9})
-        self.assertEqual([c.symbol for c in score_candidates([b, a])], ["A", "B"])
-
-    def test_select_excludes_today_bar_and_suspended(self):
-        closes = zigzag(80)
-        client = FakeClient({})
-        for sym in ("000001", "000002"):
-            client.candles[sym] = make_candles(closes)
-            client.stocks[sym] = {
-                "symbol": sym, "name": sym, "status": "ACTIVE", "securityType": "STOCK",
-                "isCommonShare": True, "koreanMarketDetail": {"krxTradingSuspended": sym == "000002"},
-            }
-        picks = select_stocks(client, ["000001", "000002"], 10, 100_000, 1e9, 15, date(2026, 7, 30), 0)
-        self.assertEqual([p.symbol for p in picks], ["000001"])
+        a = Candidate("A", "A", 1, {"trading_amount": 2, "vol_ratio": 3, "close_to_high": 1.0, "breakout": 1.1})
+        b = Candidate("B", "B", 1, {"trading_amount": 1, "vol_ratio": 2, "close_to_high": 0.98, "breakout": 1.0})
+        self.assertEqual([x.symbol for x in score_candidates([b, a])], ["A", "B"])
 
 
 class TickTest(unittest.TestCase):
-    def test_round_up_to_tick(self):
+    def test_round_to_tick(self):
         self.assertEqual(round_up_to_tick(1_999.2), 2_000)
         self.assertEqual(round_up_to_tick(12_341), 12_350)
-        self.assertEqual(round_up_to_tick(71_234), 71_300)
-        self.assertEqual(round_down_to_tick(9_550), 9_550)
+        self.assertEqual(round_down_to_tick(9_530), 9_530)
         self.assertEqual(round_down_to_tick(71_234), 71_200)
+
+
+def trading_day(d: date) -> TradingDay:
+    t = datetime(d.year, d.month, d.day, tzinfo=KST)
+    return TradingDay(d, True, d - timedelta(days=1), d + timedelta(days=1), t.replace(hour=9),
+                      t.replace(hour=15, minute=20), t.replace(hour=15, minute=30))
+
+
+MON, TUE, WED = trading_day(date(2026, 9, 21)), trading_day(date(2026, 9, 22)), trading_day(date(2026, 9, 23))
 
 
 class StrategyTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
-        tmp = Path(self.tmp.name)
-        (tmp / "universe.txt").write_text("\n".join(f"{i:06d}" for i in range(1, 13)))
-        self.cfg = Config(dry_run=True, universe_file=str(tmp / "universe.txt"), state_dir=str(tmp))
-        self.client = FakeClient({f"{i:06d}": 10_000 for i in range(1, 13)})
-        self.picked_universe = None
+        self.cfg = Config(dry_run=True, state_dir=self.tmp.name)
+        self.client = FakeClient({f"{i:06d}": 10_000 for i in range(1, 30)})
+        self.picks_per_day = {}
+        self.now = None
 
-        def fake_select(client, universe, top_n, **kw):
-            self.picked_universe = universe
-            return [Candidate(s, f"종목{s}", 10_000) for s in universe[:top_n]]
+        def fake_select(client, exclude, top_n, params, today):
+            syms = [s for s in self.picks_per_day.get(today, []) if s not in exclude][:top_n]
+            return [Candidate(s, f"종목{s}", 10_000) for s in syms]
 
-        self.strategy = WeeklyStrategy(self.cfg, Broker(self.client, dry_run=True), StateStore(self.cfg.state_file), fake_select)
+        self.strategy = ClosingBetStrategy(
+            self.cfg, Broker(self.client, dry_run=True), StateStore(self.cfg.state_file), fake_select,
+            clock=lambda: self.now,
+        )
 
     def tearDown(self):
         self.tmp.cleanup()
 
-    def at(self, day, hh, mm):
-        return day.market_open.replace(hour=hh, minute=mm)
+    def tick(self, day, hh, mm):
+        self.now = day.market_open.replace(hour=hh, minute=mm)
+        self.strategy.tick(self.now, day)
 
-    def test_full_week(self):
+    def test_buy_window_and_once_per_day(self):
         s = self.strategy
-        s.tick(self.at(TUE, 9, 5), TUE)  # 매수 시각(09:10) 전
+        self.picks_per_day[MON.today] = ["000001", "000002", "000003"]
+        self.tick(MON, 15, 9)
         self.assertEqual(len(s.state.positions), 0)
+        self.tick(MON, 15, 10)
+        self.assertEqual(sorted(s.state.positions), ["000001", "000002", "000003"])
+        p = s.state.positions["000001"]
+        self.assertEqual(p.quantity, 9)  # 10,050원 지정가 → 9주
+        self.tick(MON, 15, 15)  # 같은 날 재매수 없음
+        self.assertEqual(len(s.state.positions), 3)
 
-        s.tick(self.at(TUE, 9, 10), TUE)
-        self.assertEqual(len(s.state.positions), 10)
-        for p in s.state.positions.values():
-            # 10,000원 * 1.005 = 10,050원 지정가 → 9주 (종목당 10만원 이내)
-            self.assertEqual(p.quantity, 9)
-            self.assertLessEqual(p.quantity * 10_050, self.cfg.slot_budget)
+        # 15:20 이후(종가 단일가)에는 매수하지 않음
+        self.picks_per_day[TUE.today] = ["000004"]
+        self.tick(TUE, 15, 20)
+        self.assertNotIn("000004", s.state.positions)
 
-        s.tick(self.at(TUE, 10, 0), TUE)  # 같은 주 재매수 없음
-        self.assertEqual(len(s.state.history), 0)
+    def test_zero_picks(self):
+        self.tick(MON, 15, 10)
+        self.assertEqual(len(self.strategy.state.positions), 0)
+        self.assertEqual(self.strategy.state.last_buy_date, "2026-09-21")
 
-        # 손절(-4.5% = 9,550원) / 익절(+15% = 11,500원)
-        self.client.prices["000001"] = 9_550
-        self.client.prices["000002"] = 11_500
-        self.client.prices["000003"] = 9_560  # -4.4%: 유지
-        s.tick(self.at(WED, 11, 0), WED)
-        reasons = {h["symbol"]: h["reason"] for h in s.state.history}
-        self.assertEqual(reasons, {"000001": "STOP_LOSS", "000002": "TAKE_PROFIT"})
-        self.assertEqual(len(s.state.positions), 8)
-
-        # 매수 슬롯이 비어도 같은 주에는 추가 매수하지 않음
-        s.tick(self.at(WED, 11, 1), WED)
-        self.assertEqual(len(s.state.positions), 8)
-
-        # 금요일 15:09 에는 유지, 15:10(종가 단일가 10분 전) 전량 청산
-        s.tick(self.at(FRI, 15, 9), FRI)
-        self.assertEqual(len(s.state.positions), 8)
-        s.tick(self.at(FRI, 15, 10), FRI)
-        self.assertEqual(len(s.state.positions), 0)
-        self.assertEqual(sum(h["reason"] == "WEEKLY_CLOSE" for h in s.state.history), 8)
-
-    def test_conditional_orders_armed_and_cancelled(self):
+    def test_max_ten_positions_across_days(self):
         s = self.strategy
-        s.tick(self.at(TUE, 9, 10), TUE)
+        self.picks_per_day[MON.today] = [f"{i:06d}" for i in range(1, 8)]  # 7종목
+        self.tick(MON, 15, 10)
+        self.picks_per_day[TUE.today] = [f"{i:06d}" for i in range(8, 20)]  # 12종목 후보
+        self.tick(TUE, 15, 10)
+        self.assertEqual(len(s.state.positions), 10)  # 빈 자리 3개만 채움
+        self.assertIn("000010", s.state.positions)
+        self.assertNotIn("000011", s.state.positions)
+
+    def test_stop_market_and_take_profit_limit_via_conditional_orders(self):
+        s = self.strategy
+        self.picks_per_day[MON.today] = ["000001", "000002", "000003"]
+        self.tick(MON, 15, 10)
         conds = s.broker._dry_conditionals
         p1 = s.state.positions["000001"]
         stop, tp = conds[p1.stop_co_id], conds[p1.tp_co_id]
-        # 손절: 9,550원 감시 → 시장가 / 익절: 11,500원 감시 → 11,500원 지정가, 만료일은 그 주 금요일
-        self.assertEqual((stop["triggerPrice"], stop["orderType"], stop["orderPrice"]), (9_550, "MARKET", None))
+        # 손절: 10,000 × 0.953 = 9,530원 감시 → 시장가 / 익절: 11,500원 감시 → 11,500원 지정가
+        self.assertEqual((stop["triggerPrice"], stop["orderType"]), (9_530, "MARKET"))
         self.assertEqual((tp["triggerPrice"], tp["orderType"], tp["orderPrice"]), (11_500, "LIMIT", 11_500))
-        self.assertEqual(len(conds), 20)
+        tp_id = p1.tp_co_id
 
-        # 손절 발동 → 익절 조건주문은 봇이 취소
-        stop_id, tp_id = p1.stop_co_id, p1.tp_co_id
-        self.client.prices["000001"] = 9_500
-        s.tick(self.at(WED, 10, 0), WED)
-        self.assertNotIn("000001", s.state.positions)
-        self.assertEqual(conds[stop_id]["status"], "ORDERED")
-        self.assertEqual(conds[tp_id]["status"], "EXPIRED")  # 모의 취소 상태
-        self.assertEqual(s.state.history[-1]["reason"], "STOP_LOSS")
+        # 다음 날: 000001 손절, 000002 익절, 000003 (-4.6%) 계속 보유
+        self.client.prices.update({"000001": 9_500, "000002": 11_500, "000003": 9_540})
+        self.tick(TUE, 9, 1)
+        reasons = {h["symbol"]: h["reason"] for h in s.state.history}
+        self.assertEqual(reasons, {"000001": "STOP_LOSS", "000002": "TAKE_PROFIT"})
+        self.assertEqual(conds[tp_id]["status"], "EXPIRED")  # 손절 발동 → 익절 조건주문 취소
+        self.assertEqual(list(s.state.positions), ["000003"])
 
-        # 금요일 15:10: 남은 조건주문 전부 취소 후 시장가 매도
-        s.tick(self.at(FRI, 15, 10), FRI)
-        self.assertEqual(len(s.state.positions), 0)
-        self.assertFalse([c for c in conds.values() if c["status"] == "WATCHING"])
-        self.assertEqual(sum(h["reason"] == "WEEKLY_CLOSE" for h in s.state.history), 9)
+        # 걸릴 때까지 보유: 며칠이 지나도 유지
+        self.tick(WED, 15, 0)
+        self.assertIn("000003", s.state.positions)
+
+    def test_conditional_expired_is_rearmed(self):
+        s = self.strategy
+        self.picks_per_day[MON.today] = ["000001"]
+        self.tick(MON, 15, 10)
+        pos = s.state.positions["000001"]
+        old = pos.stop_co_id
+        s.broker._dry_conditionals[old]["status"] = "EXPIRED"
+        self.tick(TUE, 10, 0)
+        self.assertIsNotNone(pos.stop_co_id)
+        self.assertNotEqual(pos.stop_co_id, old)
 
     def test_bot_polling_when_conditional_disabled(self):
         self.cfg.use_conditional_orders = False
         s = self.strategy
-        s.tick(self.at(TUE, 9, 10), TUE)
+        self.picks_per_day[MON.today] = ["000001", "000002"]
+        self.tick(MON, 15, 10)
         self.assertFalse(s.broker._dry_conditionals)
-        self.client.prices["000001"] = 9_540
-        self.client.prices["000002"] = 11_600
-        s.tick(self.at(WED, 10, 0), WED)
-        reasons = {h["symbol"]: (h["reason"], h["exit_price"]) for h in s.state.history}
-        # 손절은 시장가(현재가), 익절은 11,500원 지정가 이상으로 체결
-        self.assertEqual(reasons["000001"], ("STOP_LOSS", 9_540))
-        self.assertEqual(reasons["000002"][0], "TAKE_PROFIT")
-        self.assertGreaterEqual(reasons["000002"][1], 11_500)
+        self.client.prices.update({"000001": 9_520, "000002": 11_600})
+        self.tick(TUE, 10, 0)
+        result = {h["symbol"]: (h["reason"], h["exit_price"]) for h in s.state.history}
+        self.assertEqual(result["000001"], ("STOP_LOSS", 9_520))
+        self.assertEqual(result["000002"][0], "TAKE_PROFIT")
+
+    def test_manual_liquidate_cancels_conditionals(self):
+        s = self.strategy
+        self.picks_per_day[MON.today] = ["000001", "000002"]
+        self.tick(MON, 15, 10)
+        s.liquidate_all("MANUAL")
+        self.assertEqual(len(s.state.positions), 0)
+        self.assertFalse([c for c in s.broker._dry_conditionals.values() if c["status"] == "WATCHING"])
 
     def test_state_persists_across_restart(self):
-        self.strategy.tick(self.at(TUE, 9, 10), TUE)
-        reloaded = WeeklyStrategy(self.cfg, Broker(self.client, dry_run=True), StateStore(self.cfg.state_file))
-        self.assertEqual(len(reloaded.state.positions), 10)
-        self.assertEqual(reloaded.state.last_buy_week, "2026-W38")
-
-
-if __name__ == "__main__":
-    unittest.main()
+        self.picks_per_day[MON.today] = ["000001"]
+        self.tick(MON, 15, 10)
+        reloaded = ClosingBetStrategy(self.cfg, Broker(self.client, dry_run=True), StateStore(self.cfg.state_file))
+        self.assertEqual(list(reloaded.state.positions), ["000001"])
+        self.assertEqual(reloaded.state.last_buy_date, "2026-09-21")
 
 
 class ClientConditionalOrderTest(unittest.TestCase):

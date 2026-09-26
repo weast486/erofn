@@ -43,20 +43,26 @@ class Config:
     dry_run: bool = True
 
     total_budget: int = 1_000_000
-    num_stocks: int = 10
-    stop_loss_pct: float = 4.5
+    num_stocks: int = 10  # 동시 보유 최대 종목 수 (종목당 = 총액 / 종목 수)
+    stop_loss_pct: float = 4.7
     take_profit_pct: float = 15.0
 
     # 손절/익절을 토스증권 조건주문으로 서버에 걸어둘지 (false 면 봇의 가격 감시만 사용)
     use_conditional_orders: bool = True
+    # 조건주문 만료일 (등록일 + N일). 만료되면 봇이 자동으로 다시 건다
+    conditional_expire_days: int = 30
 
-    buy_delay_minutes: int = 10
-    liquidation_time: str = "15:10"  # 금요일·공휴일 전날 전량 매도 시각 (KST)
+    # 종가배팅 매수 시간대 (KST). 15:20 부터는 종가 단일가라 그 전에 주문을 마친다
+    buy_start: str = "15:10"
+    buy_end: str = "15:20"
     monitor_interval_seconds: int = 60
 
-    universe_file: str = "universe.txt"
-    min_avg_traded_value: float = 3_000_000_000
-    max_5d_return_pct: float = 15.0
+    # 종목 선정 조건
+    min_change_pct: float = 2.0
+    max_change_pct: float = 20.0
+    min_trading_amount: float = 10_000_000_000
+    min_volume_ratio: float = 2.0
+    min_close_to_high: float = 0.97
 
     state_dir: str = "state"
     log_dir: str = "logs"
@@ -74,27 +80,30 @@ class Config:
     @classmethod
     def from_env(cls) -> "Config":
         seq = os.environ.get("TOSS_ACCOUNT_SEQ", "").strip()
+
+        def num(name: str, attr: str, typ=float):
+            return typ(_get(name, str(getattr(cls, attr))))
+
         return cls(
             client_id=os.environ.get("TOSS_CLIENT_ID", ""),
             client_secret=os.environ.get("TOSS_CLIENT_SECRET", ""),
             account_seq=int(seq) if seq else None,
             base_url=_get("TOSS_BASE_URL", cls.base_url),
             dry_run=_bool(os.environ.get("DRY_RUN"), True),
-            total_budget=int(_get("TOTAL_BUDGET", str(cls.total_budget))),
-            num_stocks=int(_get("NUM_STOCKS", str(cls.num_stocks))),
-            stop_loss_pct=float(_get("STOP_LOSS_PCT", str(cls.stop_loss_pct))),
-            take_profit_pct=float(_get("TAKE_PROFIT_PCT", str(cls.take_profit_pct))),
+            total_budget=num("TOTAL_BUDGET", "total_budget", int),
+            num_stocks=num("NUM_STOCKS", "num_stocks", int),
+            stop_loss_pct=num("STOP_LOSS_PCT", "stop_loss_pct"),
+            take_profit_pct=num("TAKE_PROFIT_PCT", "take_profit_pct"),
             use_conditional_orders=_bool(os.environ.get("USE_CONDITIONAL_ORDERS"), True),
-            buy_delay_minutes=int(_get("BUY_DELAY_MINUTES", str(cls.buy_delay_minutes))),
-            liquidation_time=_get("LIQUIDATION_TIME", cls.liquidation_time),
-            monitor_interval_seconds=int(
-                _get("MONITOR_INTERVAL_SECONDS", str(cls.monitor_interval_seconds))
-            ),
-            universe_file=_get("UNIVERSE_FILE", cls.universe_file),
-            min_avg_traded_value=float(
-                _get("MIN_AVG_TRADED_VALUE", str(cls.min_avg_traded_value))
-            ),
-            max_5d_return_pct=float(_get("MAX_5D_RETURN_PCT", str(cls.max_5d_return_pct))),
+            conditional_expire_days=num("CONDITIONAL_EXPIRE_DAYS", "conditional_expire_days", int),
+            buy_start=_get("BUY_START", cls.buy_start),
+            buy_end=_get("BUY_END", cls.buy_end),
+            monitor_interval_seconds=num("MONITOR_INTERVAL_SECONDS", "monitor_interval_seconds", int),
+            min_change_pct=num("MIN_CHANGE_PCT", "min_change_pct"),
+            max_change_pct=num("MAX_CHANGE_PCT", "max_change_pct"),
+            min_trading_amount=num("MIN_TRADING_AMOUNT", "min_trading_amount"),
+            min_volume_ratio=num("MIN_VOLUME_RATIO", "min_volume_ratio"),
+            min_close_to_high=num("MIN_CLOSE_TO_HIGH", "min_close_to_high"),
             state_dir=_get("STATE_DIR", cls.state_dir),
             log_dir=_get("LOG_DIR", cls.log_dir),
         )

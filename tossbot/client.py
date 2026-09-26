@@ -196,6 +196,28 @@ class TossClient:
         )
         return (result or {}).get("candles", [])
 
+    def get_rankings(
+        self,
+        ranking_type: str = "MARKET_TRADING_AMOUNT",
+        duration: str = "realtime",
+        market: str = "KR",
+        count: int = 100,
+        exclude_investment_caution: bool = True,
+    ) -> list[dict]:
+        """시장 랭킹 (상위 100위). ranking_type: MARKET_TRADING_AMOUNT / MARKET_TRADING_VOLUME / TOP_GAINERS 등."""
+        result = self._request(
+            "GET",
+            "/api/v1/rankings",
+            params={
+                "type": ranking_type,
+                "marketCountry": market,
+                "duration": duration,
+                "count": count,
+                "excludeInvestmentCaution": str(exclude_investment_caution).lower(),
+            },
+        )
+        return (result or {}).get("rankings", [])
+
     def get_market_calendar_kr(self, date: str | None = None) -> dict:
         params = {"date": date} if date else None
         return self._request("GET", "/api/v1/market-calendar/KR", params=params)

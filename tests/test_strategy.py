@@ -56,6 +56,8 @@ class SelectorTest(unittest.TestCase):
         self.assertIn("급등 없음", analyze("A", "A", parse_candles(closes_to_candles(too_old)), TODAY, p)[1])
         gave_back = surge_series(days_after=(0.9, 0.9))
         self.assertEqual(analyze("A", "A", parse_candles(closes_to_candles(gave_back)), TODAY, p)[1], "급등분 모두 반납")
+        below_ma = surge_series(surge_pct=0.20, days_after=(0.95, 0.95, 0.95))  # 전일 종가가 이미 7일선 아래
+        self.assertIn("7일선 아래", analyze("A", "A", parse_candles(closes_to_candles(below_ma)), TODAY, p)[1])
         pricey = [c * 20 for c in surge_series()]
         self.assertIn("예산 초과", analyze("A", "A", parse_candles(closes_to_candles(pricey)), TODAY, p)[1])
         thin = parse_candles(closes_to_candles(surge_series()))
@@ -63,13 +65,13 @@ class SelectorTest(unittest.TestCase):
             b.volume = 1_000
         self.assertEqual(analyze("A", "A", thin, TODAY, p)[1], "거래대금 부족")
 
-    def test_entry_signal_near_ma7(self):
+    def test_entry_signal_touch_ma7(self):
         p = PullbackParams()
         item = WatchItem("A", "A", TODAY, 0.12, pre_surge_close=8_000, prev_closes_sum=6 * 10_000)
-        self.assertTrue(entry_signal(item, 10_000, p)[0])  # 7일선 = 10,000 → 괴리 0%
-        self.assertTrue(entry_signal(item, 10_200, p)[0])  # +1.7%
-        self.assertFalse(entry_signal(item, 10_600, p)[0])  # +5% 위: 아직 덜 눌림
-        self.assertFalse(entry_signal(item, 9_600, p)[0])  # -3.4%: 이미 이탈
+        self.assertTrue(entry_signal(item, 10_000, p)[0])  # 7일선 = 10,000 에 정확히 터치
+        self.assertFalse(entry_signal(item, 10_050, p)[0])  # 아직 7일선 위 (7일선 10,007)
+        self.assertTrue(entry_signal(item, 9_900, p)[0])  # 살짝 뚫음 (7일선 9,986 대비 -0.9%)
+        self.assertFalse(entry_signal(item, 9_800, p)[0])  # -1.7%: 이미 이탈
         low_base = WatchItem("A", "A", TODAY, 0.12, pre_surge_close=10_100, prev_closes_sum=6 * 10_000)
         self.assertFalse(entry_signal(low_base, 10_000, p)[0])  # 급등 전 가격 아래
 
@@ -145,10 +147,13 @@ class StrategyTest(unittest.TestCase):
         s = self.strategy
         self.tick(MON, 9, 0)
         self.assertEqual(len(s.state.positions), 0)
-        self.client.prices["000003"] = 10_100  # 7일선 부근 도달
+        self.client.prices["000003"] = 10_050  # 아직 7일선(10,007) 위
+        self.tick(MON, 11, 0)
+        self.assertEqual(len(s.state.positions), 0)
+        self.client.prices["000003"] = 10_000  # 7일선 터치
         self.tick(MON, 13, 47)  # 시간대 상관없이 장중 아무 때나
         self.assertEqual(list(s.state.positions), ["000003"])
-        self.assertEqual(s.state.positions["000003"].quantity, 9)  # 10,150원 지정가 → 9주
+        self.assertEqual(s.state.positions["000003"].quantity, 9)  # 10,050원 지정가 → 9주
         self.assertEqual(self.builds, 1)  # 감시 목록은 하루 한 번
         self.tick(MON, 14, 0)
         self.assertEqual(len(s.state.positions), 1)  # 보유 중인 종목은 재매수 없음

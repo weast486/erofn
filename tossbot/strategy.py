@@ -1,6 +1,6 @@
 """눌림목 전략.
 
-- 매수: 최근 급등(하루 +10% 이상)한 종목이 7일선 부근(±2%)까지 내려오면, 장중 언제든 종목당 10만원 매수
+- 매수: 최근 급등(하루 +10% 이상)한 종목이 7일선을 터치하면, 장중 언제든 종목당 10만원 매수
         (동시 보유 최대 10종목. 매도한 종목은 일정 기간 재매수하지 않음)
 - 매수 체결 즉시 토스증권 조건주문(SINGLE) 2건을 서버에 등록
     · 손절: 평균 체결가 -4.7% 도달 시 시장가 매도
@@ -49,7 +49,7 @@ def params_from_config(cfg: Config) -> PullbackParams:
         surge_pct=cfg.surge_pct,
         surge_lookback_days=cfg.surge_lookback_days,
         ma_period=cfg.ma_period,
-        ma_band_pct=cfg.ma_band_pct,
+        ma_max_break_pct=cfg.ma_max_break_pct,
         require_ma_rising=cfg.require_ma_rising,
         min_avg_trading_amount=cfg.min_avg_trading_amount,
     )

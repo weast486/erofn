@@ -5,13 +5,16 @@
    조건:
      - 최근 SURGE_LOOKBACK_DAYS 거래일 안에 하루 +SURGE_PCT% 이상 오른 날(급등일)이 있음
      - 급등분을 다 반납하지 않음: 전일 종가 > 급등 전날 종가
+     - 전일 종가가 7일선 위: 오늘 위에서 내려와 7일선에 닿는 경우만 잡기 위함
      - 7일선 상승 중 (REQUIRE_MA_RISING): 전일 7일선 >= 5거래일 전 7일선
      - 20일 평균 거래대금 >= MIN_AVG_TRADING_AMOUNT (유동성)
      - 1주 가격 <= 종목당 예산, 거래 가능 보통주
 
 2) 매수 신호 (장중 매 주기)
    실시간 7일선 = (직전 6거래일 종가 합 + 현재가) / 7
-   현재가가 실시간 7일선의 ±MA_BAND_PCT% 안이면 '7일선 부근 도달'로 보고 매수.
+   현재가 <= 실시간 7일선 이면 '7일선 터치'로 보고 매수.
+   단, 7일선보다 MA_MAX_BREAK_PCT% 넘게 아래면 이미 이탈한 것으로 보고 매수하지 않는다
+   (감시 주기 사이에 선을 살짝 뚫고 내려간 경우까지만 터치로 인정).
    동시에 여러 종목이 신호를 내면 급등폭이 큰 순서로 빈 자리만큼 매수.
 
 ※ 어떤 규칙도 수익을 보장하지 않는다. DRY_RUN 으로 충분히 검증한 뒤 사용할 것.
@@ -44,7 +47,7 @@ class PullbackParams:
     surge_pct: float = 10.0
     surge_lookback_days: int = 10
     ma_period: int = 7
-    ma_band_pct: float = 2.0
+    ma_max_break_pct: float = 1.5
     require_ma_rising: bool = True
     min_avg_trading_amount: float = 3_000_000_000
 
@@ -103,6 +106,8 @@ def analyze(symbol: str, name: str, bars: list[Bar], today: date, p: PullbackPar
 
     if closes[-1] <= pre_surge_close:
         return None, "급등분 모두 반납"
+    if closes[-1] <= _sma(closes, n):
+        return None, f"전일 종가가 {n}일선 아래 (이미 터치/이탈)"
     if p.require_ma_rising and _sma(closes, n) < _sma(closes[:-5], n):
         return None, f"{n}일선 하락 중"
     avg_amount = sum(b.close * b.volume for b in bars[-20:]) / 20
@@ -124,10 +129,10 @@ def analyze(symbol: str, name: str, bars: list[Bar], today: date, p: PullbackPar
 
 
 def entry_signal(item: WatchItem, price: float, p: PullbackParams) -> tuple[bool, float]:
-    """현재가가 실시간 이평선 ±band 안이면 True. (신호, 실시간 이평)."""
+    """현재가가 실시간 이평선에 닿았으면(이하) True. 단 이평선보다 max_break 넘게 아래면 False. (신호, 실시간 이평)."""
     ma = item.live_ma(price)
-    band = p.ma_band_pct / 100
-    ok = ma * (1 - band) <= price <= ma * (1 + band) and price > item.pre_surge_close and price <= p.slot_budget
+    floor = ma * (1 - p.ma_max_break_pct / 100)
+    ok = floor <= price <= ma and price > item.pre_surge_close and price <= p.slot_budget
     return ok, ma
 
 

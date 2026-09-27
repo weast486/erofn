@@ -103,9 +103,9 @@ def cmd_liquidate(cfg: Config, _c, strategy: PullbackStrategy) -> None:
 
 def cmd_run(cfg: Config, client: TossClient, strategy: PullbackStrategy) -> None:
     log.info(
-        "눌림목 자동매매 시작 [%s] +%s%% 급등 후 %d일선 ±%s%% 도달 시 매수 (%s~%s), 최대 %d종목 x %s원, "
+        "눌림목 자동매매 시작 [%s] +%s%% 급등 후 %d일선 터치 시 매수 (이탈 한도 -%s%%) (%s~%s), 최대 %d종목 x %s원, "
         "손절 -%s%% 익절 +%s%%",
-        "DRY_RUN" if cfg.dry_run else "LIVE", cfg.surge_pct, cfg.ma_period, cfg.ma_band_pct,
+        "DRY_RUN" if cfg.dry_run else "LIVE", cfg.surge_pct, cfg.ma_period, cfg.ma_max_break_pct,
         cfg.buy_start, cfg.buy_end, cfg.num_stocks, f"{cfg.slot_budget:,}", cfg.stop_loss_pct, cfg.take_profit_pct,
     )
     cached: TradingDay | None = None

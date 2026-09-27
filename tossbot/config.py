@@ -61,7 +61,7 @@ class Config:
     surge_pct: float = 10.0  # 급등 기준: 하루 상승률 %
     surge_lookback_days: int = 10  # 최근 N거래일 안의 급등만 인정
     ma_period: int = 7  # 7일선
-    ma_band_pct: float = 2.0  # 이평선 ±N% 안이면 '부근 도달'
+    ma_max_break_pct: float = 1.5  # 현재가 <= 이평선이면 터치. 단 N% 넘게 아래면 이탈로 보고 매수 안 함
     require_ma_rising: bool = True  # 이평선이 상승 중인 종목만
     min_avg_trading_amount: float = 3_000_000_000  # 20일 평균 거래대금 하한
     rebuy_cooldown_days: int = 5  # 매도한 종목은 N일 동안 다시 사지 않음
@@ -104,7 +104,7 @@ class Config:
             surge_pct=num("SURGE_PCT", "surge_pct"),
             surge_lookback_days=num("SURGE_LOOKBACK_DAYS", "surge_lookback_days", int),
             ma_period=num("MA_PERIOD", "ma_period", int),
-            ma_band_pct=num("MA_BAND_PCT", "ma_band_pct"),
+            ma_max_break_pct=num("MA_MAX_BREAK_PCT", "ma_max_break_pct"),
             require_ma_rising=_bool(os.environ.get("REQUIRE_MA_RISING"), True),
             min_avg_trading_amount=num("MIN_AVG_TRADING_AMOUNT", "min_avg_trading_amount"),
             rebuy_cooldown_days=num("REBUY_COOLDOWN_DAYS", "rebuy_cooldown_days", int),

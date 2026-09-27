@@ -1,7 +1,7 @@
-"""종가배팅 전략.
+"""눌림목 전략.
 
-- 매수: 매 거래일 15:10~15:20, 익일 상승이 기대되는 종목을 0~10개 선정해 종목당 10만원 매수
-        (동시 보유 최대 10종목. 이미 보유 중인 종목 수만큼 새 매수가 줄어든다)
+- 매수: 최근 급등(하루 +10% 이상)한 종목이 7일선 부근(±2%)까지 내려오면, 장중 언제든 종목당 10만원 매수
+        (동시 보유 최대 10종목. 매도한 종목은 일정 기간 재매수하지 않음)
 - 매수 체결 즉시 토스증권 조건주문(SINGLE) 2건을 서버에 등록
     · 손절: 평균 체결가 -4.7% 도달 시 시장가 매도
     · 익절: 평균 체결가 +15% 도달 시 지정가(+15% 가격) 매도
@@ -21,7 +21,7 @@ from typing import Callable
 from .broker import CONDITIONAL_DONE, TERMINAL_STATUSES, Broker, round_down_to_tick, round_up_to_tick
 from .config import KST, Config
 from .market_calendar import TradingDay
-from .selector import Candidate, SelectionParams, select_stocks
+from .selector import PullbackParams, WatchItem, build_watchlist, entry_signal
 from .state import Position, State, StateStore
 
 log = logging.getLogger(__name__)
@@ -30,6 +30,8 @@ log = logging.getLogger(__name__)
 BUY_LIMIT_SLIPPAGE = 0.005
 # 조건주문 등록 실패 시 재시도 횟수 (초과하면 봇 가격 감시로만 대응)
 MAX_ARM_FAILURES = 3
+# 감시 목록에 올랐던 급등 종목을 랭킹에서 빠진 뒤에도 추적하는 기간(일)
+SURGE_MEMORY_DAYS = 30
 
 
 def _dec(value) -> float | None:
@@ -41,21 +43,38 @@ def _at(day: date, hhmm: str) -> datetime:
     return datetime.combine(day, time(hh, mm), KST)
 
 
-class ClosingBetStrategy:
+def params_from_config(cfg: Config) -> PullbackParams:
+    return PullbackParams(
+        slot_budget=cfg.slot_budget,
+        surge_pct=cfg.surge_pct,
+        surge_lookback_days=cfg.surge_lookback_days,
+        ma_period=cfg.ma_period,
+        ma_band_pct=cfg.ma_band_pct,
+        require_ma_rising=cfg.require_ma_rising,
+        min_avg_trading_amount=cfg.min_avg_trading_amount,
+    )
+
+
+class PullbackStrategy:
     def __init__(
         self,
         cfg: Config,
         broker: Broker,
         store: StateStore,
-        selector=select_stocks,
-        clock: Callable[[], datetime] = lambda: datetime.now(KST),
+        watchlist_builder=build_watchlist,
     ):
         self.cfg = cfg
         self.broker = broker
         self.store = store
-        self.select = selector
-        self.clock = clock
+        self.build_watchlist = watchlist_builder
         self.state: State = store.load()
+        self.watchlist: dict[str, WatchItem] = {}
+        self.watch_date: date | None = None
+        self._tick_time: datetime | None = None
+
+    def now(self) -> datetime:
+        """현재 tick 시각 (tick 밖에서 호출되면 실제 현재 시각)."""
+        return self._tick_time or datetime.now(KST)
 
     # ------------------------------------------------------------ prices
     def stop_price(self, entry: float) -> int:
@@ -78,79 +97,100 @@ class ClosingBetStrategy:
         """스케줄러가 주기적으로 호출. 현재 시각에 해야 할 일을 판단해 실행한다."""
         if not day.is_open or now < day.market_open or now >= day.market_close:
             return
+        self._tick_time = now
         self.sync_orders()
         self.arm_protection(day.today)
         self.check_exits()
 
         start, end = self.buy_window(day)
-        if start <= now < end and self.state.last_buy_date != day.today.isoformat():
-            self.buy_daily(day, end)
+        if start <= now < end:
+            self.ensure_watchlist(day.today)
+            self.scan_and_buy(day.today)
 
     # ----------------------------------------------------------------- buy
-    def buy_daily(self, day: TradingDay, deadline: datetime) -> list[Candidate]:
+    def ensure_watchlist(self, today: date) -> None:
+        """하루 한 번 급등 종목 감시 목록을 만든다 (실패하면 예외 → 다음 주기에 재시도)."""
+        if self.watch_date == today:
+            return
+        horizon = today - timedelta(days=SURGE_MEMORY_DAYS)
+        self.state.surge_seen = {
+            s: d for s, d in self.state.surge_seen.items() if date.fromisoformat(d) >= horizon
+        }
+        self.watchlist = self.build_watchlist(
+            self.broker.client, set(self.state.surge_seen), params_from_config(self.cfg), today
+        )
+        self.watch_date = today
+        for symbol in self.watchlist:
+            self.state.surge_seen[symbol] = today.isoformat()
+        self.store.save(self.state)
+
+    def in_cooldown(self, symbol: str, today: date) -> bool:
+        for h in reversed(self.state.history):
+            if h["symbol"] == symbol:
+                closed = datetime.fromisoformat(h["closed_at"]).date()
+                return (today - closed).days < self.cfg.rebuy_cooldown_days
+        return False
+
+    def scan_and_buy(self, today: date) -> list[str]:
+        """감시 목록 종목의 현재가가 7일선 부근이면 매수. 매수한 종목 코드 목록 반환."""
         cfg = self.cfg
         slots = cfg.num_stocks - len(self.state.positions)
-        if slots <= 0:
-            log.info("이미 %d 종목 보유 중 (최대 %d), 오늘은 매수 없음", len(self.state.positions), cfg.num_stocks)
-            self._mark_bought(day)
+        if slots <= 0 or not self.watchlist:
             return []
-
-        params = SelectionParams(
-            slot_budget=cfg.slot_budget,
-            min_change_pct=cfg.min_change_pct,
-            max_change_pct=cfg.max_change_pct,
-            min_trading_amount=cfg.min_trading_amount,
-            min_volume_ratio=cfg.min_volume_ratio,
-            min_close_to_high=cfg.min_close_to_high,
-        )
-        # 선정 중 API 오류가 나면 예외가 전파되어 다음 주기(매수 시간대 안)에 다시 시도한다
-        picks = self.select(self.broker.client, set(self.state.positions), slots, params, day.today)
-        # 선정이 끝나면 오늘 매수 완료로 기록 (주문 도중 오류가 나도 같은 날 다시 매수하지 않음)
-        self._mark_bought(day)
-        log.info(
-            "오늘 종가배팅 %d 종목 (빈 자리 %d): %s",
-            len(picks), slots, ", ".join(f"{c.name}({c.symbol})" for c in picks) or "없음",
-        )
-        if not picks:
+        targets = [
+            w for s, w in self.watchlist.items()
+            if s not in self.state.positions and not self.in_cooldown(s, today)
+        ]
+        if not targets:
             return []
+        prices = self.broker.last_prices([w.symbol for w in targets])
+        params = params_from_config(cfg)
+        signals = []
+        for w in targets:
+            price = prices.get(w.symbol)
+            if price is None:
+                continue
+            ok, ma = entry_signal(w, float(price), params)
+            if ok:
+                signals.append((w, float(price), ma))
+        if not signals:
+            return []
+        signals.sort(key=lambda x: x[0].surge_pct, reverse=True)
 
-        prices = self.broker.last_prices([c.symbol for c in picks])
+        bought = []
         cash = self.broker.cash_buying_power()
-        for cand in picks:
-            if self.clock() >= deadline:
-                log.warning("매수 마감 시각(%s) 도달, 남은 %s 등은 매수하지 않음", deadline.strftime("%H:%M"), cand.symbol)
-                break
-            last = float(prices.get(cand.symbol, cand.close))
-            limit = round_up_to_tick(last * (1 + BUY_LIMIT_SLIPPAGE))
+        for w, price, ma in signals[:slots]:
+            limit = round_up_to_tick(price * (1 + BUY_LIMIT_SLIPPAGE))
             qty = cfg.slot_budget // limit
             if qty <= 0:
-                log.info("%s: 1주 가격(%s)이 종목당 예산 초과, 건너뜀", cand.symbol, limit)
                 continue
             if qty * limit > cash:
                 log.warning("매수 가능 금액 부족 (필요 %s, 가능 %s) - 매수 중단", qty * limit, cash)
                 break
+            log.info(
+                "눌림목 매수 %s %s: 현재가 %s, %d일선 %.0f (%s +%.1f%% 급등)",
+                w.symbol, w.name, f"{price:,.0f}", w.ma_period, ma, w.surge_date.strftime("%m/%d"), w.surge_pct * 100,
+            )
             try:
-                order_id = self.broker.buy_limit(cand.symbol, qty, limit)
+                order_id = self.broker.buy_limit(w.symbol, qty, limit)
             except Exception as exc:
-                log.error("%s 매수 주문 실패: %s", cand.symbol, exc)
+                log.error("%s 매수 주문 실패: %s", w.symbol, exc)
                 continue
             cash -= qty * limit
-            self.state.positions[cand.symbol] = Position(
-                symbol=cand.symbol,
-                name=cand.name,
-                opened_at=datetime.now(KST).isoformat(timespec="seconds"),
+            self.state.positions[w.symbol] = Position(
+                symbol=w.symbol,
+                name=w.name,
+                opened_at=self.now().isoformat(timespec="seconds"),
                 buy_order_id=order_id,
                 buy_open=True,
             )
+            bought.append(w.symbol)
             self.store.save(self.state)
 
-        self.sync_orders()
-        self.arm_protection(day.today)
-        return picks
-
-    def _mark_bought(self, day: TradingDay) -> None:
-        self.state.last_buy_date = day.today.isoformat()
-        self.store.save(self.state)
+        if bought:
+            self.sync_orders()
+            self.arm_protection(today)
+        return bought
 
     # ------------------------------------------------- conditional orders
     def arm_protection(self, today: date) -> None:
@@ -378,7 +418,7 @@ class ClosingBetStrategy:
                 "quantity": filled,
                 "exit_price": exit_price,
                 "reason": reason,
-                "closed_at": datetime.now(KST).isoformat(timespec="seconds"),
+                "closed_at": self.now().isoformat(timespec="seconds"),
                 "return_pct": round((exit_price / pos.entry_price - 1) * 100, 2)
                 if exit_price and pos.entry_price
                 else None,

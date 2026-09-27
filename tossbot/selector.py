@@ -1,38 +1,31 @@
-"""종가배팅 종목 선정: 장 마감 직전(15:10) '익일 크게 오를 것으로 예상되는' 종목.
+"""눌림목 매매 종목 선정: 최근 급등(하루 +10% 이상)한 종목이 7일선 부근까지 눌리면 매수.
 
-후보군: 시장 전체 실시간 거래대금 상위 100 (`/api/v1/rankings`, 투자유의 종목 제외)
+1) 감시 목록 (하루 한 번, 장 시작 후 첫 주기에 작성)
+   후보: 상승률 상위 랭킹(1일·1주·1개월, 각 100위, 투자유의 제외) + 최근 봇이 본 급등 종목
+   조건:
+     - 최근 SURGE_LOOKBACK_DAYS 거래일 안에 하루 +SURGE_PCT% 이상 오른 날(급등일)이 있음
+     - 급등분을 다 반납하지 않음: 전일 종가 > 급등 전날 종가
+     - 7일선 상승 중 (REQUIRE_MA_RISING): 전일 7일선 >= 5거래일 전 7일선
+     - 20일 평균 거래대금 >= MIN_AVG_TRADING_AMOUNT (유동성)
+     - 1주 가격 <= 종목당 예산, 거래 가능 보통주
 
-필터 (모두 통과해야 후보)
-  1. 당일 등락률 MIN_CHANGE_PCT ~ MAX_CHANGE_PCT (기본 +2% ~ +20%, 상한가 근처 제외)
-  2. 당일 거래대금 >= MIN_TRADING_AMOUNT (기본 100억)
-  3. 1주 가격 <= 종목당 예산
-  4. 거래 가능 보통주 (상장·거래정지·정리매매·우선주·ETF 제외)
-  5. 양봉 (현재가 > 시가)
-  6. 고가 근처 마감: 현재가 / 당일 고가 >= MIN_CLOSE_TO_HIGH (기본 0.97, 윗꼬리 짧음)
-  7. 거래량 급증: 당일 거래량 / 20일 평균 거래량 >= MIN_VOLUME_RATIO (기본 2배)
-  8. 추세: 현재가 > 5일선, 현재가 > 20일선
+2) 매수 신호 (장중 매 주기)
+   실시간 7일선 = (직전 6거래일 종가 합 + 현재가) / 7
+   현재가가 실시간 7일선의 ±MA_BAND_PCT% 안이면 '7일선 부근 도달'로 보고 매수.
+   동시에 여러 종목이 신호를 내면 급등폭이 큰 순서로 빈 자리만큼 매수.
 
-점수 (후보 간 백분위 순위의 가중합)
-  - 당일 거래대금              30%
-  - 거래량 급증 배수           25%
-  - 고가 근처 마감 정도        25%
-  - 20일 고가 돌파 정도        20%
-
-통과 종목이 없으면 0종목 (그날은 매수하지 않음).
 ※ 어떤 규칙도 수익을 보장하지 않는다. DRY_RUN 으로 충분히 검증한 뒤 사용할 것.
 """
 from __future__ import annotations
 
 import logging
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import date, datetime
 
 from .config import KST
 
 log = logging.getLogger(__name__)
-
-WEIGHTS = {"trading_amount": 0.30, "vol_ratio": 0.25, "close_to_high": 0.25, "breakout": 0.20}
 
 
 @dataclass
@@ -46,22 +39,28 @@ class Bar:
 
 
 @dataclass
-class Candidate:
-    symbol: str
-    name: str
-    close: float
-    metrics: dict[str, float] = field(default_factory=dict)
-    score: float = 0.0
+class PullbackParams:
+    slot_budget: float = 100_000
+    surge_pct: float = 10.0
+    surge_lookback_days: int = 10
+    ma_period: int = 7
+    ma_band_pct: float = 2.0
+    require_ma_rising: bool = True
+    min_avg_trading_amount: float = 3_000_000_000
 
 
 @dataclass
-class SelectionParams:
-    slot_budget: float = 100_000
-    min_change_pct: float = 2.0
-    max_change_pct: float = 20.0
-    min_trading_amount: float = 10_000_000_000
-    min_volume_ratio: float = 2.0
-    min_close_to_high: float = 0.97
+class WatchItem:
+    symbol: str
+    name: str
+    surge_date: date
+    surge_pct: float
+    pre_surge_close: float  # 급등 전날 종가
+    prev_closes_sum: float  # 직전 (ma_period - 1) 거래일 종가 합 (실시간 이평 계산용)
+    ma_period: int = 7
+
+    def live_ma(self, price: float) -> float:
+        return (self.prev_closes_sum + price) / self.ma_period
 
 
 def parse_candles(raw: list[dict]) -> list[Bar]:
@@ -84,123 +83,99 @@ def _sma(values: list[float], n: int) -> float:
     return sum(values[-n:]) / n
 
 
-def compute_metrics(bars: list[Bar], today: date) -> dict[str, float] | None:
-    """당일(장중 미완성) 봉을 마지막으로 포함한 일봉으로 지표 계산."""
-    if len(bars) < 21 or bars[-1].day != today:
-        return None
-    cur, prev = bars[-1], bars[:-1]
+def analyze(symbol: str, name: str, bars: list[Bar], today: date, p: PullbackParams) -> tuple[WatchItem | None, str]:
+    """완성된 일봉(오늘 제외)으로 감시 목록 편입 여부 판단. (항목, 탈락 사유)."""
+    bars = [b for b in bars if b.day < today]
+    n = p.ma_period
+    if len(bars) < max(p.surge_lookback_days, n + 5, 20) + 1:
+        return None, "데이터 부족"
     closes = [b.close for b in bars]
-    avg_vol20 = _sma([b.volume for b in prev], 20)
-    return {
-        "close": cur.close,
-        "open": cur.open,
-        "change": cur.close / prev[-1].close - 1,
-        "close_to_high": cur.close / cur.high if cur.high else 0.0,
-        "vol_ratio": cur.volume / max(avg_vol20, 1.0),
-        "breakout": cur.close / max(b.high for b in prev[-20:]),
-        "ma5": _sma(closes, 5),
-        "ma20": _sma(closes, 20),
-    }
+
+    surge_idx = None
+    for i in range(len(bars) - 1, len(bars) - 1 - p.surge_lookback_days, -1):
+        if closes[i] / closes[i - 1] - 1 >= p.surge_pct / 100:
+            surge_idx = i
+            break
+    if surge_idx is None:
+        return None, f"최근 {p.surge_lookback_days}일 내 +{p.surge_pct:g}% 급등 없음"
+    pre_surge_close = closes[surge_idx - 1]
+    surge_pct = closes[surge_idx] / pre_surge_close - 1
+
+    if closes[-1] <= pre_surge_close:
+        return None, "급등분 모두 반납"
+    if p.require_ma_rising and _sma(closes, n) < _sma(closes[:-5], n):
+        return None, f"{n}일선 하락 중"
+    avg_amount = sum(b.close * b.volume for b in bars[-20:]) / 20
+    if avg_amount < p.min_avg_trading_amount:
+        return None, "거래대금 부족"
+    if closes[-1] > p.slot_budget * 1.1:
+        return None, "1주 가격이 종목당 예산 초과"
+
+    item = WatchItem(
+        symbol=symbol,
+        name=name,
+        surge_date=bars[surge_idx].day,
+        surge_pct=surge_pct,
+        pre_surge_close=pre_surge_close,
+        prev_closes_sum=sum(closes[-(n - 1):]),
+        ma_period=n,
+    )
+    return item, ""
 
 
-def passes_filters(m: dict[str, float], p: SelectionParams) -> str | None:
-    """통과하면 None, 탈락하면 사유 문자열."""
-    if m["close"] <= m["open"]:
-        return "음봉"
-    if m["close_to_high"] < p.min_close_to_high:
-        return f"윗꼬리 (고가 대비 {m['close_to_high']:.1%})"
-    if m["vol_ratio"] < p.min_volume_ratio:
-        return f"거래량 {m['vol_ratio']:.1f}배"
-    if not (m["close"] > m["ma5"] and m["close"] > m["ma20"]):
-        return "5일선/20일선 아래"
-    if m["close"] > p.slot_budget:
-        return "1주 가격이 종목당 예산 초과"
-    return None
+def entry_signal(item: WatchItem, price: float, p: PullbackParams) -> tuple[bool, float]:
+    """현재가가 실시간 이평선 ±band 안이면 True. (신호, 실시간 이평)."""
+    ma = item.live_ma(price)
+    band = p.ma_band_pct / 100
+    ok = ma * (1 - band) <= price <= ma * (1 + band) and price > item.pre_surge_close and price <= p.slot_budget
+    return ok, ma
 
 
-def _percentile_ranks(values: list[float]) -> list[float]:
-    if len(values) == 1:
-        return [1.0]
-    order = sorted(range(len(values)), key=lambda i: values[i])
-    ranks = [0.0] * len(values)
-    for rank, i in enumerate(order):
-        ranks[i] = rank / (len(values) - 1)
-    return ranks
-
-
-def score_candidates(cands: list[Candidate]) -> list[Candidate]:
-    if not cands:
-        return []
-    for key, weight in WEIGHTS.items():
-        for cand, r in zip(cands, _percentile_ranks([c.metrics[key] for c in cands])):
-            cand.score += weight * r
-    return sorted(cands, key=lambda c: c.score, reverse=True)
-
-
-def _ranking_pool(client, p: SelectionParams) -> dict[str, dict]:
-    """거래대금 상위 랭킹에서 등락률·거래대금·가격으로 1차 필터."""
-    rankings = client.get_rankings("MARKET_TRADING_AMOUNT", "realtime")
-    if not rankings:
-        rankings = client.get_rankings("MARKET_TRADING_AMOUNT", "1d")
-    pool = {}
-    for r in rankings:
-        price = r.get("price") or {}
-        rate = price.get("changeRate")
-        if rate is None:
-            continue
-        rate, last, amount = float(rate), float(price["lastPrice"]), float(r["tradingAmount"])
-        if not (p.min_change_pct / 100 <= rate <= p.max_change_pct / 100):
-            continue
-        if amount < p.min_trading_amount or last > p.slot_budget:
-            continue
-        pool[r["symbol"]] = {"change": rate, "trading_amount": amount, "last": last}
-    return pool
-
-
-def select_stocks(
+def build_watchlist(
     client,
-    exclude: set[str],
-    top_n: int,
-    params: SelectionParams,
+    extra_symbols: set[str],
+    p: PullbackParams,
     today: date,
     request_interval: float = 0.1,
-) -> list[Candidate]:
-    if top_n <= 0:
-        return []
-    pool = {s: v for s, v in _ranking_pool(client, params).items() if s not in exclude}
-    log.info("거래대금 상위 중 등락률·거래대금 조건 통과 %d 종목", len(pool))
+) -> dict[str, WatchItem]:
+    pool: set[str] = set(extra_symbols)
+    for duration in ("1d", "1w", "1mo"):
+        try:
+            for r in client.get_rankings("TOP_GAINERS", duration):
+                pool.add(r["symbol"])
+        except Exception as exc:
+            log.warning("상승률 랭킹(%s) 조회 실패: %s", duration, exc)
     if not pool:
-        return []
+        return {}
 
     names: dict[str, str] = {}
-    for info in client.get_stocks(list(pool)):
+    symbols = sorted(pool)
+    for info in client.get_stocks(symbols):
         kr = info.get("koreanMarketDetail") or {}
         if info.get("status") != "ACTIVE" or info.get("securityType") != "STOCK":
             continue
-        if not info.get("isCommonShare", True):
+        if not info.get("isCommonShare", True) or info.get("market") not in (None, "KOSPI", "KOSDAQ"):
             continue
         if kr.get("krxTradingSuspended") or kr.get("liquidationTrading"):
             continue
         names[info["symbol"]] = info.get("name", info["symbol"])
 
-    cands: list[Candidate] = []
+    watch: dict[str, WatchItem] = {}
     for symbol, name in names.items():
         try:
             bars = parse_candles(client.get_candles(symbol, "1d", 60))
-        except Exception as exc:  # 한 종목 실패로 전체 선정이 멈추지 않도록
+        except Exception as exc:
             log.warning("%s 캔들 조회 실패: %s", symbol, exc)
             continue
-        m = compute_metrics(bars, today)
-        if m is None:
-            continue
-        m["trading_amount"] = pool[symbol]["trading_amount"]
-        reason = passes_filters(m, params)
-        if reason:
-            log.info("  탈락 %s %s: %s", symbol, name, reason)
+        item, reason = analyze(symbol, name, bars, today, p)
+        if item:
+            watch[symbol] = item
         else:
-            cands.append(Candidate(symbol, name, m["close"], m))
+            log.debug("  제외 %s %s: %s", symbol, name, reason)
         time.sleep(request_interval)
-
-    ranked = score_candidates(cands)
-    log.info("최종 후보 %d 종목, %d 종목 선정", len(ranked), min(top_n, len(ranked)))
-    return ranked[:top_n]
+    log.info(
+        "눌림목 감시 목록 %d 종목 (후보 %d): %s",
+        len(watch), len(pool),
+        ", ".join(f"{w.name}(+{w.surge_pct:.0%} {w.surge_date:%m/%d})" for w in watch.values()) or "없음",
+    )
+    return watch

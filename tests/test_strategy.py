@@ -1,94 +1,92 @@
 import tempfile
 import unittest
 from datetime import date, datetime, timedelta
-from pathlib import Path
 
 from tossbot.broker import Broker, round_down_to_tick, round_up_to_tick
 from tossbot.client import TossClient
 from tossbot.config import KST, Config
 from tossbot.market_calendar import TradingDay
-from tossbot.selector import Candidate, SelectionParams, score_candidates, select_stocks
+from tossbot.selector import PullbackParams, WatchItem, analyze, build_watchlist, entry_signal, parse_candles
 from tossbot.state import StateStore
-from tossbot.strategy import ClosingBetStrategy
+from tossbot.strategy import PullbackStrategy
 
 TODAY = date(2026, 9, 22)
 
 
-def candle(d, o, h, low, c, v):
+def candle(d, c, v=1_000_000):
     return {
         "timestamp": f"{d.isoformat()}T00:00:00+09:00",
-        "openPrice": str(o), "highPrice": str(h), "lowPrice": str(low), "closePrice": str(c),
+        "openPrice": str(c), "highPrice": str(c * 1.01), "lowPrice": str(c * 0.99), "closePrice": str(c),
         "volume": str(v), "currency": "KRW",
     }
 
 
-def history(today_bar, days=30, base=10_000.0):
-    """과거 30일은 완만한 등락, 마지막은 오늘(장중) 봉. API 처럼 최신순으로 반환."""
-    out, price = [], base
-    steps = [1.004, 0.997, 1.003, 0.998]
-    for i in range(days):
-        d = TODAY - timedelta(days=days - i)
-        price *= steps[i % 4]
-        out.append(candle(d, price, price * 1.01, price * 0.99, price, 1_000_000))
-    o, h, low, c, v = today_bar
-    out.append(candle(TODAY, o, h, low, c, v))
+def closes_to_candles(closes, today_price=None):
+    """closes[-1] 이 어제 종가. today_price 가 있으면 오늘(장중) 봉도 추가. API 처럼 최신순."""
+    out = [candle(TODAY - timedelta(days=len(closes) - i), c) for i, c in enumerate(closes)]
+    if today_price:
+        out.append(candle(TODAY, today_price))
     return list(reversed(out))
 
 
-class FakeClient:
-    def __init__(self, prices=None):
-        self.prices = dict(prices or {})
-        self.candles, self.stocks, self.rankings = {}, {}, []
-
-    def get_prices(self, symbols):
-        return [{"symbol": s, "lastPrice": str(self.prices[s]), "currency": "KRW"} for s in symbols if s in self.prices]
-
-    def get_stocks(self, symbols):
-        return [self.stocks[s] for s in symbols if s in self.stocks]
-
-    def get_candles(self, symbol, interval="1d", count=60):
-        return self.candles[symbol]
-
-    def get_rankings(self, ranking_type, duration):
-        return self.rankings
-
-    def add(self, sym, change, amount, today_bar, **stock):
-        self.rankings.append({
-            "symbol": sym, "tradingAmount": str(amount), "tradingVolume": "0",
-            "price": {"lastPrice": str(today_bar[3]), "basePrice": "10000", "changeRate": str(change)},
-        })
-        self.stocks[sym] = {"symbol": sym, "name": f"종목{sym}", "status": "ACTIVE", "securityType": "STOCK",
-                            "isCommonShare": True, "koreanMarketDetail": {}, **stock}
-        self.candles[sym] = history(today_bar)
+def surge_series(surge_pct=0.12, days_after=(0.97, 0.98), n=40, base=10_000.0):
+    closes = [base * 1.002**i for i in range(n)]
+    closes.append(closes[-1] * (1 + surge_pct))
+    for r in days_after:
+        closes.append(closes[-1] * r)
+    return closes
 
 
 class SelectorTest(unittest.TestCase):
-    def test_closing_bet_filters(self):
-        c = FakeClient()
-        strong = (10_100, 10_700, 10_050, 10_650, 3_000_000)  # 양봉, 고가 근처 마감, 거래량 3배
-        c.add("000001", 0.065, 20e9, strong)
-        c.add("000002", 0.065, 30e9, (10_100, 10_700, 10_050, 10_600, 5_000_000))  # 더 강함
-        c.add("000003", 0.065, 20e9, (10_100, 11_800, 10_050, 10_650, 3_000_000))  # 긴 윗꼬리
-        c.add("000004", 0.065, 20e9, (10_100, 10_700, 10_050, 10_650, 1_200_000))  # 거래량 부족
-        c.add("000005", 0.25, 20e9, strong)  # 등락률 과다 (상한가 근처)
-        c.add("000006", 0.065, 5e9, strong)  # 거래대금 부족
-        c.add("000007", 0.065, 20e9, strong, koreanMarketDetail={"krxTradingSuspended": True})  # 거래정지
-        c.add("000008", 0.065, 20e9, (10_700, 10_750, 10_500, 10_650, 3_000_000))  # 음봉
-        picks = select_stocks(c, set(), 10, SelectionParams(), TODAY, request_interval=0)
-        self.assertEqual([p.symbol for p in picks], ["000002", "000001"])
-        # 이미 보유 중인 종목은 제외, 빈 자리 수만큼만 선정
-        self.assertEqual([p.symbol for p in select_stocks(c, {"000002"}, 1, SelectionParams(), TODAY, 0)], ["000001"])
-        self.assertEqual(select_stocks(c, set(), 0, SelectionParams(), TODAY, 0), [])
+    def test_analyze_surge_and_pullback(self):
+        p = PullbackParams()
+        item, reason = analyze("A", "A", parse_candles(closes_to_candles(surge_series(), today_price=9_000)), TODAY, p)
+        self.assertEqual(reason, "")
+        self.assertAlmostEqual(item.surge_pct, 0.12, places=6)
+        self.assertEqual(item.surge_date, TODAY - timedelta(days=3))
+        # 오늘(장중) 봉은 계산에서 제외: 직전 6거래일 종가 합
+        closes = surge_series()
+        self.assertAlmostEqual(item.prev_closes_sum, sum(closes[-6:]))
 
-    def test_no_candidates_means_zero(self):
-        c = FakeClient()
-        c.add("000001", 0.01, 20e9, (10_000, 10_100, 9_950, 10_050, 3_000_000))  # +1%: 조건 미달
-        self.assertEqual(select_stocks(c, set(), 10, SelectionParams(), TODAY, 0), [])
+    def test_analyze_rejections(self):
+        p = PullbackParams()
+        no_surge = [10_000 * 1.002**i for i in range(45)]
+        self.assertIn("급등 없음", analyze("A", "A", parse_candles(closes_to_candles(no_surge)), TODAY, p)[1])
+        too_old = surge_series(days_after=[1.0] * 12)
+        self.assertIn("급등 없음", analyze("A", "A", parse_candles(closes_to_candles(too_old)), TODAY, p)[1])
+        gave_back = surge_series(days_after=(0.9, 0.9))
+        self.assertEqual(analyze("A", "A", parse_candles(closes_to_candles(gave_back)), TODAY, p)[1], "급등분 모두 반납")
+        pricey = [c * 20 for c in surge_series()]
+        self.assertIn("예산 초과", analyze("A", "A", parse_candles(closes_to_candles(pricey)), TODAY, p)[1])
+        thin = parse_candles(closes_to_candles(surge_series()))
+        for b in thin:
+            b.volume = 1_000
+        self.assertEqual(analyze("A", "A", thin, TODAY, p)[1], "거래대금 부족")
 
-    def test_score_ranking(self):
-        a = Candidate("A", "A", 1, {"trading_amount": 2, "vol_ratio": 3, "close_to_high": 1.0, "breakout": 1.1})
-        b = Candidate("B", "B", 1, {"trading_amount": 1, "vol_ratio": 2, "close_to_high": 0.98, "breakout": 1.0})
-        self.assertEqual([x.symbol for x in score_candidates([b, a])], ["A", "B"])
+    def test_entry_signal_near_ma7(self):
+        p = PullbackParams()
+        item = WatchItem("A", "A", TODAY, 0.12, pre_surge_close=8_000, prev_closes_sum=6 * 10_000)
+        self.assertTrue(entry_signal(item, 10_000, p)[0])  # 7일선 = 10,000 → 괴리 0%
+        self.assertTrue(entry_signal(item, 10_200, p)[0])  # +1.7%
+        self.assertFalse(entry_signal(item, 10_600, p)[0])  # +5% 위: 아직 덜 눌림
+        self.assertFalse(entry_signal(item, 9_600, p)[0])  # -3.4%: 이미 이탈
+        low_base = WatchItem("A", "A", TODAY, 0.12, pre_surge_close=10_100, prev_closes_sum=6 * 10_000)
+        self.assertFalse(entry_signal(low_base, 10_000, p)[0])  # 급등 전 가격 아래
+
+    def test_build_watchlist_uses_rankings_and_memory(self):
+        class C:
+            def get_rankings(self, t, d):
+                return [{"symbol": "000001"}] if d == "1w" else []
+
+            def get_stocks(self, symbols):
+                base = {"status": "ACTIVE", "securityType": "STOCK", "isCommonShare": True, "market": "KOSDAQ"}
+                return [{"symbol": s, "name": s, **base} for s in symbols] + []
+
+            def get_candles(self, s, interval, count):
+                return closes_to_candles(surge_series() if s in ("000001", "000002") else [10_000.0] * 45)
+
+        watch = build_watchlist(C(), {"000002", "000003"}, PullbackParams(), TODAY, request_interval=0)
+        self.assertEqual(sorted(watch), ["000001", "000002"])
 
 
 class TickTest(unittest.TestCase):
@@ -97,6 +95,14 @@ class TickTest(unittest.TestCase):
         self.assertEqual(round_up_to_tick(12_341), 12_350)
         self.assertEqual(round_down_to_tick(9_530), 9_530)
         self.assertEqual(round_down_to_tick(71_234), 71_200)
+
+
+class FakeClient:
+    def __init__(self, prices):
+        self.prices = dict(prices)
+
+    def get_prices(self, symbols):
+        return [{"symbol": s, "lastPrice": str(self.prices[s]), "currency": "KRW"} for s in symbols if s in self.prices]
 
 
 def trading_day(d: date) -> TradingDay:
@@ -108,123 +114,97 @@ def trading_day(d: date) -> TradingDay:
 MON, TUE, WED = trading_day(date(2026, 9, 21)), trading_day(date(2026, 9, 22)), trading_day(date(2026, 9, 23))
 
 
+def watch(symbol, surge_pct=0.12):
+    # 직전 6일 종가 합 60,000 → 현재가 10,000 이면 7일선 10,000 (괴리 0%)
+    return WatchItem(symbol, f"종목{symbol}", date(2026, 9, 17), surge_pct, pre_surge_close=8_000,
+                     prev_closes_sum=60_000)
+
+
 class StrategyTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.cfg = Config(dry_run=True, state_dir=self.tmp.name)
-        self.client = FakeClient({f"{i:06d}": 10_000 for i in range(1, 30)})
-        self.picks_per_day = {}
-        self.now = None
+        # 기본은 7일선보다 10% 위 (아직 눌리지 않음)
+        self.client = FakeClient({f"{i:06d}": 11_000 for i in range(1, 30)})
+        self.watch = {f"{i:06d}": watch(f"{i:06d}", 0.10 + i / 100) for i in range(1, 16)}
+        self.builds = 0
 
-        def fake_select(client, exclude, top_n, params, today):
-            syms = [s for s in self.picks_per_day.get(today, []) if s not in exclude][:top_n]
-            return [Candidate(s, f"종목{s}", 10_000) for s in syms]
+        def builder(client, extra, params, today):
+            self.builds += 1
+            return dict(self.watch)
 
-        self.strategy = ClosingBetStrategy(
-            self.cfg, Broker(self.client, dry_run=True), StateStore(self.cfg.state_file), fake_select,
-            clock=lambda: self.now,
-        )
+        self.strategy = PullbackStrategy(self.cfg, Broker(self.client, dry_run=True), StateStore(self.cfg.state_file), builder)
 
     def tearDown(self):
         self.tmp.cleanup()
 
     def tick(self, day, hh, mm):
-        self.now = day.market_open.replace(hour=hh, minute=mm)
-        self.strategy.tick(self.now, day)
+        self.strategy.tick(day.market_open.replace(hour=hh, minute=mm), day)
 
-    def test_buy_window_and_once_per_day(self):
+    def test_buys_only_when_price_reaches_ma(self):
         s = self.strategy
-        self.picks_per_day[MON.today] = ["000001", "000002", "000003"]
-        self.tick(MON, 15, 9)
+        self.tick(MON, 9, 0)
         self.assertEqual(len(s.state.positions), 0)
-        self.tick(MON, 15, 10)
-        self.assertEqual(sorted(s.state.positions), ["000001", "000002", "000003"])
-        p = s.state.positions["000001"]
-        self.assertEqual(p.quantity, 9)  # 10,050원 지정가 → 9주
-        self.tick(MON, 15, 15)  # 같은 날 재매수 없음
-        self.assertEqual(len(s.state.positions), 3)
-
-        # 15:20 이후(종가 단일가)에는 매수하지 않음
-        self.picks_per_day[TUE.today] = ["000004"]
-        self.tick(TUE, 15, 20)
-        self.assertNotIn("000004", s.state.positions)
-
-    def test_zero_picks(self):
-        self.tick(MON, 15, 10)
-        self.assertEqual(len(self.strategy.state.positions), 0)
-        self.assertEqual(self.strategy.state.last_buy_date, "2026-09-21")
-
-    def test_max_ten_positions_across_days(self):
-        s = self.strategy
-        self.picks_per_day[MON.today] = [f"{i:06d}" for i in range(1, 8)]  # 7종목
-        self.tick(MON, 15, 10)
-        self.picks_per_day[TUE.today] = [f"{i:06d}" for i in range(8, 20)]  # 12종목 후보
-        self.tick(TUE, 15, 10)
-        self.assertEqual(len(s.state.positions), 10)  # 빈 자리 3개만 채움
-        self.assertIn("000010", s.state.positions)
-        self.assertNotIn("000011", s.state.positions)
-
-    def test_stop_market_and_take_profit_limit_via_conditional_orders(self):
-        s = self.strategy
-        self.picks_per_day[MON.today] = ["000001", "000002", "000003"]
-        self.tick(MON, 15, 10)
-        conds = s.broker._dry_conditionals
-        p1 = s.state.positions["000001"]
-        stop, tp = conds[p1.stop_co_id], conds[p1.tp_co_id]
-        # 손절: 10,000 × 0.953 = 9,530원 감시 → 시장가 / 익절: 11,500원 감시 → 11,500원 지정가
-        self.assertEqual((stop["triggerPrice"], stop["orderType"]), (9_530, "MARKET"))
-        self.assertEqual((tp["triggerPrice"], tp["orderType"], tp["orderPrice"]), (11_500, "LIMIT", 11_500))
-        tp_id = p1.tp_co_id
-
-        # 다음 날: 000001 손절, 000002 익절, 000003 (-4.6%) 계속 보유
-        self.client.prices.update({"000001": 9_500, "000002": 11_500, "000003": 9_540})
-        self.tick(TUE, 9, 1)
-        reasons = {h["symbol"]: h["reason"] for h in s.state.history}
-        self.assertEqual(reasons, {"000001": "STOP_LOSS", "000002": "TAKE_PROFIT"})
-        self.assertEqual(conds[tp_id]["status"], "EXPIRED")  # 손절 발동 → 익절 조건주문 취소
+        self.client.prices["000003"] = 10_100  # 7일선 부근 도달
+        self.tick(MON, 13, 47)  # 시간대 상관없이 장중 아무 때나
         self.assertEqual(list(s.state.positions), ["000003"])
+        self.assertEqual(s.state.positions["000003"].quantity, 9)  # 10,150원 지정가 → 9주
+        self.assertEqual(self.builds, 1)  # 감시 목록은 하루 한 번
+        self.tick(MON, 14, 0)
+        self.assertEqual(len(s.state.positions), 1)  # 보유 중인 종목은 재매수 없음
+        self.assertEqual(s.state.surge_seen["000003"], "2026-09-21")
 
-        # 걸릴 때까지 보유: 며칠이 지나도 유지
-        self.tick(WED, 15, 0)
-        self.assertIn("000003", s.state.positions)
+    def test_no_buy_after_1520(self):
+        self.client.prices["000001"] = 10_000
+        self.tick(MON, 15, 20)
+        self.assertEqual(len(self.strategy.state.positions), 0)
 
-    def test_conditional_expired_is_rearmed(self):
+    def test_slots_limited_and_bigger_surge_first(self):
         s = self.strategy
-        self.picks_per_day[MON.today] = ["000001"]
-        self.tick(MON, 15, 10)
-        pos = s.state.positions["000001"]
-        old = pos.stop_co_id
-        s.broker._dry_conditionals[old]["status"] = "EXPIRED"
+        for sym in self.watch:
+            self.client.prices[sym] = 10_000
+        self.tick(MON, 10, 0)
+        self.assertEqual(len(s.state.positions), 10)
+        # 급등폭 큰 순 (000015 가 가장 큼) 으로 10종목
+        self.assertEqual(sorted(s.state.positions), [f"{i:06d}" for i in range(6, 16)])
+
+    def test_stop_loss_then_cooldown(self):
+        s = self.strategy
+        self.client.prices["000001"] = 10_000
+        self.tick(MON, 10, 0)
+        conds = s.broker._dry_conditionals
+        p = s.state.positions["000001"]
+        self.assertEqual((conds[p.stop_co_id]["triggerPrice"], conds[p.stop_co_id]["orderType"]), (9_530, "MARKET"))
+        self.assertEqual((conds[p.tp_co_id]["triggerPrice"], conds[p.tp_co_id]["orderPrice"]), (11_500, 11_500))
+
+        self.client.prices["000001"] = 9_500
+        self.tick(MON, 11, 0)
+        self.assertNotIn("000001", s.state.positions)
+        self.assertEqual(s.state.history[-1]["reason"], "STOP_LOSS")
+        # 다시 7일선 부근이 와도 쿨다운(5일) 동안은 재매수하지 않음
+        self.client.prices["000001"] = 10_000
         self.tick(TUE, 10, 0)
-        self.assertIsNotNone(pos.stop_co_id)
-        self.assertNotEqual(pos.stop_co_id, old)
+        self.assertNotIn("000001", s.state.positions)
+        self.assertTrue(s.in_cooldown("000001", date(2026, 9, 25)))
+        self.assertFalse(s.in_cooldown("000001", date(2026, 9, 26)))
 
-    def test_bot_polling_when_conditional_disabled(self):
-        self.cfg.use_conditional_orders = False
+    def test_take_profit_and_hold_until_hit(self):
         s = self.strategy
-        self.picks_per_day[MON.today] = ["000001", "000002"]
-        self.tick(MON, 15, 10)
-        self.assertFalse(s.broker._dry_conditionals)
-        self.client.prices.update({"000001": 9_520, "000002": 11_600})
-        self.tick(TUE, 10, 0)
-        result = {h["symbol"]: (h["reason"], h["exit_price"]) for h in s.state.history}
-        self.assertEqual(result["000001"], ("STOP_LOSS", 9_520))
-        self.assertEqual(result["000002"][0], "TAKE_PROFIT")
-
-    def test_manual_liquidate_cancels_conditionals(self):
-        s = self.strategy
-        self.picks_per_day[MON.today] = ["000001", "000002"]
-        self.tick(MON, 15, 10)
-        s.liquidate_all("MANUAL")
-        self.assertEqual(len(s.state.positions), 0)
-        self.assertFalse([c for c in s.broker._dry_conditionals.values() if c["status"] == "WATCHING"])
+        self.client.prices["000002"] = 10_000
+        self.tick(MON, 10, 0)
+        self.client.prices["000002"] = 10_500  # +5%: 유지
+        self.tick(WED, 10, 0)
+        self.assertIn("000002", s.state.positions)
+        self.client.prices["000002"] = 11_500
+        self.tick(WED, 11, 0)
+        self.assertEqual(s.state.history[-1]["reason"], "TAKE_PROFIT")
 
     def test_state_persists_across_restart(self):
-        self.picks_per_day[MON.today] = ["000001"]
-        self.tick(MON, 15, 10)
-        reloaded = ClosingBetStrategy(self.cfg, Broker(self.client, dry_run=True), StateStore(self.cfg.state_file))
+        self.client.prices["000001"] = 10_000
+        self.tick(MON, 10, 0)
+        reloaded = PullbackStrategy(self.cfg, Broker(self.client, dry_run=True), StateStore(self.cfg.state_file))
         self.assertEqual(list(reloaded.state.positions), ["000001"])
-        self.assertEqual(reloaded.state.last_buy_date, "2026-09-21")
+        self.assertIn("000001", reloaded.state.surge_seen)
 
 
 class ClientConditionalOrderTest(unittest.TestCase):

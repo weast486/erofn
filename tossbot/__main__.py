@@ -1,7 +1,7 @@
 """CLI 진입점.
 
     python -m tossbot check        # API 연결/계좌/매수가능금액 확인
-    python -m tossbot select       # 지금 기준 종가배팅 후보만 출력 (주문 없음, 15시 무렵 실행)
+    python -m tossbot select       # 급등 종목 감시 목록과 7일선 대비 위치 출력 (주문 없음)
     python -m tossbot status       # 봇 보유 포지션 및 매매 이력
     python -m tossbot run          # 자동매매 상주 실행
     python -m tossbot liquidate    # 봇 보유 종목 즉시 전량 매도 (비상용)
@@ -19,9 +19,9 @@ from .broker import Broker
 from .client import TossClient
 from .config import KST, Config, load_dotenv
 from .market_calendar import TradingDay, trading_day_from_api
-from .selector import SelectionParams, select_stocks
+from .selector import build_watchlist, entry_signal
 from .state import StateStore
-from .strategy import ClosingBetStrategy
+from .strategy import PullbackStrategy, params_from_config
 
 log = logging.getLogger("tossbot")
 
@@ -39,9 +39,9 @@ def setup_logging(cfg: Config, verbose: bool) -> None:
         root.addHandler(handler)
 
 
-def build(cfg: Config) -> tuple[TossClient, ClosingBetStrategy]:
+def build(cfg: Config) -> tuple[TossClient, PullbackStrategy]:
     client = TossClient(cfg.client_id, cfg.client_secret, cfg.base_url, cfg.account_seq)
-    strategy = ClosingBetStrategy(cfg, Broker(client, cfg.dry_run), StateStore(cfg.state_file))
+    strategy = PullbackStrategy(cfg, Broker(client, cfg.dry_run), StateStore(cfg.state_file))
     return client, strategy
 
 
@@ -55,33 +55,33 @@ def cmd_check(cfg: Config, client: TossClient, _s) -> None:
     print("DRY_RUN:", cfg.dry_run)
 
 
-def cmd_select(cfg: Config, client: TossClient, strategy: ClosingBetStrategy) -> None:
-    """지금 시점 기준 종가배팅 후보 미리보기 (주문 없음). 장중 15시 무렵에 실행해야 의미가 있다."""
-    params = SelectionParams(
-        slot_budget=cfg.slot_budget,
-        min_change_pct=cfg.min_change_pct,
-        max_change_pct=cfg.max_change_pct,
-        min_trading_amount=cfg.min_trading_amount,
-        min_volume_ratio=cfg.min_volume_ratio,
-        min_close_to_high=cfg.min_close_to_high,
-    )
-    picks = select_stocks(
-        client, set(strategy.state.positions), cfg.num_stocks, params, datetime.now(KST).date()
-    )
-    print(f"{'순위':>4} {'종목':<16} {'현재가':>9} {'점수':>5} {'등락':>6} {'거래대금(억)':>10} {'거래량배':>7} {'고가대비':>7}")
-    for i, c in enumerate(picks, 1):
-        m = c.metrics
+def cmd_select(cfg: Config, client: TossClient, strategy: PullbackStrategy) -> None:
+    """급등 종목 감시 목록과 현재 7일선 대비 위치 출력 (주문 없음)."""
+    today = datetime.now(KST).date()
+    params = params_from_config(cfg)
+    watch = build_watchlist(client, set(strategy.state.surge_seen), params, today)
+    if not watch:
+        print("감시할 급등 종목이 없습니다.")
+        return
+    prices = {p["symbol"]: float(p["lastPrice"]) for p in client.get_prices(list(watch))}
+    print(f"{'종목':<16} {'급등일':>6} {'급등폭':>6} {'현재가':>9} {cfg.ma_period}일선 {'괴리':>6}  신호")
+    rows = []
+    for w in watch.values():
+        price = prices.get(w.symbol)
+        if price is None:
+            continue
+        ok, ma = entry_signal(w, price, params)
+        rows.append((price / ma - 1, w, price, ma, ok))
+    for gap, w, price, ma, ok in sorted(rows, key=lambda r: abs(r[0])):
         print(
-            f"{i:>4} {c.name[:10]+'('+c.symbol+')':<16} {c.close:>9,.0f} {c.score:>5.2f} {m['change']:>6.1%} "
-            f"{m['trading_amount']/1e8:>10,.0f} {m['vol_ratio']:>7.1f} {m['close_to_high']:>7.1%}"
+            f"{w.name[:10]+'('+w.symbol+')':<16} {w.surge_date:%m/%d} {w.surge_pct:>6.1%} {price:>9,.0f} "
+            f"{ma:>7,.0f} {gap:>+6.1%}  {'매수' if ok else ''}"
         )
-    if not picks:
-        print("조건을 통과한 종목이 없습니다 (오늘은 0종목 매수).")
 
 
-def cmd_status(cfg: Config, _c, strategy: ClosingBetStrategy) -> None:
+def cmd_status(cfg: Config, _c, strategy: PullbackStrategy) -> None:
     st = strategy.state
-    print(f"[{'DRY_RUN' if cfg.dry_run else 'LIVE'}] 마지막 매수일: {st.last_buy_date}, 보유 {len(st.positions)}/{cfg.num_stocks}")
+    print(f"[{'DRY_RUN' if cfg.dry_run else 'LIVE'}] 보유 {len(st.positions)}/{cfg.num_stocks}")
     for p in st.positions.values():
         print(
             f"  {p.symbol} {p.name} {p.quantity}주 @ {p.entry_price:,.0f} status={p.status} "
@@ -95,17 +95,18 @@ def cmd_status(cfg: Config, _c, strategy: ClosingBetStrategy) -> None:
             print(f"  {h['closed_at']} {h['symbol']} {h['name']} {h['reason']} {h.get('return_pct')}%")
 
 
-def cmd_liquidate(cfg: Config, _c, strategy: ClosingBetStrategy) -> None:
+def cmd_liquidate(cfg: Config, _c, strategy: PullbackStrategy) -> None:
     strategy.sync_orders()
     strategy.liquidate_all("MANUAL")
     cmd_status(cfg, _c, strategy)
 
 
-def cmd_run(cfg: Config, client: TossClient, strategy: ClosingBetStrategy) -> None:
+def cmd_run(cfg: Config, client: TossClient, strategy: PullbackStrategy) -> None:
     log.info(
-        "종가배팅 자동매매 시작 [%s] 매일 %s~%s 매수, 최대 %d종목 x %s원, 손절 -%s%% 익절 +%s%%",
-        "DRY_RUN" if cfg.dry_run else "LIVE", cfg.buy_start, cfg.buy_end, cfg.num_stocks,
-        f"{cfg.slot_budget:,}", cfg.stop_loss_pct, cfg.take_profit_pct,
+        "눌림목 자동매매 시작 [%s] +%s%% 급등 후 %d일선 ±%s%% 도달 시 매수 (%s~%s), 최대 %d종목 x %s원, "
+        "손절 -%s%% 익절 +%s%%",
+        "DRY_RUN" if cfg.dry_run else "LIVE", cfg.surge_pct, cfg.ma_period, cfg.ma_band_pct,
+        cfg.buy_start, cfg.buy_end, cfg.num_stocks, f"{cfg.slot_budget:,}", cfg.stop_loss_pct, cfg.take_profit_pct,
     )
     cached: TradingDay | None = None
     while True:
@@ -125,7 +126,7 @@ def cmd_run(cfg: Config, client: TossClient, strategy: ClosingBetStrategy) -> No
 
 
 def main(argv: list[str] | None = None) -> None:
-    parser = argparse.ArgumentParser(prog="tossbot", description="토스증권 종가배팅 자동매매 봇")
+    parser = argparse.ArgumentParser(prog="tossbot", description="토스증권 눌림목 자동매매 봇")
     parser.add_argument("command", choices=["check", "select", "status", "run", "liquidate"])
     parser.add_argument("--env", default=".env", help=".env 파일 경로")
     parser.add_argument("-v", "--verbose", action="store_true")

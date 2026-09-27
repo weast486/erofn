@@ -52,17 +52,19 @@ class Config:
     # 조건주문 만료일 (등록일 + N일). 만료되면 봇이 자동으로 다시 건다
     conditional_expire_days: int = 30
 
-    # 종가배팅 매수 시간대 (KST). 15:20 부터는 종가 단일가라 그 전에 주문을 마친다
-    buy_start: str = "15:10"
+    # 매수 가능 시간대 (KST). 15:20 부터는 종가 단일가라 그 전까지만 매수한다
+    buy_start: str = "09:00"
     buy_end: str = "15:20"
     monitor_interval_seconds: int = 60
 
-    # 종목 선정 조건
-    min_change_pct: float = 2.0
-    max_change_pct: float = 20.0
-    min_trading_amount: float = 10_000_000_000
-    min_volume_ratio: float = 2.0
-    min_close_to_high: float = 0.97
+    # 눌림목 조건
+    surge_pct: float = 10.0  # 급등 기준: 하루 상승률 %
+    surge_lookback_days: int = 10  # 최근 N거래일 안의 급등만 인정
+    ma_period: int = 7  # 7일선
+    ma_band_pct: float = 2.0  # 이평선 ±N% 안이면 '부근 도달'
+    require_ma_rising: bool = True  # 이평선이 상승 중인 종목만
+    min_avg_trading_amount: float = 3_000_000_000  # 20일 평균 거래대금 하한
+    rebuy_cooldown_days: int = 5  # 매도한 종목은 N일 동안 다시 사지 않음
 
     state_dir: str = "state"
     log_dir: str = "logs"
@@ -99,11 +101,13 @@ class Config:
             buy_start=_get("BUY_START", cls.buy_start),
             buy_end=_get("BUY_END", cls.buy_end),
             monitor_interval_seconds=num("MONITOR_INTERVAL_SECONDS", "monitor_interval_seconds", int),
-            min_change_pct=num("MIN_CHANGE_PCT", "min_change_pct"),
-            max_change_pct=num("MAX_CHANGE_PCT", "max_change_pct"),
-            min_trading_amount=num("MIN_TRADING_AMOUNT", "min_trading_amount"),
-            min_volume_ratio=num("MIN_VOLUME_RATIO", "min_volume_ratio"),
-            min_close_to_high=num("MIN_CLOSE_TO_HIGH", "min_close_to_high"),
+            surge_pct=num("SURGE_PCT", "surge_pct"),
+            surge_lookback_days=num("SURGE_LOOKBACK_DAYS", "surge_lookback_days", int),
+            ma_period=num("MA_PERIOD", "ma_period", int),
+            ma_band_pct=num("MA_BAND_PCT", "ma_band_pct"),
+            require_ma_rising=_bool(os.environ.get("REQUIRE_MA_RISING"), True),
+            min_avg_trading_amount=num("MIN_AVG_TRADING_AMOUNT", "min_avg_trading_amount"),
+            rebuy_cooldown_days=num("REBUY_COOLDOWN_DAYS", "rebuy_cooldown_days", int),
             state_dir=_get("STATE_DIR", cls.state_dir),
             log_dir=_get("LOG_DIR", cls.log_dir),
         )

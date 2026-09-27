@@ -24,6 +24,9 @@ class Position:
     tp_co_id: str | None = None  # 익절: 감시가 도달 시 지정가 매도
     stop_arm_failures: int = 0
     tp_arm_failures: int = 0
+    # 보유 거래일 수 (매수일 = 0). 거래일이 바뀔 때마다 1씩 증가
+    hold_days: int = 0
+    last_day: str = ""
 
 
 @dataclass

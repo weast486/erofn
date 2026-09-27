@@ -65,6 +65,11 @@ class Config:
     require_ma_rising: bool = True  # 이평선이 상승 중인 종목만
     min_avg_trading_amount: float = 3_000_000_000  # 20일 평균 거래대금 하한
     rebuy_cooldown_days: int = 5  # 매도한 종목은 N일 동안 다시 사지 않음
+    min_days_after_surge: int = 3  # 급등일로부터 N거래일째부터 매수 허용
+    pullback_volume_ratio: float = 0.5  # 급등 이후 평균 거래량 <= 급등일 거래량 x N
+    # 최대 보유 기간: 매수일로부터 N거래일째 TIME_EXIT_TIME 에 시장가 매도 (0 이면 제한 없음)
+    max_hold_days: int = 10
+    time_exit_time: str = "15:10"
 
     state_dir: str = "state"
     log_dir: str = "logs"
@@ -108,6 +113,10 @@ class Config:
             require_ma_rising=_bool(os.environ.get("REQUIRE_MA_RISING"), True),
             min_avg_trading_amount=num("MIN_AVG_TRADING_AMOUNT", "min_avg_trading_amount"),
             rebuy_cooldown_days=num("REBUY_COOLDOWN_DAYS", "rebuy_cooldown_days", int),
+            min_days_after_surge=num("MIN_DAYS_AFTER_SURGE", "min_days_after_surge", int),
+            pullback_volume_ratio=num("PULLBACK_VOLUME_RATIO", "pullback_volume_ratio"),
+            max_hold_days=num("MAX_HOLD_DAYS", "max_hold_days", int),
+            time_exit_time=_get("TIME_EXIT_TIME", cls.time_exit_time),
             state_dir=_get("STATE_DIR", cls.state_dir),
             log_dir=_get("LOG_DIR", cls.log_dir),
         )

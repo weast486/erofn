@@ -84,7 +84,7 @@ def cmd_status(cfg: Config, _c, strategy: PullbackStrategy) -> None:
     print(f"[{'DRY_RUN' if cfg.dry_run else 'LIVE'}] 보유 {len(st.positions)}/{cfg.num_stocks}")
     for p in st.positions.values():
         print(
-            f"  {p.symbol} {p.name} {p.quantity}주 @ {p.entry_price:,.0f} status={p.status} "
+            f"  {p.symbol} {p.name} {p.quantity}주 @ {p.entry_price:,.0f} {p.hold_days}일째 status={p.status} "
             f"손절={strategy.stop_price(p.entry_price):,}({'조건주문' if p.stop_co_id else '봇감시'}) "
             f"익절={strategy.take_profit_price(p.entry_price):,}({'조건주문' if p.tp_co_id else '봇감시'})"
         )

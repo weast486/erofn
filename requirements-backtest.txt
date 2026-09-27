@@ -1,0 +1,3 @@
+pandas
+pykrx
+finance-datareader

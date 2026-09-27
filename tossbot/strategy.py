@@ -7,7 +7,7 @@
     · 익절: 평균 체결가 +15% 도달 시 지정가(+15% 가격) 매도
   한쪽이 발동되면 봇이 반대쪽 조건주문을 취소한다.
   (토스 OCO 는 지정가만 지원해 '손절 시장가 + 익절 지정가' 조합이 불가능하므로 SINGLE 2건 사용)
-- 보유 기간 제한 없음: 손절 또는 익절이 걸릴 때까지 보유. 조건주문이 만료되면 다시 등록한다.
+- 보유 기간: 손절·익절이 10거래일 안에 안 걸리면 10거래일째 15:10 에 시장가 매도 (MAX_HOLD_DAYS)
 - 봇의 가격 감시는 백업: 조건주문 등록 실패 등으로 서버 감시가 없는 경우에만 직접 매도
 """
 from __future__ import annotations
@@ -52,6 +52,8 @@ def params_from_config(cfg: Config) -> PullbackParams:
         ma_max_break_pct=cfg.ma_max_break_pct,
         require_ma_rising=cfg.require_ma_rising,
         min_avg_trading_amount=cfg.min_avg_trading_amount,
+        min_days_after_surge=cfg.min_days_after_surge,
+        pullback_volume_ratio=cfg.pullback_volume_ratio,
     )
 
 
@@ -99,6 +101,9 @@ class PullbackStrategy:
             return
         self._tick_time = now
         self.sync_orders()
+        self.count_hold_days(day.today)
+        if self.cfg.max_hold_days > 0 and now >= _at(day.today, self.cfg.time_exit_time):
+            self.time_exits()
         self.arm_protection(day.today)
         self.check_exits()
 
@@ -106,6 +111,30 @@ class PullbackStrategy:
         if start <= now < end:
             self.ensure_watchlist(day.today)
             self.scan_and_buy(day.today)
+
+    # ----------------------------------------------------------- hold days
+    def count_hold_days(self, today: date) -> None:
+        """거래일이 바뀔 때마다 보유 일수 +1 (매수일 = 0일째)."""
+        key = today.isoformat()
+        changed = False
+        for pos in self.state.positions.values():
+            if pos.last_day != key:
+                if pos.last_day:
+                    pos.hold_days += 1
+                pos.last_day = key
+                changed = True
+        if changed:
+            self.store.save(self.state)
+
+    def time_exits(self) -> None:
+        """최대 보유 기간이 된 종목: 조건주문 취소 후 시장가 매도."""
+        for pos in list(self.state.positions.values()):
+            if pos.hold_days < self.cfg.max_hold_days:
+                continue
+            if pos.status == "SELLING" and pos.sell_reason in ("STOP_LOSS", "TIME_EXIT"):
+                continue  # 이미 시장가 매도가 나가 있음
+            log.info("보유 기간 만료 %s %s (%d거래일): 시장가 매도", pos.symbol, pos.name, pos.hold_days)
+            self._sell_now(pos, "TIME_EXIT")
 
     # ----------------------------------------------------------------- buy
     def ensure_watchlist(self, today: date) -> None:
@@ -183,6 +212,7 @@ class PullbackStrategy:
                 opened_at=self.now().isoformat(timespec="seconds"),
                 buy_order_id=order_id,
                 buy_open=True,
+                last_day=today.isoformat(),
             )
             bought.append(w.symbol)
             self.store.save(self.state)

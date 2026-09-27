@@ -4,6 +4,9 @@
    후보: 상승률 상위 랭킹(1일·1주·1개월, 각 100위, 투자유의 제외) + 최근 봇이 본 급등 종목
    조건:
      - 최근 SURGE_LOOKBACK_DAYS 거래일 안에 하루 +SURGE_PCT% 이상 오른 날(급등일)이 있음
+     - 급등일로부터 MIN_DAYS_AFTER_SURGE 거래일 이상 지남 (급등 직후엔 7일선이 급등 전 가격 근처라
+       7일선 터치 = 급등분 전부 반납이 되므로 제외)
+     - 거래량 줄어든 눌림: 급등 이후 평균 거래량 <= 급등일 거래량 x PULLBACK_VOLUME_RATIO
      - 급등분을 다 반납하지 않음: 전일 종가 > 급등 전날 종가
      - 전일 종가가 7일선 위: 오늘 위에서 내려와 7일선에 닿는 경우만 잡기 위함
      - 7일선 상승 중 (REQUIRE_MA_RISING): 전일 7일선 >= 5거래일 전 7일선
@@ -48,6 +51,8 @@ class PullbackParams:
     surge_lookback_days: int = 10
     ma_period: int = 7
     ma_max_break_pct: float = 1.5
+    min_days_after_surge: int = 3
+    pullback_volume_ratio: float = 0.5
     require_ma_rising: bool = True
     min_avg_trading_amount: float = 3_000_000_000
 
@@ -103,6 +108,13 @@ def analyze(symbol: str, name: str, bars: list[Bar], today: date, p: PullbackPar
         return None, f"최근 {p.surge_lookback_days}일 내 +{p.surge_pct:g}% 급등 없음"
     pre_surge_close = closes[surge_idx - 1]
     surge_pct = closes[surge_idx] / pre_surge_close - 1
+    # 오늘은 급등일로부터 (완성된 급등 이후 봉 수 + 1) 거래일째
+    days_after = len(bars) - surge_idx
+    if days_after < p.min_days_after_surge:
+        return None, f"급등 후 {days_after}일째 (최소 {p.min_days_after_surge}일)"
+    after_vol = [b.volume for b in bars[surge_idx + 1:]]
+    if after_vol and sum(after_vol) / len(after_vol) > bars[surge_idx].volume * p.pullback_volume_ratio:
+        return None, "눌림 구간 거래량 과다"
 
     if closes[-1] <= pre_surge_close:
         return None, "급등분 모두 반납"
@@ -134,6 +146,17 @@ def entry_signal(item: WatchItem, price: float, p: PullbackParams) -> tuple[bool
     floor = ma * (1 - p.ma_max_break_pct / 100)
     ok = floor <= price <= ma and price > item.pre_surge_close and price <= p.slot_budget
     return ok, ma
+
+
+def touch_zone(item: WatchItem, p: PullbackParams) -> tuple[float, float]:
+    """entry_signal 이 참이 되는 현재가 구간 [lo, hi] (백테스트용).
+
+    실시간 이평 = (S + x) / n 이므로
+      x <= (S + x) / n            ⇔ x <= S / (n - 1)
+      x >= (1 - b)(S + x) / n     ⇔ x >= (1 - b) S / (n - 1 + b)
+    """
+    n, s, b = item.ma_period, item.prev_closes_sum, p.ma_max_break_pct / 100
+    return (1 - b) * s / (n - 1 + b), s / (n - 1)
 
 
 def build_watchlist(

@@ -21,9 +21,12 @@ def candle(d, c, v=1_000_000):
     }
 
 
-def closes_to_candles(closes, today_price=None):
-    """closes[-1] 이 어제 종가. today_price 가 있으면 오늘(장중) 봉도 추가. API 처럼 최신순."""
-    out = [candle(TODAY - timedelta(days=len(closes) - i), c) for i, c in enumerate(closes)]
+def closes_to_candles(closes, today_price=None, volumes=None):
+    """closes[-1] 이 어제 종가. today_price 가 있으면 오늘(장중) 봉도 추가. API 처럼 최신순.
+    volumes 를 안 주면 급등일(+10% 이상)은 거래량 300만, 나머지는 100만."""
+    if volumes is None:
+        volumes = [3_000_000 if i and c / closes[i - 1] >= 1.1 else 1_000_000 for i, c in enumerate(closes)]
+    out = [candle(TODAY - timedelta(days=len(closes) - i), c, v) for i, (c, v) in enumerate(zip(closes, volumes))]
     if today_price:
         out.append(candle(TODAY, today_price))
     return list(reversed(out))
@@ -58,11 +61,19 @@ class SelectorTest(unittest.TestCase):
         self.assertEqual(analyze("A", "A", parse_candles(closes_to_candles(gave_back)), TODAY, p)[1], "급등분 모두 반납")
         below_ma = surge_series(surge_pct=0.20, days_after=(0.95, 0.95, 0.95))  # 전일 종가가 이미 7일선 아래
         self.assertIn("7일선 아래", analyze("A", "A", parse_candles(closes_to_candles(below_ma)), TODAY, p)[1])
+        heavy = surge_series()
+        heavy_vol = [1_000_000] * (len(heavy) - 3) + [3_000_000, 2_000_000, 2_000_000]  # 눌림 중 거래량 많음
+        self.assertEqual(
+            analyze("A", "A", parse_candles(closes_to_candles(heavy, volumes=heavy_vol)), TODAY, p)[1],
+            "눌림 구간 거래량 과다",
+        )
+        fresh = surge_series(days_after=(0.97,))  # 급등 후 2일째
+        self.assertIn("급등 후 2일째", analyze("A", "A", parse_candles(closes_to_candles(fresh)), TODAY, p)[1])
         pricey = [c * 20 for c in surge_series()]
         self.assertIn("예산 초과", analyze("A", "A", parse_candles(closes_to_candles(pricey)), TODAY, p)[1])
         thin = parse_candles(closes_to_candles(surge_series()))
         for b in thin:
-            b.volume = 1_000
+            b.volume /= 1_000
         self.assertEqual(analyze("A", "A", thin, TODAY, p)[1], "거래대금 부족")
 
     def test_entry_signal_touch_ma7(self):
@@ -203,6 +214,22 @@ class StrategyTest(unittest.TestCase):
         self.client.prices["000002"] = 11_500
         self.tick(WED, 11, 0)
         self.assertEqual(s.state.history[-1]["reason"], "TAKE_PROFIT")
+
+    def test_time_exit_after_max_hold_days(self):
+        s = self.strategy
+        self.cfg.max_hold_days = 2
+        self.client.prices["000001"] = 10_000
+        self.tick(MON, 10, 0)  # 매수일 = 0일째
+        self.client.prices["000001"] = 10_300  # 손절·익절 모두 안 걸림
+        self.tick(TUE, 15, 10)  # 1일째
+        self.tick(WED, 15, 9)  # 2일째, 매도 시각 전
+        self.assertIn("000001", s.state.positions)
+        self.assertEqual(s.state.positions["000001"].hold_days, 2)
+        self.tick(WED, 15, 10)
+        self.assertNotIn("000001", s.state.positions)
+        self.assertEqual((s.state.history[-1]["reason"], s.state.history[-1]["exit_price"]), ("TIME_EXIT", 10_300))
+        # 조건주문도 모두 취소됨
+        self.assertFalse([c for c in s.broker._dry_conditionals.values() if c["status"] == "WATCHING"])
 
     def test_state_persists_across_restart(self):
         self.client.prices["000001"] = 10_000

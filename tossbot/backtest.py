@@ -8,7 +8,7 @@
     python -m tossbot.backtest run --years 2024 2025 2026
 
 일봉만으로 장중 체결을 재현하기 위한 가정
-  매수 (15일선 터치 구간 [lo, hi], selector.touch_zone)
+  매수 (7일선 터치 구간 [lo, hi], selector.touch_zone)
     - 시가가 구간 안이면 시가에 매수
     - 시가가 구간 위이고 저가가 hi 이하면 hi 에 매수 (위에서 내려와 터치)
     - 시가가 구간 아래(갭하락 이탈)이고 고가가 lo 이상이면 lo 에 매수 (다시 올라와 구간 진입)
@@ -57,6 +57,8 @@ class BacktestSettings:
     cooldown_days: int = 5
     commission: float = 0.00015
     slippage: float = 0.001  # 시장가 체결 시 불리한 방향 슬리피지
+    # 신규 매수를 허용하는 날짜 (None 이면 모든 날). 예: 코스피 하락일만
+    entry_dates: set | None = None
 
     @classmethod
     def from_config(cls, cfg: Config) -> "BacktestSettings":
@@ -216,6 +218,8 @@ def run_backtest(
 
         # 2) 신규 매수
         slots = s.num_slots - len(positions)
+        if s.entry_dates is not None and day not in s.entry_dates:
+            slots = 0
         if slots > 0:
             signals = []
             for sym in candidates.get(day, ()):
@@ -650,6 +654,43 @@ def download(source: str, start: str, end: str | None, cache_dir: Path) -> None:
             log.info("  %d / %d", n, len(todo))
 
 
+def download_index(symbol: str, cache_dir: Path, count: int = 1500) -> Path:
+    """네이버 차트에서 지수 일봉(KOSPI / KOSDAQ)을 받아 _index_{symbol}.csv 로 저장."""
+    import re
+    import urllib.request
+
+    url = f"https://fchart.stock.naver.com/sise.nhn?symbol={symbol}&timeframe=day&count={count}&requestType=0"
+    text = urllib.request.urlopen(url, timeout=30).read().decode("euc-kr", "ignore")
+    rows = []
+    for item in re.findall(r'data="([^"]+)"', text):
+        d, o, h, l, c, v = item.split("|")
+        rows.append((f"{d[:4]}-{d[4:6]}-{d[6:]}", float(o), float(h), float(l), float(c), float(v)))
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    path = cache_dir / f"_index_{symbol}.csv"
+    _write_bars(path, rows)
+    return path
+
+
+def load_index(cache_dir: Path, symbol: str = "KOSPI") -> list[Bar]:
+    path = cache_dir / f"_index_{symbol}.csv"
+    with open(path, encoding="utf-8") as f:
+        return [
+            Bar(date.fromisoformat(r["date"]), float(r["open"]), float(r["high"]), float(r["low"]),
+                float(r["close"]), float(r["volume"]))
+            for r in csv.DictReader(f)
+        ]
+
+
+def index_down_days(index: list[Bar], mode: str = "close") -> set[date]:
+    """지수 하락일. mode=close: 종가 < 전일 종가, open: 시가 < 전일 종가, both: 둘 다."""
+    out = set()
+    for prev, cur in zip(index, index[1:]):
+        down_close, down_open = cur.close < prev.close, cur.open < prev.close
+        if (mode == "close" and down_close) or (mode == "open" and down_open) or (mode == "both" and down_close and down_open):
+            out.add(cur.day)
+    return out
+
+
 # --------------------------------------------------------------------- CLI
 def _fmt_pct(x: float) -> str:
     return f"{x:+.1%}"
@@ -707,6 +748,9 @@ def main(argv: list[str] | None = None) -> None:
     r.add_argument("--exit-days", type=int, default=10, help="breakout: 매도 신저가 기간")
     r.add_argument("--stop-loss", type=float, default=0.0, help="breakout: 손절 %% (0 = 없음)")
     r.add_argument("--take-profit", type=float, default=0.0, help="breakout: 익절 %% (0 = 없음)")
+    r.add_argument("--kospi-down", choices=["config", "none", "close", "open", "both"], default="config",
+                   help="pullback 신규 매수를 코스피 하락일로 제한. close=하락 마감, open=하락 출발, "
+                        "config=.env 의 MARKET_FILTER 를 따름(kospi_down 이면 close)")
     r.add_argument("--no-exit-on-low", action="store_true", help="breakout: 신저가 매도 끄기")
     r.add_argument("--max-hold", type=int, default=0, help="breakout: 최대 보유 거래일 (0 = 없음)")
     args = parser.parse_args(argv)
@@ -717,10 +761,22 @@ def main(argv: list[str] | None = None) -> None:
             import_marcap(args.marcap_dir, args.start, args.end, args.cache)
         else:
             download(args.source, args.start, args.end, args.cache)
+        for symbol in ("KOSPI", "KOSDAQ"):
+            try:
+                download_index(symbol, args.cache)
+            except Exception as exc:
+                log.warning("%s 지수 다운로드 실패: %s", symbol, exc)
         return
 
     load_dotenv(args.env)
-    settings = BacktestSettings.from_config(Config.from_env())
+    cfg = Config.from_env()
+    settings = BacktestSettings.from_config(cfg)
+    mode = args.kospi_down
+    if mode == "config":
+        mode = "close" if cfg.market_filter == "kospi_down" else "none"
+    if args.strategy == "pullback" and mode != "none":
+        settings.entry_dates = index_down_days(load_index(args.cache, "KOSPI"), mode)
+        print(f"코스피 하락일({mode})에만 신규 매수")
     data = load_cache(args.cache)
     if not data:
         raise SystemExit(f"{args.cache} 에 데이터가 없습니다. 먼저 download 를 실행하세요.")

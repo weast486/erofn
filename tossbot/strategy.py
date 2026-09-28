@@ -1,6 +1,6 @@
 """눌림목 전략.
 
-- 매수: 최근 급등(하루 +10% 이상)한 종목이 15일선을 터치하면, 장중 언제든 종목당 10만원 매수
+- 매수: 최근 급등(하루 +10% 이상)한 종목이 7일선을 터치하면, 장중 언제든 종목당 10만원 매수
         (동시 보유 최대 10종목. 매도한 종목은 일정 기간 재매수하지 않음)
 - 매수 체결 즉시 토스증권 조건주문(SINGLE) 2건을 서버에 등록
     · 손절: 평균 체결가 -4.7% 도달 시 시장가 매도
@@ -21,7 +21,7 @@ from typing import Callable
 from .broker import CONDITIONAL_DONE, TERMINAL_STATUSES, Broker, round_down_to_tick, round_up_to_tick
 from .config import KST, Config
 from .market_calendar import TradingDay
-from .selector import PullbackParams, WatchItem, build_watchlist, entry_signal
+from .selector import PullbackParams, WatchItem, build_watchlist, entry_signal, parse_candles
 from .state import Position, State, StateStore
 
 log = logging.getLogger(__name__)
@@ -72,6 +72,7 @@ class PullbackStrategy:
         self.state: State = store.load()
         self.watchlist: dict[str, WatchItem] = {}
         self.watch_date: date | None = None
+        self._kospi_prev_close: tuple[date, float] | None = None
         self._tick_time: datetime | None = None
 
     def now(self) -> datetime:
@@ -153,6 +154,25 @@ class PullbackStrategy:
             self.state.surge_seen[symbol] = today.isoformat()
         self.store.save(self.state)
 
+    def market_allows_buy(self, today: date) -> bool:
+        """시장 필터. kospi_down: 코스피 현재가 < 전일 종가일 때만 신규 매수 허용."""
+        if self.cfg.market_filter != "kospi_down":
+            return True
+        client = self.broker.client
+        if self._kospi_prev_close is None or self._kospi_prev_close[0] != today:
+            bars = parse_candles(client.get_indicator_candles("KOSPI", "1d", 5))
+            prev = [b for b in bars if b.day < today]
+            if not prev:
+                log.warning("코스피 전일 종가를 알 수 없어 매수 보류")
+                return False
+            self._kospi_prev_close = (today, prev[-1].close)
+        prices = client.get_indicator_prices(["KOSPI"])
+        if not prices:
+            return False
+        now_price = float(prices[0]["lastPrice"])
+        prev_close = self._kospi_prev_close[1]
+        return now_price < prev_close
+
     def in_cooldown(self, symbol: str, today: date) -> bool:
         for h in reversed(self.state.history):
             if h["symbol"] == symbol:
@@ -161,7 +181,7 @@ class PullbackStrategy:
         return False
 
     def scan_and_buy(self, today: date) -> list[str]:
-        """감시 목록 종목의 현재가가 15일선 부근이면 매수. 매수한 종목 코드 목록 반환."""
+        """감시 목록 종목의 현재가가 7일선 부근이면 매수. 매수한 종목 코드 목록 반환."""
         cfg = self.cfg
         slots = cfg.num_stocks - len(self.state.positions)
         if slots <= 0 or not self.watchlist:
@@ -183,6 +203,9 @@ class PullbackStrategy:
             if ok:
                 signals.append((w, float(price), ma))
         if not signals:
+            return []
+        if not self.market_allows_buy(today):
+            log.info("매수 신호 %d건 있으나 코스피가 하락 중이 아니어서 매수 보류", len(signals))
             return []
         signals.sort(key=lambda x: x[0].surge_pct, reverse=True)
 

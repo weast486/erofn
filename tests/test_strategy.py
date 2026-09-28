@@ -52,15 +52,15 @@ class SelectorTest(unittest.TestCase):
         closes = surge_series()
         self.assertAlmostEqual(item.prev_closes_sum, sum(closes[-4:]))
 
-    def test_default_15_day_ma(self):
-        p = PullbackParams()  # 봇 기본값: 15일선
-        self.assertEqual(p.ma_period, 15)
+    def test_default_7_day_ma(self):
+        p = PullbackParams()  # 봇 기본값: 7일선
+        self.assertEqual(p.ma_period, 7)
         # 긴 이평선은 급등 전 봉 비중이 커서, 급등폭이 작으면 터치 가격이 급등 전 종가 아래가 되어 매수 제외됨
         closes = surge_series(surge_pct=0.20)
         item, reason = analyze("A", "A", parse_candles(closes_to_candles(closes)), TODAY, p)
         self.assertEqual(reason, "")
-        self.assertAlmostEqual(item.prev_closes_sum, sum(closes[-14:]))
-        ma_at_touch = item.prev_closes_sum / 14  # 현재가 = 실시간 15일선이 되는 가격
+        self.assertAlmostEqual(item.prev_closes_sum, sum(closes[-6:]))
+        ma_at_touch = item.prev_closes_sum / 6  # 현재가 = 실시간 7일선이 되는 가격
         self.assertTrue(entry_signal(item, ma_at_touch, p)[0])
         self.assertFalse(entry_signal(item, ma_at_touch * 1.01, p)[0])
 
@@ -126,6 +126,14 @@ class TickTest(unittest.TestCase):
 class FakeClient:
     def __init__(self, prices):
         self.prices = dict(prices)
+        self.kospi_prev_close, self.kospi_now = 3_000.0, 2_990.0  # 기본: 코스피 하락 중
+
+    def get_indicator_candles(self, symbol, interval="1d", count=5):
+        d = TODAY - timedelta(days=30)  # 테스트 날짜들보다 이전의 전일 종가
+        return [candle(d, self.kospi_prev_close)]
+
+    def get_indicator_prices(self, symbols):
+        return [{"symbol": "KOSPI", "lastPrice": str(self.kospi_now)}]
 
     def get_prices(self, symbols):
         return [{"symbol": s, "lastPrice": str(self.prices[s]), "currency": "KRW"} for s in symbols if s in self.prices]
@@ -182,6 +190,23 @@ class StrategyTest(unittest.TestCase):
         self.tick(MON, 14, 0)
         self.assertEqual(len(s.state.positions), 1)  # 보유 중인 종목은 재매수 없음
         self.assertEqual(s.state.surge_seen["000003"], "2026-09-21")
+
+    def test_buys_only_when_kospi_is_down(self):
+        s = self.strategy
+        self.client.prices["000001"] = 10_000  # 5일선 터치
+        self.client.kospi_now = 3_010  # 코스피 상승 중 → 매수 보류
+        self.tick(MON, 10, 0)
+        self.assertEqual(len(s.state.positions), 0)
+        self.client.kospi_now = 2_999  # 코스피 하락 전환 → 매수
+        self.tick(MON, 10, 1)
+        self.assertEqual(list(s.state.positions), ["000001"])
+
+    def test_market_filter_can_be_disabled(self):
+        self.cfg.market_filter = "none"
+        self.client.prices["000001"] = 10_000
+        self.client.kospi_now = 3_010
+        self.tick(MON, 10, 0)
+        self.assertEqual(list(self.strategy.state.positions), ["000001"])
 
     def test_no_buy_after_1520(self):
         self.client.prices["000001"] = 10_000

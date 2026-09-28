@@ -60,11 +60,13 @@ class Config:
     # 눌림목 조건
     surge_pct: float = 10.0  # 급등 기준: 하루 상승률 %
     surge_lookback_days: int = 10  # 최근 N거래일 안의 급등만 인정
-    ma_period: int = 15  # 15일선
+    ma_period: int = 7  # 7일선
     ma_max_break_pct: float = 1.5  # 현재가 <= 이평선이면 터치. 단 N% 넘게 아래면 이탈로 보고 매수 안 함
     require_ma_rising: bool = True  # 이평선이 상승 중인 종목만
     min_avg_trading_amount: float = 3_000_000_000  # 20일 평균 거래대금 하한
     rebuy_cooldown_days: int = 5  # 매도한 종목은 N일 동안 다시 사지 않음
+    # 시장 필터: kospi_down = 코스피가 전일 종가보다 낮을 때만 신규 매수, none = 필터 없음
+    market_filter: str = "kospi_down"
     min_days_after_surge: int = 3  # 급등일로부터 N거래일째부터 매수 허용
     pullback_volume_ratio: float = 0.5  # 급등 이후 평균 거래량 <= 급등일 거래량 x N
     # 최대 보유 기간: 매수일로부터 N거래일째 TIME_EXIT_TIME 에 시장가 매도 (0 이면 제한 없음)
@@ -113,6 +115,7 @@ class Config:
             require_ma_rising=_bool(os.environ.get("REQUIRE_MA_RISING"), True),
             min_avg_trading_amount=num("MIN_AVG_TRADING_AMOUNT", "min_avg_trading_amount"),
             rebuy_cooldown_days=num("REBUY_COOLDOWN_DAYS", "rebuy_cooldown_days", int),
+            market_filter=_get("MARKET_FILTER", cls.market_filter),
             min_days_after_surge=num("MIN_DAYS_AFTER_SURGE", "min_days_after_surge", int),
             pullback_volume_ratio=num("PULLBACK_VOLUME_RATIO", "pullback_volume_ratio"),
             max_hold_days=num("MAX_HOLD_DAYS", "max_hold_days", int),

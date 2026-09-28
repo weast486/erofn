@@ -218,6 +218,21 @@ class TossClient:
         )
         return (result or {}).get("rankings", [])
 
+    def get_indicator_prices(self, symbols: list[str]) -> list[dict]:
+        """시장 지표(KOSPI, KOSDAQ 등) 현재가."""
+        return self._request(
+            "GET", "/api/v1/market-indicators/prices", params={"symbols": ",".join(symbols)}
+        ) or []
+
+    def get_indicator_candles(self, symbol: str, interval: str = "1d", count: int = 5) -> list[dict]:
+        """시장 지표 캔들 (최신순일 수 있음)."""
+        result = self._request(
+            "GET",
+            f"/api/v1/market-indicators/{symbol}/candles",
+            params={"interval": interval, "count": count},
+        )
+        return (result or {}).get("candles", [])
+
     def get_market_calendar_kr(self, date: str | None = None) -> dict:
         params = {"date": date} if date else None
         return self._request("GET", "/api/v1/market-calendar/KR", params=params)

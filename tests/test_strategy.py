@@ -11,6 +11,7 @@ from tossbot.state import StateStore
 from tossbot.strategy import PullbackStrategy
 
 TODAY = date(2026, 9, 22)
+# 아래 시나리오는 5일선 기준으로 숫자를 맞춰 두었으므로 기본값(MA_PERIOD)과 무관하게 5일선으로 고정
 
 
 def candle(d, c, v=1_000_000):
@@ -42,7 +43,7 @@ def surge_series(surge_pct=0.12, days_after=(0.97, 0.98), n=40, base=10_000.0):
 
 class SelectorTest(unittest.TestCase):
     def test_analyze_surge_and_pullback(self):
-        p = PullbackParams()
+        p = PullbackParams(ma_period=5)
         item, reason = analyze("A", "A", parse_candles(closes_to_candles(surge_series(), today_price=9_000)), TODAY, p)
         self.assertEqual(reason, "")
         self.assertAlmostEqual(item.surge_pct, 0.12, places=6)
@@ -51,8 +52,19 @@ class SelectorTest(unittest.TestCase):
         closes = surge_series()
         self.assertAlmostEqual(item.prev_closes_sum, sum(closes[-4:]))
 
+    def test_default_15_day_ma(self):
+        p = PullbackParams()  # 봇 기본값: 15일선
+        self.assertEqual(p.ma_period, 15)
+        closes = surge_series()
+        item, reason = analyze("A", "A", parse_candles(closes_to_candles(closes)), TODAY, p)
+        self.assertEqual(reason, "")
+        self.assertAlmostEqual(item.prev_closes_sum, sum(closes[-14:]))
+        ma_at_touch = item.prev_closes_sum / 14  # 현재가 = 실시간 15일선이 되는 가격
+        self.assertTrue(entry_signal(item, ma_at_touch, p)[0])
+        self.assertFalse(entry_signal(item, ma_at_touch * 1.01, p)[0])
+
     def test_analyze_rejections(self):
-        p = PullbackParams()
+        p = PullbackParams(ma_period=5)
         no_surge = [10_000 * 1.002**i for i in range(45)]
         self.assertIn("급등 없음", analyze("A", "A", parse_candles(closes_to_candles(no_surge)), TODAY, p)[1])
         too_old = surge_series(days_after=[1.0] * 12)
@@ -77,13 +89,13 @@ class SelectorTest(unittest.TestCase):
         self.assertEqual(analyze("A", "A", thin, TODAY, p)[1], "거래대금 부족")
 
     def test_entry_signal_touch_ma7(self):
-        p = PullbackParams()
-        item = WatchItem("A", "A", TODAY, 0.12, pre_surge_close=8_000, prev_closes_sum=4 * 10_000)
+        p = PullbackParams(ma_period=5)
+        item = WatchItem("A", "A", TODAY, 0.12, pre_surge_close=8_000, prev_closes_sum=4 * 10_000, ma_period=5)
         self.assertTrue(entry_signal(item, 10_000, p)[0])  # 5일선 = 10,000 에 정확히 터치
         self.assertFalse(entry_signal(item, 10_050, p)[0])  # 아직 5일선 위 (5일선 10,010)
         self.assertTrue(entry_signal(item, 9_900, p)[0])  # 살짝 뚫음 (5일선 9,980 대비 -0.8%)
         self.assertFalse(entry_signal(item, 9_800, p)[0])  # -1.7%: 이미 이탈
-        low_base = WatchItem("A", "A", TODAY, 0.12, pre_surge_close=10_100, prev_closes_sum=4 * 10_000)
+        low_base = WatchItem("A", "A", TODAY, 0.12, pre_surge_close=10_100, prev_closes_sum=4 * 10_000, ma_period=5)
         self.assertFalse(entry_signal(low_base, 10_000, p)[0])  # 급등 전 가격 아래
 
     def test_build_watchlist_uses_rankings_and_memory(self):
@@ -98,7 +110,7 @@ class SelectorTest(unittest.TestCase):
             def get_candles(self, s, interval, count):
                 return closes_to_candles(surge_series() if s in ("000001", "000002") else [10_000.0] * 45)
 
-        watch = build_watchlist(C(), {"000002", "000003"}, PullbackParams(), TODAY, request_interval=0)
+        watch = build_watchlist(C(), {"000002", "000003"}, PullbackParams(ma_period=5), TODAY, request_interval=0)
         self.assertEqual(sorted(watch), ["000001", "000002"])
 
 
@@ -130,13 +142,13 @@ MON, TUE, WED = trading_day(date(2026, 9, 21)), trading_day(date(2026, 9, 22)), 
 def watch(symbol, surge_pct=0.12):
     # 직전 4일 종가 합 40,000 → 현재가 10,000 이면 5일선 10,000 (괴리 0%)
     return WatchItem(symbol, f"종목{symbol}", date(2026, 9, 17), surge_pct, pre_surge_close=8_000,
-                     prev_closes_sum=40_000)
+                     prev_closes_sum=40_000, ma_period=5)
 
 
 class StrategyTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
-        self.cfg = Config(dry_run=True, state_dir=self.tmp.name)
+        self.cfg = Config(dry_run=True, state_dir=self.tmp.name, ma_period=5)
         # 기본은 5일선보다 10% 위 (아직 눌리지 않음)
         self.client = FakeClient({f"{i:06d}": 11_000 for i in range(1, 30)})
         self.watch = {f"{i:06d}": watch(f"{i:06d}", 0.10 + i / 100) for i in range(1, 16)}

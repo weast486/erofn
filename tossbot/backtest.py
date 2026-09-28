@@ -8,7 +8,7 @@
     python -m tossbot.backtest run --years 2024 2025 2026
 
 일봉만으로 장중 체결을 재현하기 위한 가정
-  매수 (5일선 터치 구간 [lo, hi], selector.touch_zone)
+  매수 (15일선 터치 구간 [lo, hi], selector.touch_zone)
     - 시가가 구간 안이면 시가에 매수
     - 시가가 구간 위이고 저가가 hi 이하면 hi 에 매수 (위에서 내려와 터치)
     - 시가가 구간 아래(갭하락 이탈)이고 고가가 lo 이상이면 lo 에 매수 (다시 올라와 구간 진입)

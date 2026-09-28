@@ -913,6 +913,19 @@ def index_not_down_days(index: list[Bar]) -> set[date]:
     return {cur.day for prev, cur in zip(index, index[1:]) if cur.close >= prev.close}
 
 
+def index_regime_days(index: list[Bar], long: int = 200, short: int = 20, slope_days: int = 5) -> set[date]:
+    """지수가 long 일선 위면 short 일선이 오르는 중(slope_days 거래일 전보다 높음)인 날,
+    long 일선 아래면 short 일선이 내리는 중인 날만."""
+    closes = [b.close for b in index]
+    ma = lambda n, i: sum(closes[i - n + 1:i + 1]) / n  # noqa: E731
+    out = set()
+    for i in range(max(long, short + slope_days) - 1, len(index)):
+        rising = ma(short, i) > ma(short, i - slope_days)
+        if (closes[i] > ma(long, i)) == rising:
+            out.add(index[i].day)
+    return out
+
+
 def index_down_days(index: list[Bar], mode: str = "close") -> set[date]:
     """지수 하락일. mode=close: 종가 < 전일 종가, open: 시가 < 전일 종가, both: 둘 다."""
     out = set()
@@ -996,6 +1009,9 @@ def main(argv: list[str] | None = None) -> None:
                    help="breakout: 신고가 날 시가 갭상승(전일 종가 대비)이 N%% 이하인 종목만 매수 (0 = 없음)")
     r.add_argument("--kospi-not-down", action="store_true",
                    help="breakout: 코스피 종가가 전일보다 낮은 날은 매수 금지")
+    r.add_argument("--kospi-regime", action="store_true",
+                   help="breakout: 코스피가 200일선 위면 20일선 상승일만, 아래면 20일선 하락일만 매수")
+    r.add_argument("--regime-slope-days", type=int, default=5, help="breakout: 20일선 기울기 비교 기간 (거래일)")
     r.add_argument("--kospi-up-days", type=int, default=0,
                    help="breakout: 코스피 종가가 N거래일 전보다 높은 날에만 매수 (0 = 필터 없음)")
     r.add_argument("--rank-by", choices=["amount", "change", "strength"], default="amount",
@@ -1043,6 +1059,9 @@ def main(argv: list[str] | None = None) -> None:
         if args.kospi_not_down:
             settings.entry_dates = index_not_down_days(load_index(args.cache, "KOSPI"))
             print("코스피가 전일보다 낮은 날은 매수 금지")
+        if args.kospi_regime:
+            settings.entry_dates = index_regime_days(load_index(args.cache, "KOSPI"), slope_days=args.regime_slope_days)
+            print(f"코스피 200일선 위 → 20일선 상승일만 / 아래 → 20일선 하락일만 매수 (기울기 {args.regime_slope_days}일)")
         if args.kospi_up_days:
             settings.entry_dates = index_uptrend_days(load_index(args.cache, "KOSPI"), args.kospi_up_days)
             print(f"코스피가 {args.kospi_up_days}거래일 전보다 높은 날에만 매수")

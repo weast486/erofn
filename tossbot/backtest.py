@@ -299,7 +299,7 @@ class BreakoutSettings:
     min_candle_pct: float = 0.0
     candle_measure: str = "body"
     # 0 보다 크면 장중 고가가 매수가 대비 이 % 이상 오른 다음 날부터 손절가를 매수가(본전)로 올림
-    # 매수 다음 거래일 매도 규칙: "" 없음 / open 시가 / close 종가 / open_if_loss·close_if_loss 매수가 아래일 때만
+    # 매수 다음 거래일 매도 규칙: "" 없음 / open 시가 / close 종가 / open_if_loss·close_if_loss 매수가 아래일 때만 / open_if_no_gap 시가가 매수일 종가 이하면
     next_day_exit: str = ""
     max_buys_per_day: int = 0  # 0 보다 크면 하루 신규 매수 종목 수 상한
     min_marcap: float = 0.0  # 0 보다 크면 신호일 시가총액 하한 (원). marcap 이 필요
@@ -381,7 +381,8 @@ def run_breakout(
             stop = round_down_to_tick(t.entry_price * (1 - b.stop_loss_pct / 100)) if b.stop_loss_pct > 0 else None
             tp = round_up_to_tick(t.entry_price * (1 + b.take_profit_pct / 100)) if b.take_profit_pct > 0 else None
             nd = b.next_day_exit if t.hold_days == 1 else ""
-            if nd == "open" or (nd == "open_if_loss" and bar.open < t.entry_price):
+            no_gap = nd == "open_if_no_gap" and i > 0 and bar.open <= ser.bars[i - 1].close  # 매수일 종가 이하 출발
+            if nd == "open" or (nd == "open_if_loss" and bar.open < t.entry_price) or no_gap:
                 close_position(t, day, bar.open * (1 - s.slippage), "NEXT_OPEN")
                 continue
             reason = "STOP_LOSS"
@@ -1231,7 +1232,7 @@ def main(argv: list[str] | None = None) -> None:
                    help="breakout: 신호일 상한가 마감도 신호로 인정 (--entry-delay 와 함께)")
     r.add_argument("--breakeven-at", type=float, default=0,
                    help="breakout: 고가가 매수가 대비 N%% 오르면 다음 날부터 손절가를 본전으로 (0 = 없음)")
-    r.add_argument("--next-day-exit", choices=["", "open", "close", "open_if_loss", "close_if_loss"], default="",
+    r.add_argument("--next-day-exit", choices=["", "open", "close", "open_if_loss", "close_if_loss", "open_if_no_gap"], default="",
                    help="breakout: 매수 다음 거래일 매도 (시가/종가, _if_loss 는 매수가 아래일 때만)")
     r.add_argument("--ma-exit", type=int, default=0, help="breakout: 종가가 N일선 아래로 마감하면 종가 매도 (0 = 없음)")
     r.add_argument("--ma-exit-profit-only", action="store_true", help="breakout: 이평선 이탈 매도를 수익 중일 때만")

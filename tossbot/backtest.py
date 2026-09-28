@@ -334,6 +334,8 @@ class BreakoutSettings:
     breakout_basis: str = "close"  # 직전 최고값 기준: close = 종가 최고값 / high = 장중 고가 최고값
     # 0 보다 크면 종목당 매수 금액 = 현재 평가금액 x 이 % (복리). 0 이면 slot_budget 고정. 1주 가격 상한은 slot_budget 그대로
     position_pct: float = 0.0
+    # True 면 계단식: 종목당 금액 = max(slot_budget, 평가금액 10만원 단위 내림 x 10%). 110만원 → 11만원, 120만원 → 12만원
+    step_sizing: bool = False
     exclude_symbols: frozenset = frozenset()  # 매수 제외 종목코드 (예: 제약·바이오)
     breakeven_lock_pct: float = 0.0  # 올린 손절가 = 매수가 x (1 + 이 %). 0 이면 본전
     # False 면 신고가 조건 없이 매수 (급등주 매매: min_change_pct 와 함께 사용)
@@ -585,9 +587,12 @@ def run_breakout(
             for _, sym, bar, sig_day in signals[:n_buy]:
                 price = bar.close * (1 + s.slippage)
                 pos_budget = budget
-                if b.position_pct:
+                if b.position_pct or b.step_sizing:
                     equity_now = cash + sum(p.qty * last_close.get(ps, p.entry_price) for ps, p in positions.items())
-                    pos_budget = equity_now * b.position_pct / 100
+                    if b.step_sizing:
+                        pos_budget = max(budget, (equity_now // 100_000) * 10_000)
+                    else:
+                        pos_budget = equity_now * b.position_pct / 100
                 qty = int(pos_budget // round_up_to_tick(bar.close * (1 + BUY_LIMIT_SLIPPAGE)))
                 cost = qty * price * (1 + s.commission)
                 if qty <= 0 or cost > cash:
@@ -1345,6 +1350,8 @@ def main(argv: list[str] | None = None) -> None:
                    help="breakout: --max-breakout 의 직전 고점 = 종가 최고값(close) / 장중 고가 최고값(high)")
     r.add_argument("--position-pct", type=float, default=0,
                    help="breakout: 종목당 매수 금액 = 현재 평가금액의 N%% (복리, 0 = 종목당 예산 고정)")
+    r.add_argument("--step-sizing", action="store_true",
+                   help="breakout: 평가금액 10만원 늘 때마다 종목당 1만원씩 증액 (110만원 → 11만원, 최소 종목당 예산)")
     r.add_argument("--continuous", action="store_true",
                    help="연도마다 새로 시작하지 않고 첫 해 1월 1일부터 끝까지 한 번에 (복리 확인용)")
     r.add_argument("--lock-profit", type=float, default=0,
@@ -1421,7 +1428,7 @@ def main(argv: list[str] | None = None) -> None:
                               buy_day_gap_up=args.buy_day_gap_up, buy_day_bullish=args.buy_day_bullish,
                               buy_day_min_wick_ratio=args.buy_day_wick, recover_after_drop_pct=args.recover_after_drop,
                               stop_limit=args.stop_limit, exclude_high_days=args.exclude_high_days,
-                              position_pct=args.position_pct,
+                              position_pct=args.position_pct, step_sizing=args.step_sizing,
                               max_breakout_pct=args.max_breakout, breakout_basis=args.breakout_basis,
                               low_rise_days=int(args.max_rise_from_low[0]) if args.max_rise_from_low else 0,
                               max_rise_from_low_pct=args.max_rise_from_low[1] if args.max_rise_from_low else 0.0,

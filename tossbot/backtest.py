@@ -294,7 +294,7 @@ class BreakoutSettings:
     # N > 0 이면 '직전 N거래일 동안 신고가가 없었던' 첫 신고가만 매수 (예: 20 = 한 달 이내 첫 신고가)
     first_in_days: int = 0
     min_avg_trading_amount: float = 3_000_000_000
-    rank_by: str = "amount"  # 신호가 많을 때 우선순위: amount(당일 거래대금) / strength(신고가 돌파폭)
+    rank_by: str = "amount"  # 신호가 많을 때 우선순위: amount(당일 거래대금) / change(당일 상승률) / strength(신고가 돌파폭)
 
 
 def run_breakout(
@@ -400,7 +400,12 @@ def run_breakout(
                 avg_amount = sum(x.close * x.volume for x in ser.bars[i - 20:i]) / 20
                 if avg_amount < b.min_avg_trading_amount:
                     continue
-                key = bar.close * bar.volume if b.rank_by == "amount" else bar.close / prev_high
+                if b.rank_by == "amount":
+                    key = bar.close * bar.volume
+                elif b.rank_by == "change":
+                    key = bar.close / ser.bars[i - 1].close  # 당일 상승률
+                else:
+                    key = bar.close / prev_high
                 if b.entry_delay:
                     pending.append((sym, i + b.entry_delay, key, day))
                 else:
@@ -954,6 +959,8 @@ def main(argv: list[str] | None = None) -> None:
     r.add_argument("--first-in-days", type=int, default=0, help="breakout: 직전 N거래일 안에 신고가가 없던 첫 신고가만")
     r.add_argument("--min-day-amount", type=float, default=0, help="breakout: 신호 당일 거래대금 하한 (원)")
     r.add_argument("--entry-delay", type=int, default=0, help="breakout: 신고가 신호 N거래일 뒤 종가에 매수")
+    r.add_argument("--rank-by", choices=["amount", "change", "strength"], default="amount",
+                   help="breakout: 신호가 많을 때 우선순위 (거래대금 / 당일 상승률 / 신고가 돌파폭)")
     r.add_argument("--delay-max-rise", type=float, default=0, help="breakout: 대기 중 신고가 종가 대비 N%% 이상 상승 시 매수 취소")
     r.add_argument("--delay-hold-open", action="store_true", help="breakout: 대기 중 신고가 봉 시가 아래로 내려가면 매수 취소")
     r.add_argument("--delay-intraday", action="store_true", help="breakout: 대기 조건을 종가 대신 고가·저가로 판정")
@@ -989,7 +996,7 @@ def main(argv: list[str] | None = None) -> None:
         bs = BreakoutSettings(args.entry_days, args.exit_days, args.stop_loss, args.take_profit,
                               exit_on_low=not args.no_exit_on_low, max_hold_days=args.max_hold,
                               first_in_days=args.first_in_days, min_day_amount=args.min_day_amount,
-                              entry_delay=args.entry_delay, delay_max_rise_pct=args.delay_max_rise,
+                              entry_delay=args.entry_delay, delay_max_rise_pct=args.delay_max_rise, rank_by=args.rank_by,
                               delay_hold_signal_open=args.delay_hold_open, delay_intraday=args.delay_intraday,
                               min_avg_trading_amount=settings.params.min_avg_trading_amount)
         runner = lambda y0, y1: run_breakout(data, y0, y1, settings, bs)  # noqa: E731

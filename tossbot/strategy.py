@@ -1,6 +1,6 @@
 """눌림목 전략.
 
-- 매수: 최근 급등(하루 +10% 이상)한 종목이 18일선을 터치하면, 장중 언제든 종목당 10만원 매수
+- 매수: 최근 급등(하루 +10% 이상)한 종목이 15일선을 터치하면, 장중 언제든 종목당 10만원 매수
         (동시 보유 최대 10종목. 매도한 종목은 일정 기간 재매수하지 않음)
 - 매수 체결 즉시 토스증권 조건주문(SINGLE) 2건을 서버에 등록
     · 손절: 평균 체결가 -4.7% 도달 시 시장가 매도
@@ -161,7 +161,7 @@ class PullbackStrategy:
         return False
 
     def scan_and_buy(self, today: date) -> list[str]:
-        """감시 목록 종목의 현재가가 18일선 부근이면 매수. 매수한 종목 코드 목록 반환."""
+        """감시 목록 종목의 현재가가 15일선 부근이면 매수. 매수한 종목 코드 목록 반환."""
         cfg = self.cfg
         slots = cfg.num_stocks - len(self.state.positions)
         if slots <= 0 or not self.watchlist:

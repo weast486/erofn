@@ -60,7 +60,7 @@ class Config:
     # 눌림목 조건
     surge_pct: float = 10.0  # 급등 기준: 하루 상승률 %
     surge_lookback_days: int = 10  # 최근 N거래일 안의 급등만 인정
-    ma_period: int = 18  # 18일선
+    ma_period: int = 15  # 15일선
     ma_max_break_pct: float = 1.5  # 현재가 <= 이평선이면 터치. 단 N% 넘게 아래면 이탈로 보고 매수 안 함
     require_ma_rising: bool = True  # 이평선이 상승 중인 종목만
     min_avg_trading_amount: float = 3_000_000_000  # 20일 평균 거래대금 하한

@@ -52,15 +52,15 @@ class SelectorTest(unittest.TestCase):
         closes = surge_series()
         self.assertAlmostEqual(item.prev_closes_sum, sum(closes[-4:]))
 
-    def test_default_18_day_ma(self):
-        p = PullbackParams()  # 봇 기본값: 18일선
-        self.assertEqual(p.ma_period, 18)
-        # 18일선은 급등 전 봉 비중이 커서, 급등폭이 작으면 터치 가격이 급등 전 종가 아래가 되어 매수 제외됨
+    def test_default_15_day_ma(self):
+        p = PullbackParams()  # 봇 기본값: 15일선
+        self.assertEqual(p.ma_period, 15)
+        # 긴 이평선은 급등 전 봉 비중이 커서, 급등폭이 작으면 터치 가격이 급등 전 종가 아래가 되어 매수 제외됨
         closes = surge_series(surge_pct=0.20)
         item, reason = analyze("A", "A", parse_candles(closes_to_candles(closes)), TODAY, p)
         self.assertEqual(reason, "")
-        self.assertAlmostEqual(item.prev_closes_sum, sum(closes[-17:]))
-        ma_at_touch = item.prev_closes_sum / 17  # 현재가 = 실시간 18일선이 되는 가격
+        self.assertAlmostEqual(item.prev_closes_sum, sum(closes[-14:]))
+        ma_at_touch = item.prev_closes_sum / 14  # 현재가 = 실시간 15일선이 되는 가격
         self.assertTrue(entry_signal(item, ma_at_touch, p)[0])
         self.assertFalse(entry_signal(item, ma_at_touch * 1.01, p)[0])
 

@@ -731,6 +731,140 @@ def run_surge_doji(
     return Result(start, end, s.initial_cash, final, trades, equity_curve, len(positions))
 
 
+@dataclass
+class RetestSettings:
+    """기준봉(급등 + N일 신고가) 이후 이전 고점까지 되돌릴 때 지정가 매수."""
+    surge_pct: float = 15.0  # 기준봉 전일 대비 상승률 하한
+    min_amount: float = 20_000_000_000  # 기준봉 거래대금 하한
+    entry_days: int = 20  # 기준봉 종가가 직전 N거래일 종가 최고값을 넘어야 함 (N일 신고가)
+    level: str = "high"  # 매수가: high = 직전 N거래일 장중 고가 최고값, close = 종가 최고값
+    watch_days: int = 10  # 기준봉 다음 날부터 N거래일 안에 닿아야 매수
+    max_break_pct: float = 3.0  # 시가가 매수가보다 이 % 넘게 아래서 시작하면(지지 이탈) 매수 취소
+    stop_loss_pct: float = 4.7
+    take_profit_pct: float = 20.0
+    min_avg_trading_amount: float = 3_000_000_000
+
+
+def run_retest(
+    data: dict[str, tuple[str, list[Bar]]],
+    start: date,
+    end: date,
+    s: BacktestSettings | None = None,
+    r: RetestSettings | None = None,
+) -> Result:
+    s = s or BacktestSettings()
+    r = r or RetestSettings()
+    budget = s.params.slot_budget
+    series = _prepare(data)
+    calendar = sorted({d for ser in series.values() for d in ser.days if start <= d <= end})
+    # 종목별 대기 중인 기준봉: sym -> (기준봉 인덱스, 매수가, 우선순위)
+    watch: dict[str, tuple[int, float, float]] = {}
+
+    cash = s.initial_cash
+    positions: dict[str, Trade] = {}
+    trades: list[Trade] = []
+    equity_curve: list[tuple[date, float]] = []
+    last_close: dict[str, float] = {}
+
+    def close_position(t: Trade, day: date, price: float, reason: str) -> None:
+        nonlocal cash
+        proceeds = _sell_value(t.qty, price, day.year, s)
+        t.exit_date, t.exit_price, t.reason = day, price, reason
+        t.pnl = proceeds - t.qty * t.entry_price * (1 + s.commission)
+        cash += proceeds
+        del positions[t.symbol]
+
+    def stop_of(price: float) -> float:
+        return round_down_to_tick(price * (1 - r.stop_loss_pct / 100))
+
+    for day in calendar:
+        # 1) 청산
+        for sym, t in list(positions.items()):
+            ser = series[sym]
+            i = ser.index.get(day)
+            t.hold_days += 1
+            if i is None or t.entry_date == day:
+                continue
+            bar = ser.bars[i]
+            stop, tp = stop_of(t.entry_price), round_up_to_tick(t.entry_price * (1 + r.take_profit_pct / 100))
+            if bar.open <= stop:
+                close_position(t, day, bar.open * (1 - s.slippage), "STOP_LOSS")
+            elif bar.open >= tp:
+                close_position(t, day, bar.open, "TAKE_PROFIT")
+            elif bar.low <= stop:
+                close_position(t, day, stop * (1 - s.slippage), "STOP_LOSS")
+            elif bar.high >= tp:
+                close_position(t, day, tp, "TAKE_PROFIT")
+
+        # 2) 대기 중인 기준봉이 이전 고점에 닿았으면 매수 (장중 지정가)
+        signals = []
+        for sym, (k, level, key) in list(watch.items()):
+            ser = series[sym]
+            i = ser.index.get(day)
+            if i is None:
+                continue
+            if i - k > r.watch_days:
+                del watch[sym]
+                continue
+            bar = ser.bars[i]
+            if bar.low > level:
+                continue
+            del watch[sym]  # 첫 터치에서만 판단
+            if bar.open <= level:
+                if bar.open < level * (1 - r.max_break_pct / 100):
+                    continue  # 지지선 아래로 갭하락 출발
+                fill = bar.open
+            else:
+                fill = level
+            if sym not in positions and fill <= budget:
+                signals.append((key, sym, fill, bar, ser.bars[k].day))
+        slots = s.num_slots - len(positions)
+        if s.entry_dates is not None and day not in s.entry_dates:
+            slots = 0
+        signals.sort(key=lambda x: x[0], reverse=True)
+        for _, sym, fill, bar, surge_day in signals[:max(slots, 0)]:
+            price = fill * (1 + s.slippage)
+            qty = int(budget // round_up_to_tick(fill * (1 + BUY_LIMIT_SLIPPAGE)))
+            cost = qty * price * (1 + s.commission)
+            if qty <= 0 or cost > cash:
+                continue
+            cash -= cost
+            t = Trade(sym, series[sym].name, day, price, qty, surge_date=surge_day)
+            positions[sym] = t
+            trades.append(t)
+            if bar.low <= stop_of(price):  # 같은 날 손절가까지 밀렸으면 손절로 가정 (보수적)
+                close_position(t, day, stop_of(price) * (1 - s.slippage), "STOP_LOSS")
+
+        # 3) 오늘 종가로 새 기준봉 등록
+        for sym, ser in series.items():
+            i = ser.index.get(day)
+            if i is None or i < max(r.entry_days, 20) + 1 or sym in positions:
+                continue
+            bar, prev = ser.bars[i], ser.bars[i - 1]
+            if bar.close / prev.close - 1 < r.surge_pct / 100 or bar.close * bar.volume < r.min_amount:
+                continue
+            window = ser.bars[i - r.entry_days:i]
+            if bar.close <= max(x.close for x in window):
+                continue  # N일 신고가 아님
+            if sum(x.close * x.volume for x in ser.bars[i - 20:i]) / 20 < r.min_avg_trading_amount:
+                continue
+            level = max((x.high if r.level == "high" else x.close) for x in window)
+            if level >= bar.close:
+                continue
+            watch[sym] = (i, round_down_to_tick(level), bar.close * bar.volume)
+
+        # 4) 평가
+        for sym in positions:
+            i = series[sym].index.get(day)
+            if i is not None:
+                last_close[sym] = series[sym].bars[i].close
+        equity = cash + sum(t.qty * last_close.get(sym, t.entry_price) for sym, t in positions.items())
+        equity_curve.append((day, equity))
+
+    final = equity_curve[-1][1] if equity_curve else s.initial_cash
+    return Result(start, end, s.initial_cash, final, trades, equity_curve, len(positions))
+
+
 # -------------------------------------------------------------------- data
 def load_cache(cache_dir: Path) -> dict[str, tuple[str, list[Bar]]]:
     names = {}
@@ -1001,10 +1135,16 @@ def main(argv: list[str] | None = None) -> None:
     r.add_argument("--cache", type=Path, default=DEFAULT_CACHE)
     r.add_argument("--out", type=Path, default=Path("backtest_results"))
     r.add_argument("--env", default=".env")
-    r.add_argument("--strategy", choices=["pullback", "breakout", "limitup", "surgedoji"], default="pullback",
+    r.add_argument("--strategy", choices=["pullback", "breakout", "limitup", "surgedoji", "retest"], default="pullback",
                    help="pullback: 급등 후 이평선 터치 / breakout: 종가 N일 신고가 매수·M일 신저가 매도 / "
                         "limitup: 전일 상한가 종목 시초가 매수 / "
-                        "surgedoji: 거래대금 상위 +15%% 급등 후 거래량 급감 단봉 음봉 종가 매수")
+                        "surgedoji: 거래대금 상위 +15%% 급등 후 거래량 급감 단봉 음봉 종가 매수 / "
+                        "retest: 급등 + N일 신고가 기준봉 이후 이전 고점까지 되돌리면 지정가 매수")
+    r.add_argument("--surge-pct", type=float, default=15, help="retest: 기준봉 상승률 하한 %%")
+    r.add_argument("--retest-level", choices=["high", "close"], default="high",
+                   help="retest: 이전 고점 = 직전 N일 장중 고가 최고값(high) / 종가 최고값(close)")
+    r.add_argument("--watch-days", type=int, default=10, help="retest: 기준봉 뒤 N거래일 안에 닿아야 매수")
+    r.add_argument("--max-break", type=float, default=3.0, help="retest: 시가가 매수가보다 N%% 넘게 낮으면 매수 취소")
     r.add_argument("--entry-days", type=int, default=20, help="breakout: 매수 신고가 기간")
     r.add_argument("--exit-days", type=int, default=10, help="breakout: 매도 신저가 기간")
     r.add_argument("--stop-loss", type=float, default=0.0, help="breakout: 손절 %% (0 = 없음)")
@@ -1094,6 +1234,12 @@ def main(argv: list[str] | None = None) -> None:
             settings.entry_dates = index_uptrend_days(load_index(args.cache, "KOSPI"), args.kospi_up_days)
             print(f"코스피가 {args.kospi_up_days}거래일 전보다 높은 날에만 매수")
         runner = lambda y0, y1: run_breakout(data, y0, y1, settings, bs)  # noqa: E731
+    elif args.strategy == "retest":
+        rt = RetestSettings(surge_pct=args.surge_pct, min_amount=args.min_day_amount or 2e10,
+                            entry_days=args.entry_days, level=args.retest_level, watch_days=args.watch_days,
+                            max_break_pct=args.max_break, stop_loss_pct=args.stop_loss or 4.7,
+                            take_profit_pct=args.take_profit or 20.0)
+        runner = lambda y0, y1: run_retest(data, y0, y1, settings, rt)  # noqa: E731
     elif args.strategy == "surgedoji":
         sd = SurgeDojiSettings(stop_loss_pct=settings.stop_loss_pct, take_profit_pct=settings.take_profit_pct,
                                max_hold_days=settings.max_hold_days, cooldown_days=settings.cooldown_days)

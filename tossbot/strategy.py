@@ -536,6 +536,7 @@ class BreakoutStrategy(PullbackStrategy):
             first_in_days=cfg.breakout_first_in_days,
             min_day_amount=cfg.min_day_amount,
             min_avg_trading_amount=cfg.min_avg_trading_amount,
+            max_price=cfg.max_price,
         )
 
     def buy_step(self, now: datetime, day: TradingDay, deadline: datetime) -> None:

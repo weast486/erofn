@@ -49,8 +49,9 @@ class EvaluateTest(unittest.TestCase):
         self.assertIn("이미 신고가", self.ev(recent_high, 10_600)[1])
         self.assertIn("상한가", self.ev(BASE, 13_000)[1])
         self.assertIn("당일 거래대금", self.ev(BASE, 10_800, volume=1_000_000)[1])  # 108억
-        pricey = [c * 20 for c in BASE]
-        self.assertIn("예산 초과", self.ev(pricey, 216_000)[1])
+        pricey = [c * 5 for c in BASE]
+        self.assertIn("50,000원 초과", self.ev(pricey, 54_000)[1])  # 10만원 이하여도 5만원 초과면 제외
+        self.assertEqual(self.ev([c * 4.5 for c in BASE], 48_600, volume=500_000)[1], "")  # 4만8천원, 2주
 
     def test_live_and_backtest_agree(self):
         """같은 일봉이면 실전 판정과 백테스트 매수가 일치해야 한다."""

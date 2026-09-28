@@ -160,8 +160,12 @@ class PullbackStrategy:
         self.store.save(self.state)
 
     def market_allows_buy(self, today: date) -> bool:
-        """시장 필터. kospi_down: 코스피 현재가 < 전일 종가일 때만 신규 매수 허용."""
-        if self.cfg.market_filter != "kospi_down":
+        """시장 필터.
+        kospi_down: 코스피 현재가 < 전일 종가일 때만 신규 매수 허용
+        kospi_not_down: 코스피 현재가 < 전일 종가이면 신규 매수 금지 (전일 이상일 때만 매수)
+        """
+        mode = self.cfg.market_filter
+        if mode not in ("kospi_down", "kospi_not_down"):
             return True
         client = self.broker.client
         if self._kospi_prev_close is None or self._kospi_prev_close[0] != today:
@@ -176,7 +180,12 @@ class PullbackStrategy:
             return False
         now_price = float(prices[0]["lastPrice"])
         prev_close = self._kospi_prev_close[1]
-        return now_price < prev_close
+        down = now_price < prev_close
+        allowed = down if mode == "kospi_down" else not down
+        if not allowed:
+            log.info("시장 필터(%s): 코스피 %.2f (전일 %.2f, %+.2f%%) → 오늘 신규 매수 안 함",
+                     mode, now_price, prev_close, (now_price / prev_close - 1) * 100)
+        return allowed
 
     def in_cooldown(self, symbol: str, today: date) -> bool:
         for h in reversed(self.state.history):
@@ -538,10 +547,13 @@ class BreakoutStrategy(PullbackStrategy):
             log.info("이미 %d종목 보유 중, 오늘은 매수 없음", len(self.state.positions))
             self._mark_bought(today)
             return
+        # 시장 필터를 먼저 확인. 막히면 오늘 매수 완료로 기록하지 않고 다음 주기(15:20 전까지)에 다시 확인
+        if not self.market_allows_buy(today):
+            return
         # 조회 오류가 나면 예외가 전파되어 다음 주기(매수 시간대 안)에 다시 시도
         cands = self.select(self.broker.client, set(self.state.positions), slots, self.params(), today)
         self._mark_bought(today)
-        if not cands or not self.market_allows_buy(today):
+        if not cands:
             return
         orders = [
             (c.symbol, c.name, c.price,

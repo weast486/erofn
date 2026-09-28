@@ -74,7 +74,7 @@ class Config:
     breakout_first_in_days: int = 20  # 직전 N거래일 안에 신고가가 없던 첫 신고가만
     min_day_amount: float = 20_000_000_000  # 당일 거래대금 하한 (200억)
     # 시장 필터: kospi_down = 코스피가 전일 종가보다 낮을 때만 신규 매수, none = 필터 없음
-    market_filter: str = "none"
+    market_filter: str = "kospi_not_down"
     min_days_after_surge: int = 3  # 급등일로부터 N거래일째부터 매수 허용
     pullback_volume_ratio: float = 0.5  # 급등 이후 평균 거래량 <= 급등일 거래량 x N
     # 최대 보유 기간: 매수일로부터 N거래일째 TIME_EXIT_TIME 에 시장가 매도 (0 이면 제한 없음)

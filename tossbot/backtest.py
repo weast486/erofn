@@ -897,6 +897,11 @@ def index_streak_up_days(index: list[Bar], streak: int = 3) -> set[date]:
     return out
 
 
+def index_not_down_days(index: list[Bar]) -> set[date]:
+    """지수 종가가 전일 종가 이상인 날 (실전 MARKET_FILTER=kospi_not_down 에 해당)."""
+    return {cur.day for prev, cur in zip(index, index[1:]) if cur.close >= prev.close}
+
+
 def index_down_days(index: list[Bar], mode: str = "close") -> set[date]:
     """지수 하락일. mode=close: 종가 < 전일 종가, open: 시가 < 전일 종가, both: 둘 다."""
     out = set()
@@ -973,6 +978,8 @@ def main(argv: list[str] | None = None) -> None:
     r.add_argument("--first-in-days", type=int, default=0, help="breakout: 직전 N거래일 안에 신고가가 없던 첫 신고가만")
     r.add_argument("--min-day-amount", type=float, default=0, help="breakout: 신호 당일 거래대금 하한 (원)")
     r.add_argument("--entry-delay", type=int, default=0, help="breakout: 신고가 신호 N거래일 뒤 종가에 매수")
+    r.add_argument("--kospi-not-down", action="store_true",
+                   help="breakout: 코스피 종가가 전일보다 낮은 날은 매수 금지")
     r.add_argument("--kospi-up-days", type=int, default=0,
                    help="breakout: 코스피 종가가 N거래일 전보다 높은 날에만 매수 (0 = 필터 없음)")
     r.add_argument("--rank-by", choices=["amount", "change", "strength"], default="amount",
@@ -1015,6 +1022,9 @@ def main(argv: list[str] | None = None) -> None:
                               entry_delay=args.entry_delay, delay_max_rise_pct=args.delay_max_rise, rank_by=args.rank_by,
                               delay_hold_signal_open=args.delay_hold_open, delay_intraday=args.delay_intraday,
                               min_avg_trading_amount=settings.params.min_avg_trading_amount)
+        if args.kospi_not_down:
+            settings.entry_dates = index_not_down_days(load_index(args.cache, "KOSPI"))
+            print("코스피가 전일보다 낮은 날은 매수 금지")
         if args.kospi_up_days:
             settings.entry_dates = index_uptrend_days(load_index(args.cache, "KOSPI"), args.kospi_up_days)
             print(f"코스피가 {args.kospi_up_days}거래일 전보다 높은 날에만 매수")

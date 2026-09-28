@@ -68,6 +68,16 @@ class FakeClient:
     def __init__(self):
         self.prices = {"000010": 10_800}
         self.bars = history(BASE + [10_800], 3_000_000)
+        self.kospi_prev_close, self.kospi_now = 3_000.0, 3_010.0  # 기본: 코스피 상승 중
+        self.selects = 0
+
+    def get_indicator_candles(self, symbol, interval="1d", count=5):
+        d = DAYS[0]
+        return [{"timestamp": f"{d.isoformat()}T00:00:00+09:00", "openPrice": "1", "highPrice": "1",
+                 "lowPrice": "1", "closePrice": str(self.kospi_prev_close), "volume": "0", "currency": "KRW"}]
+
+    def get_indicator_prices(self, symbols):
+        return [{"symbol": "KOSPI", "lastPrice": str(self.kospi_now)}]
 
     def get_rankings(self, ranking_type, duration):
         return [{"symbol": "000010", "tradingAmount": "32400000000", "price": {"lastPrice": "10800"}}]
@@ -125,6 +135,22 @@ class BreakoutStrategyTest(unittest.TestCase):
         del self.s.state.positions["000010"]
         self.tick(TODAY, 15, 15)  # 같은 날 재매수 없음
         self.assertEqual(self.s.state.positions, {})
+
+    def test_no_buy_while_kospi_below_prev_close(self):
+        self.assertEqual(self.cfg.market_filter, "kospi_not_down")
+        self.client.kospi_now = 2_990  # 코스피 하락 중 → 매수 금지
+        self.tick(TODAY, 15, 10)
+        self.assertEqual(self.s.state.positions, {})
+        self.assertIsNone(self.s.state.last_buy_date)  # 오늘 매수 기회를 소진하지 않음
+        self.client.kospi_now = 3_000  # 15:20 전에 전일 종가 회복 → 매수
+        self.tick(TODAY, 15, 15)
+        self.assertIn("000010", self.s.state.positions)
+
+    def test_market_filter_off(self):
+        self.cfg.market_filter = "none"
+        self.client.kospi_now = 2_900
+        self.tick(TODAY, 15, 10)
+        self.assertIn("000010", self.s.state.positions)
 
     def test_select_breakouts(self):
         cands = select_breakouts(self.client, set(), 10, BreakoutParams(), TODAY, request_interval=0)

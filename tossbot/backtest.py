@@ -323,6 +323,9 @@ class BreakoutSettings:
     stop_limit: bool = False
     # N > 0 이면 N일 신고가(종가 기준)이기도 한 종목은 제외 (예: 200 = 200일 신고가 제외). 이력이 N일 미만이면 제외
     exclude_high_days: int = 0
+    # 이평선 저항: 종가가 N일선 아래이면서 N일선까지 남은 거리가 pct % 미만이면 매수 금지
+    ma_resist_days: int = 0
+    ma_resist_pct: float = 0.0
     exclude_symbols: frozenset = frozenset()  # 매수 제외 종목코드 (예: 제약·바이오)
     breakeven_lock_pct: float = 0.0  # 올린 손절가 = 매수가 x (1 + 이 %). 0 이면 본전
     # False 면 신고가 조건 없이 매수 (급등주 매매: min_change_pct 와 함께 사용)
@@ -470,6 +473,12 @@ def run_breakout(
                     continue
                 if b.skip_touched_limit_up and bar.high >= ser.bars[i - 1].close * 1.295:
                     continue
+                if b.ma_resist_days:
+                    if i + 1 < b.ma_resist_days:
+                        continue
+                    ma = sum(x.close for x in ser.bars[i + 1 - b.ma_resist_days:i + 1]) / b.ma_resist_days
+                    if bar.close < ma < bar.close * (1 + b.ma_resist_pct / 100):
+                        continue  # 바로 위에 이평선 저항
                 if b.exclude_high_days and (i < b.exclude_high_days
                                             or bar.close > max(x.close for x in ser.bars[i - b.exclude_high_days:i])):
                     continue
@@ -1304,6 +1313,8 @@ def main(argv: list[str] | None = None) -> None:
     r.add_argument("--exclude-high-days", type=int, default=0,
                    help="breakout: N일 신고가이기도 한 종목 제외 (예: 200)")
     r.add_argument("--exclude-list", type=Path, help="breakout: 매수 제외 종목 목록 파일 (줄마다 '종목코드 이름', # 주석)")
+    r.add_argument("--ma-resist", type=float, nargs=2, metavar=("DAYS", "PCT"),
+                   help="breakout: 종가가 DAYS일선 아래이고 DAYS일선까지 PCT%% 미만 남았으면 매수 금지 (예: 200 5)")
     r.add_argument("--lock-profit", type=float, default=0,
                    help="breakout: --breakeven-at 이후 손절가를 매수가 +N%%로 (0 = 본전)")
     r.add_argument("--no-new-high", action="store_true", help="breakout: 신고가 조건 없이 매수 (--min-change 와 함께)")
@@ -1378,6 +1389,8 @@ def main(argv: list[str] | None = None) -> None:
                               buy_day_gap_up=args.buy_day_gap_up, buy_day_bullish=args.buy_day_bullish,
                               buy_day_min_wick_ratio=args.buy_day_wick, recover_after_drop_pct=args.recover_after_drop,
                               stop_limit=args.stop_limit, exclude_high_days=args.exclude_high_days,
+                              ma_resist_days=int(args.ma_resist[0]) if args.ma_resist else 0,
+                              ma_resist_pct=args.ma_resist[1] if args.ma_resist else 0.0,
                               exclude_symbols=frozenset(
                                   line.split()[0] for line in args.exclude_list.read_text(encoding="utf-8").splitlines()
                                   if line.strip() and not line.startswith("#")) if args.exclude_list else frozenset(),

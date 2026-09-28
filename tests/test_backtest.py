@@ -181,3 +181,23 @@ class SurgeDojiEngineTest(unittest.TestCase):
         (t,) = res.trades
         self.assertEqual((t.entry_date, t.entry_price, t.surge_date), (days[32], 11_300, days[30]))
         self.assertEqual((t.reason, t.exit_price), ("TAKE_PROFIT", round_up_to_tick(11_300 * 1.15)))
+
+
+class FirstHighTest(unittest.TestCase):
+    def test_only_first_20d_high_within_month(self):
+        from tossbot.backtest import BreakoutSettings, run_breakout
+
+        days = weekdays(70)
+        closes = [10_000] * 40 + [10_300]  # 40번째 날: 첫 신고가 → 매수
+        closes += [10_100] * 5 + [10_400]  # 46번째 날: 또 신고가지만 직전 20일 안에 신고가 있었음
+        bars = [Bar(d, c, c * 1.01, c * 0.99, c, 5_000_000) for d, c in zip(days, closes)]
+        b = BreakoutSettings(stop_loss_pct=7.0, take_profit_pct=20.0, exit_on_low=False,
+                             first_in_days=20, min_day_amount=10_000_000_000)
+        res = run_breakout({"000010": ("테스트", bars)}, date(2023, 11, 1), date(2024, 3, 31),
+                           BacktestSettings(slippage=0.0, num_slots=10), b)
+        self.assertEqual([t.entry_date for t in res.trades], [days[40]])
+        # 거래대금 100억 미만이면 매수 없음
+        small = [Bar(x.day, x.open, x.high, x.low, x.close, 100_000) for x in bars]
+        res2 = run_breakout({"000010": ("테스트", small)}, date(2023, 11, 1), date(2024, 3, 31),
+                            BacktestSettings(slippage=0.0), b)
+        self.assertEqual(res2.trades, [])

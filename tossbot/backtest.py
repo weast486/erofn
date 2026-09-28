@@ -281,6 +281,12 @@ class BreakoutSettings:
     max_hold_days: int = 0  # 0 이면 제한 없음. N거래일째 종가에 매도
     # 상한가(전일 대비 +29.5% 이상)로 마감한 종목은 매수 대기 물량이 쌓여 종가 체결이 사실상 불가능하므로 제외
     skip_limit_up: bool = True
+    # N > 0 이면 직전 N거래일 동안 entry_days 신고가가 한 번도 없었던 '첫 신고가'만 매수
+    first_in_days: int = 0
+    # 신호 당일 거래대금(종가 x 거래량) 하한 (0 이면 없음)
+    min_day_amount: float = 0.0
+    # N > 0 이면 '직전 N거래일 동안 신고가가 없었던' 첫 신고가만 매수 (예: 20 = 한 달 이내 첫 신고가)
+    first_in_days: int = 0
     min_avg_trading_amount: float = 3_000_000_000
     rank_by: str = "amount"  # 신호가 많을 때 우선순위: amount(당일 거래대금) / strength(신고가 돌파폭)
 
@@ -304,6 +310,14 @@ def run_breakout(
     budget = s.params.slot_budget
     series = _prepare(data)
     calendar = sorted({d for ser in series.values() for d in ser.days if start <= d <= end})
+
+    # 종목별로 각 날이 종가 기준 entry_days 일 신고가였는지 미리 계산
+    is_high: dict[str, list[bool]] = {}
+    for sym, ser in series.items():
+        closes = [x.close for x in ser.bars]
+        is_high[sym] = [
+            i >= b.entry_days and closes[i] > max(closes[i - b.entry_days:i]) for i in range(len(closes))
+        ]
 
     cash = s.initial_cash
     positions: dict[str, Trade] = {}
@@ -354,12 +368,28 @@ def run_breakout(
                 i = ser.index.get(day)
                 if i is None or i < max(b.entry_days, 20):
                     continue
+                if not is_high[sym][i]:
+                    continue
+                if b.first_in_days and (i < b.first_in_days or any(is_high[sym][i - b.first_in_days:i])):
+                    continue  # 최근 N거래일 안에 이미 신고가가 있었음 → 첫 신고가 아님
                 bar = ser.bars[i]
                 prev_high = max(x.close for x in ser.bars[i - b.entry_days:i])
-                if bar.close <= prev_high or bar.close > budget:
+                if bar.close > budget:
                     continue
                 if b.skip_limit_up and bar.close >= ser.bars[i - 1].close * 1.295:
                     continue
+                if b.min_day_amount and bar.close * bar.volume < b.min_day_amount:
+                    continue
+                if b.first_in_days:
+                    if i < b.entry_days + b.first_in_days:
+                        continue
+                    closes = [x.close for x in ser.bars[i - b.entry_days - b.first_in_days:i]]
+                    earlier_high = any(
+                        closes[j] > max(closes[j - b.entry_days:j])
+                        for j in range(b.entry_days, len(closes))
+                    )
+                    if earlier_high:
+                        continue
                 avg_amount = sum(x.close * x.volume for x in ser.bars[i - 20:i]) / 20
                 if avg_amount < b.min_avg_trading_amount:
                     continue
@@ -887,6 +917,8 @@ def main(argv: list[str] | None = None) -> None:
                         "config=.env 의 MARKET_FILTER 를 따름(kospi_down 이면 close)")
     r.add_argument("--no-exit-on-low", action="store_true", help="breakout: 신저가 매도 끄기")
     r.add_argument("--max-hold", type=int, default=0, help="breakout: 최대 보유 거래일 (0 = 없음)")
+    r.add_argument("--first-in-days", type=int, default=0, help="breakout: 직전 N거래일 안에 신고가가 없던 첫 신고가만")
+    r.add_argument("--min-day-amount", type=float, default=0, help="breakout: 신호 당일 거래대금 하한 (원)")
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
 
@@ -918,6 +950,7 @@ def main(argv: list[str] | None = None) -> None:
     if args.strategy == "breakout":
         bs = BreakoutSettings(args.entry_days, args.exit_days, args.stop_loss, args.take_profit,
                               exit_on_low=not args.no_exit_on_low, max_hold_days=args.max_hold,
+                              first_in_days=args.first_in_days, min_day_amount=args.min_day_amount,
                               min_avg_trading_amount=settings.params.min_avg_trading_amount)
         runner = lambda y0, y1: run_breakout(data, y0, y1, settings, bs)  # noqa: E731
     elif args.strategy == "surgedoji":

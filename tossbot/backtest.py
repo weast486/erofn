@@ -738,6 +738,7 @@ class RetestSettings:
     min_amount: float = 20_000_000_000  # 기준봉 거래대금 하한
     entry_days: int = 20  # 기준봉 종가가 직전 N거래일 종가 최고값을 넘어야 함 (N일 신고가)
     level: str = "high"  # 매수가: high = 직전 N거래일 장중 고가 최고값, close = 종가 최고값
+    first_in_days: int = 0  # N > 0 이면 직전 N거래일 동안 N일 신고가가 없던 '첫 신고가' 기준봉만
     watch_days: int = 10  # 기준봉 다음 날부터 N거래일 안에 닿아야 매수
     max_break_pct: float = 3.0  # 시가가 매수가보다 이 % 넘게 아래서 시작하면(지지 이탈) 매수 취소
     stop_loss_pct: float = 4.7
@@ -759,6 +760,7 @@ def run_retest(
     calendar = sorted({d for ser in series.values() for d in ser.days if start <= d <= end})
     # 종목별 대기 중인 기준봉: sym -> (기준봉 인덱스, 매수가, 우선순위)
     watch: dict[str, tuple[int, float, float]] = {}
+    is_high = {sym: new_high_flags([x.close for x in ser.bars], r.entry_days) for sym, ser in series.items()}
 
     cash = s.initial_cash
     positions: dict[str, Trade] = {}
@@ -846,6 +848,8 @@ def run_retest(
             window = ser.bars[i - r.entry_days:i]
             if bar.close <= max(x.close for x in window):
                 continue  # N일 신고가 아님
+            if r.first_in_days and (i < r.entry_days + r.first_in_days or any(is_high[sym][i - r.first_in_days:i])):
+                continue  # 최근 N거래일 안에 이미 신고가가 있었음 → 첫 신고가 아님
             if sum(x.close * x.volume for x in ser.bars[i - 20:i]) / 20 < r.min_avg_trading_amount:
                 continue
             level = max((x.high if r.level == "high" else x.close) for x in window)
@@ -1237,6 +1241,7 @@ def main(argv: list[str] | None = None) -> None:
     elif args.strategy == "retest":
         rt = RetestSettings(surge_pct=args.surge_pct, min_amount=args.min_day_amount or 2e10,
                             entry_days=args.entry_days, level=args.retest_level, watch_days=args.watch_days,
+                            first_in_days=args.first_in_days,
                             max_break_pct=args.max_break, stop_loss_pct=args.stop_loss or 4.7,
                             take_profit_pct=args.take_profit or 20.0)
         runner = lambda y0, y1: run_retest(data, y0, y1, settings, rt)  # noqa: E731

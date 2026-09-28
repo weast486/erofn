@@ -326,6 +326,9 @@ class BreakoutSettings:
     # 이평선 저항: 종가가 N일선 아래이면서 N일선까지 남은 거리가 pct % 미만이면 매수 금지
     ma_resist_days: int = 0
     ma_resist_pct: float = 0.0
+    # N일 최저가(장중 저가) 대비 종가 상승률이 pct % 초과면 매수 금지
+    low_rise_days: int = 0
+    max_rise_from_low_pct: float = 0.0
     exclude_symbols: frozenset = frozenset()  # 매수 제외 종목코드 (예: 제약·바이오)
     breakeven_lock_pct: float = 0.0  # 올린 손절가 = 매수가 x (1 + 이 %). 0 이면 본전
     # False 면 신고가 조건 없이 매수 (급등주 매매: min_change_pct 와 함께 사용)
@@ -479,6 +482,12 @@ def run_breakout(
                     ma = sum(x.close for x in ser.bars[i + 1 - b.ma_resist_days:i + 1]) / b.ma_resist_days
                     if bar.close < ma < bar.close * (1 + b.ma_resist_pct / 100):
                         continue  # 바로 위에 이평선 저항
+                if b.low_rise_days:
+                    if i + 1 < b.low_rise_days:
+                        continue
+                    low = min(x.low for x in ser.bars[i + 1 - b.low_rise_days:i + 1])
+                    if bar.close > low * (1 + b.max_rise_from_low_pct / 100):
+                        continue
                 if b.exclude_high_days and (i < b.exclude_high_days
                                             or bar.close > max(x.close for x in ser.bars[i - b.exclude_high_days:i])):
                     continue
@@ -1315,6 +1324,8 @@ def main(argv: list[str] | None = None) -> None:
     r.add_argument("--exclude-list", type=Path, help="breakout: 매수 제외 종목 목록 파일 (줄마다 '종목코드 이름', # 주석)")
     r.add_argument("--ma-resist", type=float, nargs=2, metavar=("DAYS", "PCT"),
                    help="breakout: 종가가 DAYS일선 아래이고 DAYS일선까지 PCT%% 미만 남았으면 매수 금지 (예: 200 5)")
+    r.add_argument("--max-rise-from-low", type=float, nargs=2, metavar=("DAYS", "PCT"),
+                   help="breakout: DAYS일 최저가 대비 상승률이 PCT%% 초과면 매수 금지 (예: 250 100)")
     r.add_argument("--lock-profit", type=float, default=0,
                    help="breakout: --breakeven-at 이후 손절가를 매수가 +N%%로 (0 = 본전)")
     r.add_argument("--no-new-high", action="store_true", help="breakout: 신고가 조건 없이 매수 (--min-change 와 함께)")
@@ -1389,6 +1400,8 @@ def main(argv: list[str] | None = None) -> None:
                               buy_day_gap_up=args.buy_day_gap_up, buy_day_bullish=args.buy_day_bullish,
                               buy_day_min_wick_ratio=args.buy_day_wick, recover_after_drop_pct=args.recover_after_drop,
                               stop_limit=args.stop_limit, exclude_high_days=args.exclude_high_days,
+                              low_rise_days=int(args.max_rise_from_low[0]) if args.max_rise_from_low else 0,
+                              max_rise_from_low_pct=args.max_rise_from_low[1] if args.max_rise_from_low else 0.0,
                               ma_resist_days=int(args.ma_resist[0]) if args.ma_resist else 0,
                               ma_resist_pct=args.ma_resist[1] if args.ma_resist else 0.0,
                               exclude_symbols=frozenset(

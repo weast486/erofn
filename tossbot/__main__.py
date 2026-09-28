@@ -1,7 +1,7 @@
 """CLI 진입점.
 
     python -m tossbot check        # API 연결/계좌/매수가능금액 확인
-    python -m tossbot select       # 급등 종목 감시 목록과 15일선 대비 위치 출력 (주문 없음)
+    python -m tossbot select       # 급등 종목 감시 목록과 18일선 대비 위치 출력 (주문 없음)
     python -m tossbot status       # 봇 보유 포지션 및 매매 이력
     python -m tossbot run          # 자동매매 상주 실행
     python -m tossbot liquidate    # 봇 보유 종목 즉시 전량 매도 (비상용)
@@ -56,7 +56,7 @@ def cmd_check(cfg: Config, client: TossClient, _s) -> None:
 
 
 def cmd_select(cfg: Config, client: TossClient, strategy: PullbackStrategy) -> None:
-    """급등 종목 감시 목록과 현재 15일선 대비 위치 출력 (주문 없음)."""
+    """급등 종목 감시 목록과 현재 18일선 대비 위치 출력 (주문 없음)."""
     today = datetime.now(KST).date()
     params = params_from_config(cfg)
     watch = build_watchlist(client, set(strategy.state.surge_seen), params, today)

@@ -319,6 +319,8 @@ class BreakoutSettings:
     breakeven_trigger_pct: float = 0.0
     # 0 보다 크면 저가가 매수가 대비 이 % 이상 빠진 다음 날부터 매수가(본전)에 지정가 매도 대기
     recover_after_drop_pct: float = 0.0
+    # True 면 손절을 시장가 대신 손절가 지정가로: 갭하락으로 시가가 손절가 아래면 손절가를 회복할 때까지 체결 안 됨
+    stop_limit: bool = False
     breakeven_lock_pct: float = 0.0  # 올린 손절가 = 매수가 x (1 + 이 %). 0 이면 본전
     # False 면 신고가 조건 없이 매수 (급등주 매매: min_change_pct 와 함께 사용)
     require_new_high: bool = True
@@ -407,7 +409,13 @@ def run_breakout(
             if sym in breakeven:
                 stop, reason = round_down_to_tick(t.entry_price * (1 + b.breakeven_lock_pct / 100)), "BREAKEVEN"
             # 같은 날 손절가·익절가 모두 닿으면 손절로 가정 (보수적)
-            if stop and bar.open <= stop:
+            if stop and b.stop_limit and bar.open < stop:
+                if bar.high >= stop:
+                    close_position(t, day, stop, reason + "_LIMIT")  # 갭하락 후 손절가까지 회복해 지정가 체결
+                continue  # 미체결: 지정가 매도 대기 (익절 판단 없음)
+            if stop and b.stop_limit and bar.low <= stop:
+                close_position(t, day, stop, reason + "_LIMIT")  # 장중 손절가 도달 → 지정가 체결 (슬리피지 없음)
+            elif stop and bar.open <= stop:
                 close_position(t, day, bar.open * (1 - s.slippage), reason)
             elif tp and bar.open >= tp:
                 close_position(t, day, bar.open, "TAKE_PROFIT")
@@ -1285,6 +1293,8 @@ def main(argv: list[str] | None = None) -> None:
                    help="breakout: 이평선 배열, 위에서부터 (예: 60,5,20 = 60일선 > 5일선 > 20일선)")
     r.add_argument("--recover-after-drop", type=float, default=0,
                    help="breakout: 매수가 대비 N%% 이상 빠지면 다음 날부터 본전 지정가 매도 (0 = 없음)")
+    r.add_argument("--stop-limit", action="store_true",
+                   help="breakout: 손절을 손절가 지정가로 (갭하락이면 손절가 회복까지 미체결)")
     r.add_argument("--lock-profit", type=float, default=0,
                    help="breakout: --breakeven-at 이후 손절가를 매수가 +N%%로 (0 = 본전)")
     r.add_argument("--no-new-high", action="store_true", help="breakout: 신고가 조건 없이 매수 (--min-change 와 함께)")
@@ -1358,6 +1368,7 @@ def main(argv: list[str] | None = None) -> None:
                               max_drop_from_high_pct=args.max_drop_from_high,
                               buy_day_gap_up=args.buy_day_gap_up, buy_day_bullish=args.buy_day_bullish,
                               buy_day_min_wick_ratio=args.buy_day_wick, recover_after_drop_pct=args.recover_after_drop,
+                              stop_limit=args.stop_limit,
                               ma_order=tuple(int(x) for x in args.ma_order.split(",")) if args.ma_order else (),
                               exclude_marcap=tuple(args.exclude_marcap) if args.exclude_marcap else None)
         if args.min_marcap or args.exclude_marcap:

@@ -305,6 +305,7 @@ class BreakoutSettings:
     min_marcap: float = 0.0  # 0 보다 크면 신호일 시가총액 하한 (원). marcap 이 필요
     marcap: dict | None = None  # {종목코드: {날짜: 시가총액}}
     skip_touched_limit_up: bool = False  # True 면 장중 상한가를 찍고 내려온 종목도 제외
+    max_drop_from_high_pct: float = 0.0  # 0 보다 크면 종가가 당일 고가 대비 이 % 이상 내려온 종목 제외
     exclude_marcap: tuple[float, float] | None = None  # (lo, hi): 시가총액이 lo 초과 hi 미만이면 제외
     # N > 0 이면 종가가 N일 이동평균선 아래로 마감한 날 종가에 매도
     ma_exit_days: int = 0
@@ -435,6 +436,8 @@ def run_breakout(
                 if b.min_day_amount and bar.close * bar.volume < b.min_day_amount:
                     continue
                 if b.skip_touched_limit_up and bar.high >= ser.bars[i - 1].close * 1.295:
+                    continue
+                if b.max_drop_from_high_pct and bar.close <= bar.high * (1 - b.max_drop_from_high_pct / 100) + 1e-9:
                     continue
                 if b.min_marcap and (b.marcap or {}).get(sym, {}).get(day, 0) < b.min_marcap:
                     continue
@@ -1238,6 +1241,8 @@ def main(argv: list[str] | None = None) -> None:
     r.add_argument("--exclude-marcap", type=float, nargs=2, metavar=("LO", "HI"),
                    help="breakout: 시가총액이 LO 초과 HI 미만인 종목 제외 (--marcap-dir 필요)")
     r.add_argument("--skip-touched-limit-up", action="store_true", help="breakout: 장중 상한가를 찍었던 종목 제외")
+    r.add_argument("--max-drop-from-high", type=float, default=0,
+                   help="breakout: 종가가 당일 고가 대비 N%% 이상 내려온 종목 제외 (0 = 없음)")
     r.add_argument("--lock-profit", type=float, default=0,
                    help="breakout: --breakeven-at 이후 손절가를 매수가 +N%%로 (0 = 본전)")
     r.add_argument("--no-new-high", action="store_true", help="breakout: 신고가 조건 없이 매수 (--min-change 와 함께)")
@@ -1308,6 +1313,7 @@ def main(argv: list[str] | None = None) -> None:
                               next_day_exit=args.next_day_exit, ma_exit_days=args.ma_exit,
                               ma_exit_profit_only=args.ma_exit_profit_only, max_buys_per_day=args.max_buys_per_day,
                               min_marcap=args.min_marcap, skip_touched_limit_up=args.skip_touched_limit_up,
+                              max_drop_from_high_pct=args.max_drop_from_high,
                               exclude_marcap=tuple(args.exclude_marcap) if args.exclude_marcap else None)
         if args.min_marcap or args.exclude_marcap:
             bs.marcap = load_marcap(args.marcap_dir, "2023-01-01")

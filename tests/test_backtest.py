@@ -250,3 +250,12 @@ class IndexFilterTest(unittest.TestCase):
         ix = [Bar(d, c, c, c, c, 0) for d, c in zip(days, closes)]
         # 5거래일 전 종가보다 높은 날만: 5번째(105>100), 8번째(106>104), 9번째(107>105)
         self.assertEqual(index_uptrend_days(ix, 5), {days[5], days[8], days[9]})
+
+    def test_index_streak_up_days(self):
+        from tossbot.backtest import index_streak_up_days
+
+        days = weekdays(8)
+        closes = [100, 101, 102, 103, 102, 103, 104, 105]
+        ix = [Bar(d, c, c, c, c, 0) for d, c in zip(days, closes)]
+        # 3일 연속 상승: 3번째 날(101→102→103), 7번째 날(102→103→104→105)
+        self.assertEqual(index_streak_up_days(ix, 3), {days[3], days[7]})

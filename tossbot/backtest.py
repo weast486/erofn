@@ -903,6 +903,16 @@ def index_uptrend_days(index: list[Bar], lookback: int = 5) -> set[date]:
     return {cur.day for prev, cur in zip(index, index[lookback:]) if cur.close > prev.close}
 
 
+def index_streak_up_days(index: list[Bar], streak: int = 3) -> set[date]:
+    """지수 종가가 오늘 포함 streak 거래일 연속 전일보다 오른 날."""
+    out, run = set(), 0
+    for prev, cur in zip(index, index[1:]):
+        run = run + 1 if cur.close > prev.close else 0
+        if run >= streak:
+            out.add(cur.day)
+    return out
+
+
 def index_down_days(index: list[Bar], mode: str = "close") -> set[date]:
     """지수 하락일. mode=close: 종가 < 전일 종가, open: 시가 < 전일 종가, both: 둘 다."""
     out = set()

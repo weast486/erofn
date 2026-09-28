@@ -33,7 +33,8 @@ class BreakoutParams:
     min_day_amount: float = 20_000_000_000  # 당일 거래대금 하한
     min_avg_trading_amount: float = 3_000_000_000  # 직전 20일 평균 거래대금 하한
     limit_up_ratio: float = 1.295  # 전일 종가 대비 이 비율 이상이면 상한가로 보고 제외
-    max_price: float = 50_000  # 1주 가격 상한 (0 이면 종목당 예산). 5만원 = 10만원으로 최소 2주
+    max_price: float = 0  # 1주 가격 상한 (0 이면 종목당 예산)
+    min_price: float = 10_000  # 1주 가격 하한
 
     @property
     def price_cap(self) -> float:
@@ -80,6 +81,8 @@ def evaluate(
         return None, f"최근 {p.first_in_days}일 안에 이미 신고가"
     if price > p.price_cap:
         return None, f"1주 가격 {p.price_cap:,.0f}원 초과"
+    if price < p.min_price:
+        return None, f"1주 가격 {p.min_price:,.0f}원 미만"
     if price >= closes[-1] * p.limit_up_ratio:
         return None, "상한가 (체결 불가)"
     day_amount = price * today_volume
@@ -102,7 +105,7 @@ def select_breakouts(
         try:
             for r in client.get_rankings(ranking_type, duration):
                 price = float((r.get("price") or {}).get("lastPrice") or 0)
-                if 0 < price <= p.price_cap and float(r.get("tradingAmount") or 0) >= p.min_day_amount:
+                if p.min_price <= price <= p.price_cap and 0 < price and float(r.get("tradingAmount") or 0) >= p.min_day_amount:
                     pool.add(r["symbol"])
         except Exception as exc:
             log.warning("랭킹(%s/%s) 조회 실패: %s", ranking_type, duration, exc)

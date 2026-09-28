@@ -73,7 +73,8 @@ class Config:
     breakout_entry_days: int = 20  # N일 신고가 (종가 기준)
     breakout_first_in_days: int = 20  # 직전 N거래일 안에 신고가가 없던 첫 신고가만
     min_day_amount: float = 20_000_000_000  # 당일 거래대금 하한 (200억)
-    max_price: float = 50_000  # 1주 가격 상한 (0 = 종목당 예산까지)
+    max_price: float = 0  # 1주 가격 상한 (0 = 종목당 예산까지)
+    min_price: float = 10_000  # 1주 가격 하한
     # 시장 필터: kospi_down = 코스피가 전일 종가보다 낮을 때만 신규 매수, none = 필터 없음
     market_filter: str = "kospi_not_down"
     min_days_after_surge: int = 3  # 급등일로부터 N거래일째부터 매수 허용
@@ -129,6 +130,7 @@ class Config:
             breakout_first_in_days=num("BREAKOUT_FIRST_IN_DAYS", "breakout_first_in_days", int),
             min_day_amount=num("MIN_DAY_AMOUNT", "min_day_amount"),
             max_price=num("MAX_PRICE", "max_price"),
+            min_price=num("MIN_PRICE", "min_price"),
             market_filter=_get("MARKET_FILTER", cls.market_filter),
             min_days_after_surge=num("MIN_DAYS_AFTER_SURGE", "min_days_after_surge", int),
             pullback_volume_ratio=num("PULLBACK_VOLUME_RATIO", "pullback_volume_ratio"),

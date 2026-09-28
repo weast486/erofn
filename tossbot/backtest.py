@@ -302,6 +302,8 @@ class BreakoutSettings:
     # 매수 다음 거래일 매도 규칙: "" 없음 / open 시가 / close 종가 / open_if_loss·close_if_loss 매수가 아래일 때만
     next_day_exit: str = ""
     max_buys_per_day: int = 0  # 0 보다 크면 하루 신규 매수 종목 수 상한
+    min_marcap: float = 0.0  # 0 보다 크면 신호일 시가총액 하한 (원). marcap 이 필요
+    marcap: dict | None = None  # {종목코드: {날짜: 시가총액}}
     # N > 0 이면 종가가 N일 이동평균선 아래로 마감한 날 종가에 매도
     ma_exit_days: int = 0
     ma_exit_profit_only: bool = False  # True 면 종가가 매수가보다 높을 때만 이평선 이탈 매도 (익절 전용)
@@ -429,6 +431,8 @@ def run_breakout(
                 if b.skip_limit_up and bar.close >= ser.bars[i - 1].close * 1.295:
                     continue
                 if b.min_day_amount and bar.close * bar.volume < b.min_day_amount:
+                    continue
+                if b.min_marcap and (b.marcap or {}).get(sym, {}).get(day, 0) < b.min_marcap:
                     continue
                 if b.max_day_amount and bar.close * bar.volume > b.max_day_amount:
                     continue
@@ -964,6 +968,20 @@ def adjust_splits(rows: list[tuple]) -> list[tuple]:
     ]
 
 
+def load_marcap(data_dir: Path, start: str, end: str | None = None) -> dict[str, dict[date, float]]:
+    """FinanceData/marcap parquet 에서 종목별·날짜별 시가총액."""
+    import pandas as pd
+
+    y0 = date.fromisoformat(start).year
+    y1 = date.fromisoformat(end).year if end else date.today().year
+    files = [data_dir / f"marcap-{y}.parquet" for y in range(y0, y1 + 1)]
+    df = pd.concat([pd.read_parquet(f, columns=["Code", "Date", "Marcap"]) for f in files if f.exists()])
+    out: dict[str, dict[date, float]] = defaultdict(dict)
+    for code, d, cap in zip(df["Code"], df["Date"], df["Marcap"]):
+        out[code][d.date()] = float(cap)
+    return out
+
+
 def import_marcap(data_dir: Path, start: str, end: str | None, cache_dir: Path) -> None:
     """FinanceData/marcap (KRX 전 종목 일별 데이터, 상장폐지 포함) parquet 을 캐시로 변환."""
     import pandas as pd
@@ -1209,6 +1227,8 @@ def main(argv: list[str] | None = None) -> None:
     r.add_argument("--ma-exit", type=int, default=0, help="breakout: 종가가 N일선 아래로 마감하면 종가 매도 (0 = 없음)")
     r.add_argument("--ma-exit-profit-only", action="store_true", help="breakout: 이평선 이탈 매도를 수익 중일 때만")
     r.add_argument("--max-buys-per-day", type=int, default=0, help="breakout: 하루 신규 매수 종목 수 상한 (0 = 없음)")
+    r.add_argument("--marcap-dir", type=Path, default=Path("marcap/data"), help="breakout: 시가총액용 marcap parquet 폴더")
+    r.add_argument("--min-marcap", type=float, default=0, help="breakout: 신호일 시가총액 하한 (원, --marcap-dir 필요)")
     r.add_argument("--lock-profit", type=float, default=0,
                    help="breakout: --breakeven-at 이후 손절가를 매수가 +N%%로 (0 = 본전)")
     r.add_argument("--no-new-high", action="store_true", help="breakout: 신고가 조건 없이 매수 (--min-change 와 함께)")
@@ -1277,7 +1297,11 @@ def main(argv: list[str] | None = None) -> None:
                               skip_limit_up=not args.allow_limit_up_signal,
                               breakeven_trigger_pct=args.breakeven_at, breakeven_lock_pct=args.lock_profit,
                               next_day_exit=args.next_day_exit, ma_exit_days=args.ma_exit,
-                              ma_exit_profit_only=args.ma_exit_profit_only, max_buys_per_day=args.max_buys_per_day)
+                              ma_exit_profit_only=args.ma_exit_profit_only, max_buys_per_day=args.max_buys_per_day,
+                              min_marcap=args.min_marcap)
+        if args.min_marcap:
+            bs.marcap = load_marcap(args.marcap_dir, "2023-01-01")
+            print(f"시가총액 {args.min_marcap / 1e8:,.0f}억 이상만")
         if args.kospi_not_down:
             settings.entry_dates = index_not_down_days(load_index(args.cache, "KOSPI"))
             print("코스피가 전일보다 낮은 날은 매수 금지")

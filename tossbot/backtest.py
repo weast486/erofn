@@ -317,6 +317,8 @@ class BreakoutSettings:
     ma_exit_days: int = 0
     ma_exit_profit_only: bool = False  # True 면 종가가 매수가보다 높을 때만 이평선 이탈 매도 (익절 전용)
     breakeven_trigger_pct: float = 0.0
+    # 0 보다 크면 저가가 매수가 대비 이 % 이상 빠진 다음 날부터 매수가(본전)에 지정가 매도 대기
+    recover_after_drop_pct: float = 0.0
     breakeven_lock_pct: float = 0.0  # 올린 손절가 = 매수가 x (1 + 이 %). 0 이면 본전
     # False 면 신고가 조건 없이 매수 (급등주 매매: min_change_pct 와 함께 사용)
     require_new_high: bool = True
@@ -365,6 +367,7 @@ def run_breakout(
     equity_curve: list[tuple[date, float]] = []
     last_close: dict[str, float] = {}
     breakeven: set[str] = set()  # 손절가를 본전으로 올린 종목
+    recover: set[str] = set()  # 크게 빠져서 본전 탈출을 기다리는 종목
 
     def close_position(t: Trade, day: date, price: float, reason: str) -> None:
         nonlocal cash
@@ -374,6 +377,7 @@ def run_breakout(
         cash += proceeds
         del positions[t.symbol]
         breakeven.discard(t.symbol)
+        recover.discard(t.symbol)
 
     for day in calendar:
         # 1) 매도: 손절 → 신저가
@@ -391,6 +395,14 @@ def run_breakout(
             if nd == "open" or (nd == "open_if_loss" and bar.open < t.entry_price) or no_gap:
                 close_position(t, day, bar.open * (1 - s.slippage), "NEXT_OPEN")
                 continue
+            if sym in recover:
+                be = round_up_to_tick(t.entry_price)
+                if bar.open >= be:
+                    close_position(t, day, bar.open, "RECOVER")
+                    continue
+                if bar.high >= be:
+                    close_position(t, day, be, "RECOVER")
+                    continue
             reason = "STOP_LOSS"
             if sym in breakeven:
                 stop, reason = round_down_to_tick(t.entry_price * (1 + b.breakeven_lock_pct / 100)), "BREAKEVEN"
@@ -413,6 +425,9 @@ def run_breakout(
                 close_position(t, day, bar.close * (1 - s.slippage), f"MA{b.ma_exit_days}_EXIT")
             elif nd == "close" or (nd == "close_if_loss" and bar.close < t.entry_price):
                 close_position(t, day, bar.close * (1 - s.slippage), "NEXT_CLOSE")
+            if (b.recover_after_drop_pct and sym in positions
+                    and bar.low <= t.entry_price * (1 - b.recover_after_drop_pct / 100)):
+                recover.add(sym)  # 다음 날부터 본전 지정가 매도
             if (b.breakeven_trigger_pct and sym in positions
                     and bar.high >= t.entry_price * (1 + b.breakeven_trigger_pct / 100)):
                 breakeven.add(sym)  # 장중 순서를 알 수 없으므로 다음 날부터 적용
@@ -1268,6 +1283,8 @@ def main(argv: list[str] | None = None) -> None:
                    help="breakout: 매수일 윗꼬리가 몸통의 N배 이상일 때만 (--entry-delay, 0 = 없음)")
     r.add_argument("--ma-order", type=str, default="",
                    help="breakout: 이평선 배열, 위에서부터 (예: 60,5,20 = 60일선 > 5일선 > 20일선)")
+    r.add_argument("--recover-after-drop", type=float, default=0,
+                   help="breakout: 매수가 대비 N%% 이상 빠지면 다음 날부터 본전 지정가 매도 (0 = 없음)")
     r.add_argument("--lock-profit", type=float, default=0,
                    help="breakout: --breakeven-at 이후 손절가를 매수가 +N%%로 (0 = 본전)")
     r.add_argument("--no-new-high", action="store_true", help="breakout: 신고가 조건 없이 매수 (--min-change 와 함께)")
@@ -1340,7 +1357,7 @@ def main(argv: list[str] | None = None) -> None:
                               min_marcap=args.min_marcap, skip_touched_limit_up=args.skip_touched_limit_up,
                               max_drop_from_high_pct=args.max_drop_from_high,
                               buy_day_gap_up=args.buy_day_gap_up, buy_day_bullish=args.buy_day_bullish,
-                              buy_day_min_wick_ratio=args.buy_day_wick,
+                              buy_day_min_wick_ratio=args.buy_day_wick, recover_after_drop_pct=args.recover_after_drop,
                               ma_order=tuple(int(x) for x in args.ma_order.split(",")) if args.ma_order else (),
                               exclude_marcap=tuple(args.exclude_marcap) if args.exclude_marcap else None)
         if args.min_marcap or args.exclude_marcap:

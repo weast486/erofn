@@ -298,6 +298,8 @@ class BreakoutSettings:
     # 신고가 날 봉 길이 하한 (%). body: (종가-시가)/시가 양봉 몸통, range: (고가-저가)/저가
     min_candle_pct: float = 0.0
     candle_measure: str = "body"
+    # 0 보다 크면 장중 고가가 매수가 대비 이 % 이상 오른 다음 날부터 손절가를 매수가(본전)로 올림
+    breakeven_trigger_pct: float = 0.0
     # False 면 신고가 조건 없이 매수 (급등주 매매: min_change_pct 와 함께 사용)
     require_new_high: bool = True
     # 0 보다 크면 당일 상승률(전일 종가 대비)이 이 % 이상인 종목만
@@ -342,6 +344,7 @@ def run_breakout(
     trades: list[Trade] = []
     equity_curve: list[tuple[date, float]] = []
     last_close: dict[str, float] = {}
+    breakeven: set[str] = set()  # 손절가를 본전으로 올린 종목
 
     def close_position(t: Trade, day: date, price: float, reason: str) -> None:
         nonlocal cash
@@ -350,6 +353,7 @@ def run_breakout(
         t.pnl = proceeds - t.qty * t.entry_price * (1 + s.commission)
         cash += proceeds
         del positions[t.symbol]
+        breakeven.discard(t.symbol)
 
     for day in calendar:
         # 1) 매도: 손절 → 신저가
@@ -362,19 +366,25 @@ def run_breakout(
             bar = ser.bars[i]
             stop = round_down_to_tick(t.entry_price * (1 - b.stop_loss_pct / 100)) if b.stop_loss_pct > 0 else None
             tp = round_up_to_tick(t.entry_price * (1 + b.take_profit_pct / 100)) if b.take_profit_pct > 0 else None
+            reason = "STOP_LOSS"
+            if sym in breakeven:
+                stop, reason = round_down_to_tick(t.entry_price), "BREAKEVEN"
             # 같은 날 손절가·익절가 모두 닿으면 손절로 가정 (보수적)
             if stop and bar.open <= stop:
-                close_position(t, day, bar.open * (1 - s.slippage), "STOP_LOSS")
+                close_position(t, day, bar.open * (1 - s.slippage), reason)
             elif tp and bar.open >= tp:
                 close_position(t, day, bar.open, "TAKE_PROFIT")
             elif stop and bar.low <= stop:
-                close_position(t, day, stop * (1 - s.slippage), "STOP_LOSS")
+                close_position(t, day, stop * (1 - s.slippage), reason)
             elif tp and bar.high >= tp:
                 close_position(t, day, tp, "TAKE_PROFIT")
             elif b.exit_on_low and i >= b.exit_days and bar.close < min(x.close for x in ser.bars[i - b.exit_days:i]):
                 close_position(t, day, bar.close * (1 - s.slippage), f"LOW_{b.exit_days}D")
             elif b.max_hold_days and t.hold_days >= b.max_hold_days:
                 close_position(t, day, bar.close * (1 - s.slippage), "TIME_EXIT")
+            if (b.breakeven_trigger_pct and sym in positions
+                    and bar.high >= t.entry_price * (1 + b.breakeven_trigger_pct / 100)):
+                breakeven.add(sym)  # 장중 순서를 알 수 없으므로 다음 날부터 적용
 
         # 2) 매수: 종가 신고가
         slots = s.num_slots - len(positions)
@@ -1168,6 +1178,8 @@ def main(argv: list[str] | None = None) -> None:
                    help="pullback: 급등일(기준봉) 거래대금 하한 (원)")
     r.add_argument("--allow-limit-up-signal", action="store_true",
                    help="breakout: 신호일 상한가 마감도 신호로 인정 (--entry-delay 와 함께)")
+    r.add_argument("--breakeven-at", type=float, default=0,
+                   help="breakout: 고가가 매수가 대비 N%% 오르면 다음 날부터 손절가를 본전으로 (0 = 없음)")
     r.add_argument("--no-new-high", action="store_true", help="breakout: 신고가 조건 없이 매수 (--min-change 와 함께)")
     r.add_argument("--min-change", type=float, default=0, help="breakout: 당일 상승률 N%% 이상인 종목만")
     r.add_argument("--min-price", type=float, default=0, help="breakout: 1주 가격 하한 (원)")
@@ -1231,7 +1243,8 @@ def main(argv: list[str] | None = None) -> None:
                               max_gap_pct=args.max_gap, max_day_amount=args.max_day_amount,
                               max_price=args.max_price, min_price=args.min_price,
                               require_new_high=not args.no_new_high, min_change_pct=args.min_change,
-                              skip_limit_up=not args.allow_limit_up_signal)
+                              skip_limit_up=not args.allow_limit_up_signal,
+                              breakeven_trigger_pct=args.breakeven_at)
         if args.kospi_not_down:
             settings.entry_dates = index_not_down_days(load_index(args.cache, "KOSPI"))
             print("코스피가 전일보다 낮은 날은 매수 금지")

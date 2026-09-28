@@ -295,6 +295,11 @@ class BreakoutSettings:
     # N > 0 이면 '직전 N거래일 동안 신고가가 없었던' 첫 신고가만 매수 (예: 20 = 한 달 이내 첫 신고가)
     first_in_days: int = 0
     min_avg_trading_amount: float = 3_000_000_000
+    # 신고가 날 봉 길이 하한 (%). body: (종가-시가)/시가 양봉 몸통, range: (고가-저가)/저가
+    min_candle_pct: float = 0.0
+    candle_measure: str = "body"
+    # 0 보다 크면 신고가 날 시가 갭(시가 / 전일 종가 - 1)이 이 % 이하인 종목만 매수
+    max_gap_pct: float = 0.0
     rank_by: str = "amount"  # 신호가 많을 때 우선순위: amount(당일 거래대금) / change(당일 상승률) / strength(신고가 돌파폭)
 
 
@@ -384,6 +389,12 @@ def run_breakout(
                     continue
                 if b.min_day_amount and bar.close * bar.volume < b.min_day_amount:
                     continue
+                if b.max_gap_pct and (bar.open / ser.bars[i - 1].close - 1) * 100 > b.max_gap_pct + 1e-9:
+                    continue
+                if b.min_candle_pct:
+                    size = (bar.close / bar.open - 1) if b.candle_measure == "body" else (bar.high / bar.low - 1)
+                    if size * 100 < b.min_candle_pct:
+                        continue
                 if b.first_in_days:
                     if i < b.entry_days + b.first_in_days:
                         continue
@@ -978,6 +989,11 @@ def main(argv: list[str] | None = None) -> None:
     r.add_argument("--first-in-days", type=int, default=0, help="breakout: 직전 N거래일 안에 신고가가 없던 첫 신고가만")
     r.add_argument("--min-day-amount", type=float, default=0, help="breakout: 신호 당일 거래대금 하한 (원)")
     r.add_argument("--entry-delay", type=int, default=0, help="breakout: 신고가 신호 N거래일 뒤 종가에 매수")
+    r.add_argument("--min-candle", type=float, default=0, help="breakout: 신고가 봉 길이 하한 %%")
+    r.add_argument("--candle-measure", choices=["body", "range"], default="body",
+                   help="breakout: body = 양봉 몸통 (종가/시가), range = 고가/저가")
+    r.add_argument("--max-gap", type=float, default=0,
+                   help="breakout: 신고가 날 시가 갭상승(전일 종가 대비)이 N%% 이하인 종목만 매수 (0 = 없음)")
     r.add_argument("--kospi-not-down", action="store_true",
                    help="breakout: 코스피 종가가 전일보다 낮은 날은 매수 금지")
     r.add_argument("--kospi-up-days", type=int, default=0,
@@ -1021,7 +1037,9 @@ def main(argv: list[str] | None = None) -> None:
                               first_in_days=args.first_in_days, min_day_amount=args.min_day_amount,
                               entry_delay=args.entry_delay, delay_max_rise_pct=args.delay_max_rise, rank_by=args.rank_by,
                               delay_hold_signal_open=args.delay_hold_open, delay_intraday=args.delay_intraday,
-                              min_avg_trading_amount=settings.params.min_avg_trading_amount)
+                              min_avg_trading_amount=settings.params.min_avg_trading_amount,
+                              min_candle_pct=args.min_candle, candle_measure=args.candle_measure,
+                              max_gap_pct=args.max_gap)
         if args.kospi_not_down:
             settings.entry_dates = index_not_down_days(load_index(args.cache, "KOSPI"))
             print("코스피가 전일보다 낮은 날은 매수 금지")

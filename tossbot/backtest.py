@@ -271,7 +271,12 @@ class BreakoutSettings:
     """돌파 매매: 종가 기준 N일 신고가에 매수, M일 신저가에 매도 (체결은 신호 당일 종가 무렵)."""
     entry_days: int = 20
     exit_days: int = 10
-    stop_loss_pct: float = 0.0  # 0 이면 손절 없음 (신저가 매도만)
+    stop_loss_pct: float = 0.0  # 0 이면 손절 없음
+    take_profit_pct: float = 0.0  # 0 이면 익절 없음. 익절가 지정가 매도 (갭상승이면 시가)
+    exit_on_low: bool = True  # exit_days 일 신저가 종가에 매도할지
+    max_hold_days: int = 0  # 0 이면 제한 없음. N거래일째 종가에 매도
+    # 상한가(전일 대비 +29.5% 이상)로 마감한 종목은 매수 대기 물량이 쌓여 종가 체결이 사실상 불가능하므로 제외
+    skip_limit_up: bool = True
     min_avg_trading_amount: float = 3_000_000_000
     rank_by: str = "amount"  # 신호가 많을 때 우선순위: amount(당일 거래대금) / strength(신고가 돌파폭)
 
@@ -319,16 +324,21 @@ def run_breakout(
             if i is None:
                 continue
             bar = ser.bars[i]
-            if b.stop_loss_pct > 0:
-                stop = round_down_to_tick(t.entry_price * (1 - b.stop_loss_pct / 100))
-                if bar.open <= stop:
-                    close_position(t, day, bar.open * (1 - s.slippage), "STOP_LOSS")
-                    continue
-                if bar.low <= stop:
-                    close_position(t, day, stop * (1 - s.slippage), "STOP_LOSS")
-                    continue
-            if i >= b.exit_days and bar.close < min(x.close for x in ser.bars[i - b.exit_days:i]):
+            stop = round_down_to_tick(t.entry_price * (1 - b.stop_loss_pct / 100)) if b.stop_loss_pct > 0 else None
+            tp = round_up_to_tick(t.entry_price * (1 + b.take_profit_pct / 100)) if b.take_profit_pct > 0 else None
+            # 같은 날 손절가·익절가 모두 닿으면 손절로 가정 (보수적)
+            if stop and bar.open <= stop:
+                close_position(t, day, bar.open * (1 - s.slippage), "STOP_LOSS")
+            elif tp and bar.open >= tp:
+                close_position(t, day, bar.open, "TAKE_PROFIT")
+            elif stop and bar.low <= stop:
+                close_position(t, day, stop * (1 - s.slippage), "STOP_LOSS")
+            elif tp and bar.high >= tp:
+                close_position(t, day, tp, "TAKE_PROFIT")
+            elif b.exit_on_low and i >= b.exit_days and bar.close < min(x.close for x in ser.bars[i - b.exit_days:i]):
                 close_position(t, day, bar.close * (1 - s.slippage), f"LOW_{b.exit_days}D")
+            elif b.max_hold_days and t.hold_days >= b.max_hold_days:
+                close_position(t, day, bar.close * (1 - s.slippage), "TIME_EXIT")
 
         # 2) 매수: 종가 신고가
         slots = s.num_slots - len(positions)
@@ -343,6 +353,8 @@ def run_breakout(
                 bar = ser.bars[i]
                 prev_high = max(x.close for x in ser.bars[i - b.entry_days:i])
                 if bar.close <= prev_high or bar.close > budget:
+                    continue
+                if b.skip_limit_up and bar.close >= ser.bars[i - 1].close * 1.295:
                     continue
                 avg_amount = sum(x.close * x.volume for x in ser.bars[i - 20:i]) / 20
                 if avg_amount < b.min_avg_trading_amount:
@@ -578,6 +590,9 @@ def main(argv: list[str] | None = None) -> None:
     r.add_argument("--entry-days", type=int, default=20, help="breakout: 매수 신고가 기간")
     r.add_argument("--exit-days", type=int, default=10, help="breakout: 매도 신저가 기간")
     r.add_argument("--stop-loss", type=float, default=0.0, help="breakout: 손절 %% (0 = 없음)")
+    r.add_argument("--take-profit", type=float, default=0.0, help="breakout: 익절 %% (0 = 없음)")
+    r.add_argument("--no-exit-on-low", action="store_true", help="breakout: 신저가 매도 끄기")
+    r.add_argument("--max-hold", type=int, default=0, help="breakout: 최대 보유 거래일 (0 = 없음)")
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
 
@@ -595,7 +610,8 @@ def main(argv: list[str] | None = None) -> None:
         raise SystemExit(f"{args.cache} 에 데이터가 없습니다. 먼저 download 를 실행하세요.")
     last_day = max(b.day for _, bars in data.values() for b in bars[-1:])
     if args.strategy == "breakout":
-        bs = BreakoutSettings(args.entry_days, args.exit_days, args.stop_loss,
+        bs = BreakoutSettings(args.entry_days, args.exit_days, args.stop_loss, args.take_profit,
+                              exit_on_low=not args.no_exit_on_low, max_hold_days=args.max_hold,
                               min_avg_trading_amount=settings.params.min_avg_trading_amount)
         runner = lambda y0, y1: run_breakout(data, y0, y1, settings, bs)  # noqa: E731
     else:

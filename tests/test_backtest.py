@@ -118,3 +118,16 @@ class BreakoutEngineTest(unittest.TestCase):
                            BacktestSettings(slippage=0.0), BreakoutSettings(stop_loss_pct=4.7))
         (t,) = res.trades
         self.assertEqual((t.reason, t.exit_price), ("STOP_LOSS", round_down_to_tick(10_500 * 0.953)))
+
+    def test_breakout_skips_limit_up_close(self):
+        from tossbot.backtest import BreakoutSettings, run_breakout
+
+        days = weekdays(40)
+        closes = [10_000] * 30 + [13_000, 13_500]  # 신고가 날 +30% 상한가 마감
+        bars = [Bar(d, c, c * 1.01, c * 0.99, c, 1_000_000) for d, c in zip(days, closes)]
+        run = lambda b: run_breakout({"000010": ("테스트", bars)}, date(2023, 11, 1), date(2024, 3, 31),  # noqa: E731
+                                     BacktestSettings(slippage=0.0), b)
+        # 상한가 날은 건너뛰고, 다음 날(13,500 신고가, +3.8%)에 매수
+        (t,) = run(BreakoutSettings()).trades
+        self.assertEqual(t.entry_date, days[31])
+        self.assertEqual(run(BreakoutSettings(skip_limit_up=False)).trades[0].entry_date, days[30])

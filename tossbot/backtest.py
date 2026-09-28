@@ -285,6 +285,8 @@ class BreakoutSettings:
     first_in_days: int = 0
     # 신호 당일 거래대금(종가 x 거래량) 하한 (0 이면 없음)
     min_day_amount: float = 0.0
+    # N > 0 이면 신고가 신호 N거래일 뒤 종가에 매수 (그날 종가가 예산 이하이고 상한가 마감이 아닐 때)
+    entry_delay: int = 0
     # N > 0 이면 '직전 N거래일 동안 신고가가 없었던' 첫 신고가만 매수 (예: 20 = 한 달 이내 첫 신고가)
     first_in_days: int = 0
     min_avg_trading_amount: float = 3_000_000_000
@@ -307,6 +309,7 @@ def run_breakout(
     """
     s = s or BacktestSettings()
     b = b or BreakoutSettings()
+    pending: list[tuple[str, int, float, date]] = []  # (종목, 매수할 봉 인덱스, 우선순위, 신호일)
     budget = s.params.slot_budget
     series = _prepare(data)
     calendar = sorted({d for ser in series.values() for d in ser.days if start <= d <= end})
@@ -360,7 +363,7 @@ def run_breakout(
 
         # 2) 매수: 종가 신고가
         slots = s.num_slots - len(positions)
-        if slots > 0:
+        if slots > 0 or b.entry_delay:
             signals = []
             for sym, ser in series.items():
                 if sym in positions:
@@ -394,16 +397,35 @@ def run_breakout(
                 if avg_amount < b.min_avg_trading_amount:
                     continue
                 key = bar.close * bar.volume if b.rank_by == "amount" else bar.close / prev_high
-                signals.append((key, sym, bar))
+                if b.entry_delay:
+                    pending.append((sym, i + b.entry_delay, key, day))
+                else:
+                    signals.append((key, sym, bar, day))
+            if b.entry_delay:
+                # 오늘이 (신호일 + N거래일)인 대기 신호를 오늘 종가에 매수
+                keep = []
+                for sym, target, key, sig_day in pending:
+                    ser = series[sym]
+                    i = ser.index.get(day)
+                    if i is None or i < target:
+                        keep.append((sym, target, key, sig_day))  # 아직 매수일 전 (또는 오늘 거래 없음)
+                        continue
+                    if i > target or sym in positions:
+                        continue  # 거래정지 등으로 매수일을 지나쳤거나 이미 보유
+                    bar = ser.bars[i]
+                    if bar.close > budget or bar.close >= ser.bars[i - 1].close * 1.295:
+                        continue
+                    signals.append((key, sym, bar, sig_day))
+                pending[:] = keep
             signals.sort(key=lambda x: x[0], reverse=True)
-            for _, sym, bar in signals[:slots]:
+            for _, sym, bar, sig_day in signals[:max(slots, 0)]:
                 price = bar.close * (1 + s.slippage)
                 qty = int(budget // round_up_to_tick(bar.close * (1 + BUY_LIMIT_SLIPPAGE)))
                 cost = qty * price * (1 + s.commission)
                 if qty <= 0 or cost > cash:
                     continue
                 cash -= cost
-                t = Trade(sym, series[sym].name, day, price, qty, surge_date=day)
+                t = Trade(sym, series[sym].name, day, price, qty, surge_date=sig_day)
                 positions[sym] = t
                 trades.append(t)
 
@@ -919,6 +941,7 @@ def main(argv: list[str] | None = None) -> None:
     r.add_argument("--max-hold", type=int, default=0, help="breakout: 최대 보유 거래일 (0 = 없음)")
     r.add_argument("--first-in-days", type=int, default=0, help="breakout: 직전 N거래일 안에 신고가가 없던 첫 신고가만")
     r.add_argument("--min-day-amount", type=float, default=0, help="breakout: 신호 당일 거래대금 하한 (원)")
+    r.add_argument("--entry-delay", type=int, default=0, help="breakout: 신고가 신호 N거래일 뒤 종가에 매수")
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
 
@@ -951,6 +974,7 @@ def main(argv: list[str] | None = None) -> None:
         bs = BreakoutSettings(args.entry_days, args.exit_days, args.stop_loss, args.take_profit,
                               exit_on_low=not args.no_exit_on_low, max_hold_days=args.max_hold,
                               first_in_days=args.first_in_days, min_day_amount=args.min_day_amount,
+                              entry_delay=args.entry_delay,
                               min_avg_trading_amount=settings.params.min_avg_trading_amount)
         runner = lambda y0, y1: run_breakout(data, y0, y1, settings, bs)  # noqa: E731
     elif args.strategy == "surgedoji":

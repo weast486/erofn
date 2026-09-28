@@ -201,3 +201,16 @@ class FirstHighTest(unittest.TestCase):
         res2 = run_breakout({"000010": ("테스트", small)}, date(2023, 11, 1), date(2024, 3, 31),
                             BacktestSettings(slippage=0.0), b)
         self.assertEqual(res2.trades, [])
+
+    def test_entry_delay_buys_three_days_after_signal(self):
+        from tossbot.backtest import BreakoutSettings, run_breakout
+
+        days = weekdays(70)
+        closes = [10_000] * 40 + [10_300, 10_200, 10_250, 10_280, 10_290]  # 40번째 날 첫 신고가
+        bars = [Bar(d, c, c * 1.01, c * 0.99, c, 5_000_000) for d, c in zip(days, closes)]
+        b = BreakoutSettings(stop_loss_pct=7.0, take_profit_pct=20.0, exit_on_low=False,
+                             first_in_days=20, min_day_amount=10_000_000_000, entry_delay=3)
+        res = run_breakout({"000010": ("테스트", bars)}, date(2023, 11, 1), date(2024, 3, 31),
+                           BacktestSettings(slippage=0.0), b)
+        (t,) = res.trades
+        self.assertEqual((t.surge_date, t.entry_date, t.entry_price), (days[40], days[43], 10_280))

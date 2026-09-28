@@ -323,6 +323,7 @@ class BreakoutSettings:
     stop_limit: bool = False
     # N > 0 이면 N일 신고가(종가 기준)이기도 한 종목은 제외 (예: 200 = 200일 신고가 제외). 이력이 N일 미만이면 제외
     exclude_high_days: int = 0
+    exclude_symbols: frozenset = frozenset()  # 매수 제외 종목코드 (예: 제약·바이오)
     breakeven_lock_pct: float = 0.0  # 올린 손절가 = 매수가 x (1 + 이 %). 0 이면 본전
     # False 면 신고가 조건 없이 매수 (급등주 매매: min_change_pct 와 함께 사용)
     require_new_high: bool = True
@@ -447,7 +448,7 @@ def run_breakout(
         if slots > 0 or b.entry_delay:
             signals = []
             for sym, ser in series.items():
-                if sym in positions:
+                if sym in positions or sym in b.exclude_symbols:
                     continue
                 i = ser.index.get(day)
                 if i is None or i < max(b.entry_days, 20):
@@ -1302,6 +1303,7 @@ def main(argv: list[str] | None = None) -> None:
                    help="breakout: 손절을 손절가 지정가로 (갭하락이면 손절가 회복까지 미체결)")
     r.add_argument("--exclude-high-days", type=int, default=0,
                    help="breakout: N일 신고가이기도 한 종목 제외 (예: 200)")
+    r.add_argument("--exclude-list", type=Path, help="breakout: 매수 제외 종목 목록 파일 (줄마다 '종목코드 이름', # 주석)")
     r.add_argument("--lock-profit", type=float, default=0,
                    help="breakout: --breakeven-at 이후 손절가를 매수가 +N%%로 (0 = 본전)")
     r.add_argument("--no-new-high", action="store_true", help="breakout: 신고가 조건 없이 매수 (--min-change 와 함께)")
@@ -1376,6 +1378,9 @@ def main(argv: list[str] | None = None) -> None:
                               buy_day_gap_up=args.buy_day_gap_up, buy_day_bullish=args.buy_day_bullish,
                               buy_day_min_wick_ratio=args.buy_day_wick, recover_after_drop_pct=args.recover_after_drop,
                               stop_limit=args.stop_limit, exclude_high_days=args.exclude_high_days,
+                              exclude_symbols=frozenset(
+                                  line.split()[0] for line in args.exclude_list.read_text(encoding="utf-8").splitlines()
+                                  if line.strip() and not line.startswith("#")) if args.exclude_list else frozenset(),
                               ma_order=tuple(int(x) for x in args.ma_order.split(",")) if args.ma_order else (),
                               exclude_marcap=tuple(args.exclude_marcap) if args.exclude_marcap else None)
         if args.min_marcap or args.exclude_marcap:

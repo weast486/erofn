@@ -175,7 +175,7 @@ def run_backtest(
     for sym, ser in series.items():
         closes = [b.close for b in ser.bars]
         for i in range(1, len(closes)):
-            if closes[i] / closes[i - 1] - 1 >= p.surge_pct / 100:
+            if closes[i] / closes[i - 1] - 1 >= p.surge_pct / 100 and closes[i] * ser.bars[i].volume >= p.min_surge_amount:
                 for j in range(i + 1, min(i + 1 + p.surge_lookback_days, len(closes))):
                     candidates[ser.days[j]].add(sym)
 
@@ -1016,6 +1016,8 @@ def main(argv: list[str] | None = None) -> None:
     r.add_argument("--max-hold", type=int, default=0, help="breakout: 최대 보유 거래일 (0 = 없음)")
     r.add_argument("--first-in-days", type=int, default=0, help="breakout: 직전 N거래일 안에 신고가가 없던 첫 신고가만")
     r.add_argument("--min-day-amount", type=float, default=0, help="breakout: 신호 당일 거래대금 하한 (원)")
+    r.add_argument("--surge-min-amount", type=float, default=0,
+                   help="pullback: 급등일(기준봉) 거래대금 하한 (원)")
     r.add_argument("--allow-limit-up-signal", action="store_true",
                    help="breakout: 신호일 상한가 마감도 신호로 인정 (--entry-delay 와 함께)")
     r.add_argument("--no-new-high", action="store_true", help="breakout: 신고가 조건 없이 매수 (--min-change 와 함께)")
@@ -1059,6 +1061,7 @@ def main(argv: list[str] | None = None) -> None:
     load_dotenv(args.env)
     cfg = Config.from_env()
     settings = BacktestSettings.from_config(cfg)
+    settings.params.min_surge_amount = args.surge_min_amount
     mode = args.kospi_down
     if mode == "config":
         mode = "close" if cfg.market_filter == "kospi_down" else "none"

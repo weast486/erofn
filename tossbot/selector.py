@@ -55,6 +55,7 @@ class PullbackParams:
     pullback_volume_ratio: float = 0.5
     require_ma_rising: bool = True
     min_avg_trading_amount: float = 3_000_000_000
+    min_surge_amount: float = 0.0  # 급등일(기준봉) 거래대금 하한 (0 = 없음)
 
 
 @dataclass
@@ -101,7 +102,7 @@ def analyze(symbol: str, name: str, bars: list[Bar], today: date, p: PullbackPar
 
     surge_idx = None
     for i in range(len(bars) - 1, len(bars) - 1 - p.surge_lookback_days, -1):
-        if closes[i] / closes[i - 1] - 1 >= p.surge_pct / 100:
+        if closes[i] / closes[i - 1] - 1 >= p.surge_pct / 100 and closes[i] * bars[i].volume >= p.min_surge_amount:
             surge_idx = i
             break
     if surge_idx is None:

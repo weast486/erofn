@@ -113,11 +113,14 @@ tail -f logs/tossbot.log
 
 ```bash
 pip install -r requirements-backtest.txt
-python -m tossbot.backtest download --source pykrx --start 2023-09-01   # 최초 1회 (종목 수천 개, 수십 분)
-python -m tossbot.backtest run --years 2024 2025 2026                   # 연도별 결과 + backtest_results/trades.csv
+# 데이터: FinanceData/marcap (KRX 전 종목 일별, 상장폐지 포함) 에서 필요한 연도 파일만 받기
+git clone --depth 1 --filter=blob:none --no-checkout https://github.com/FinanceData/marcap
+git -C marcap checkout HEAD -- data/marcap-2023.parquet data/marcap-2024.parquet data/marcap-2025.parquet data/marcap-2026.parquet
+python -m tossbot.backtest download --source marcap --marcap-dir marcap/data --start 2023-09-01
+python -m tossbot.backtest run --years 2024 2025 2026   # 연도별 결과 + backtest_results/trades.csv
 ```
 
-- 데이터: `pykrx`(KRX, 기간 중 상장폐지 종목 포함) 또는 `fdr`(FinanceDataReader, 현재 상장 종목만). 수정주가를 쓰고, `data/ohlcv/`에 저장해 다시 받지 않습니다.
+- 데이터: 기본은 `marcap`입니다(상장폐지 종목 포함, 무상증자·분할·병합은 KRX 기준가로 수정주가 변환). `pykrx`는 현재 KRX 로그인(`KRX_ID`/`KRX_PW`)이 필요하고, `fdr`은 현재 상장 종목만 받습니다.
 - 연도마다 100만원으로 새로 시작합니다. 연말에 남은 종목은 종가로 평가합니다.
 - 비용: 수수료 0.015%(매수·매도), 매도 시 증권거래세(2024 0.18% / 2025 0.15% / 2026 0.20%로 가정), 시장가 체결 슬리피지 0.1%.
 

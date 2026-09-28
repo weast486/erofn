@@ -296,7 +296,66 @@ def _write_bars(path: Path, rows) -> None:
 
 
 def _is_common_stock(code: str, name: str) -> bool:
-    return code.isdigit() and code.endswith("0") and "스팩" not in name and "리츠" not in name
+    # 보통주 코드는 6자리이고 끝자리가 0 (2024년부터 신규 상장은 영문 포함 코드도 있음)
+    return (
+        len(code) == 6 and code.isalnum() and code.endswith("0")
+        and "스팩" not in name and "리츠" not in name
+    )
+
+
+def adjust_splits(rows: list[tuple]) -> list[tuple]:
+    """무상증자·액면분할·병합 수정: KRX 기준가(종가 - 전일대비)가 실제 전일 종가와 다르면
+    그 비율만큼 이전 봉들의 가격(과 거래량)을 조정한다.
+
+    rows: (date, open, high, low, close, volume, base) 를 날짜순으로.
+    반환: (date, open, high, low, close, volume) 수정주가.
+    """
+    factors = [1.0] * len(rows)
+    k = 1.0
+    for i in range(len(rows) - 1, 0, -1):
+        factors[i] = k
+        base, prev_close = rows[i][6], rows[i - 1][4]
+        if base > 0 and prev_close > 0 and abs(base / prev_close - 1) > 0.02:
+            k *= base / prev_close
+    factors[0] = k
+    return [
+        (d, o * f, h * f, l * f, c * f, v / f)
+        for (d, o, h, l, c, v, _), f in zip(rows, factors)
+    ]
+
+
+def import_marcap(data_dir: Path, start: str, end: str | None, cache_dir: Path) -> None:
+    """FinanceData/marcap (KRX 전 종목 일별 데이터, 상장폐지 포함) parquet 을 캐시로 변환."""
+    import pandas as pd
+
+    y0 = date.fromisoformat(start).year
+    y1 = date.fromisoformat(end).year if end else date.today().year
+    files = [data_dir / f"marcap-{y}.parquet" for y in range(y0, y1 + 1)]
+    cols = ["Code", "Name", "Market", "Date", "Open", "High", "Low", "Close", "Changes", "Volume"]
+    df = pd.concat([pd.read_parquet(f, columns=cols) for f in files if f.exists()])
+    df = df[df["Market"].isin(["KOSPI", "KOSDAQ", "KOSDAQ GLOBAL"])]
+    df = df[(df["Date"] >= start) & (df["Date"] <= (end or "2100-01-01"))]
+    df = df.sort_values(["Code", "Date"])
+
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    names = {}
+    for code, g in df.groupby("Code", sort=False):
+        name = str(g["Name"].iloc[-1])
+        if not _is_common_stock(code, name):
+            continue
+        names[code] = name
+        rows = [
+            (d.date().isoformat(), o, h, l, c, v, c - ch)
+            for d, o, h, l, c, ch, v in zip(g["Date"], g["Open"], g["High"], g["Low"], g["Close"], g["Changes"], g["Volume"])
+        ]
+        adj = adjust_splits(rows)
+        # 거래정지일(거래량 0·시가 0)은 제외
+        _write_bars(cache_dir / f"{code}.csv", [r for r in adj if r[5] > 0 and r[1] > 0])
+    with open(cache_dir / "_names.csv", "w", encoding="utf-8", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["code", "name"])
+        w.writerows(sorted(names.items()))
+    log.info("marcap → 캐시 %d 종목 (%s ~ %s)", len(names), start, end or "최신")
 
 
 def download(source: str, start: str, end: str | None, cache_dir: Path) -> None:
@@ -396,7 +455,9 @@ def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(prog="tossbot.backtest", description="눌림목 전략 백테스트")
     sub = parser.add_subparsers(dest="command", required=True)
     d = sub.add_parser("download", help="과거 일봉 다운로드")
-    d.add_argument("--source", choices=["pykrx", "fdr"], default="pykrx")
+    d.add_argument("--source", choices=["marcap", "pykrx", "fdr"], default="marcap")
+    d.add_argument("--marcap-dir", type=Path, default=Path("marcap/data"),
+                   help="git clone https://github.com/FinanceData/marcap 한 폴더의 data 경로")
     d.add_argument("--start", default="2023-09-01", help="지표 계산을 위해 백테스트 시작 3~4개월 전부터")
     d.add_argument("--end", default=None)
     d.add_argument("--cache", type=Path, default=DEFAULT_CACHE)
@@ -409,7 +470,10 @@ def main(argv: list[str] | None = None) -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
 
     if args.command == "download":
-        download(args.source, args.start, args.end, args.cache)
+        if args.source == "marcap":
+            import_marcap(args.marcap_dir, args.start, args.end, args.cache)
+        else:
+            download(args.source, args.start, args.end, args.cache)
         return
 
     load_dotenv(args.env)

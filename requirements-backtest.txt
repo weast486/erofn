@@ -2,3 +2,4 @@ pandas
 pyarrow
 pykrx
 finance-datareader
+openpyxl

@@ -447,6 +447,8 @@ def run_breakout(
                         continue
                     signals.append((key, sym, bar, sig_day))
                 pending[:] = keep
+            if s.entry_dates is not None and day not in s.entry_dates:
+                signals = []  # 시장 필터: 오늘은 신규 매수 안 함 (3일 뒤 매수 대기 신호는 그대로 소멸)
             signals.sort(key=lambda x: x[0], reverse=True)
             for _, sym, bar, sig_day in signals[:max(slots, 0)]:
                 price = bar.close * (1 + s.slippage)
@@ -896,6 +898,11 @@ def load_index(cache_dir: Path, symbol: str = "KOSPI") -> list[Bar]:
         ]
 
 
+def index_uptrend_days(index: list[Bar], lookback: int = 5) -> set[date]:
+    """지수 종가가 lookback 거래일 전 종가보다 높은 날 (직전 N일 상승 흐름)."""
+    return {cur.day for prev, cur in zip(index, index[lookback:]) if cur.close > prev.close}
+
+
 def index_down_days(index: list[Bar], mode: str = "close") -> set[date]:
     """지수 하락일. mode=close: 종가 < 전일 종가, open: 시가 < 전일 종가, both: 둘 다."""
     out = set()
@@ -972,6 +979,8 @@ def main(argv: list[str] | None = None) -> None:
     r.add_argument("--first-in-days", type=int, default=0, help="breakout: 직전 N거래일 안에 신고가가 없던 첫 신고가만")
     r.add_argument("--min-day-amount", type=float, default=0, help="breakout: 신호 당일 거래대금 하한 (원)")
     r.add_argument("--entry-delay", type=int, default=0, help="breakout: 신고가 신호 N거래일 뒤 종가에 매수")
+    r.add_argument("--kospi-up-days", type=int, default=0,
+                   help="breakout: 코스피 종가가 N거래일 전보다 높은 날에만 매수 (0 = 필터 없음)")
     r.add_argument("--rank-by", choices=["amount", "change", "strength"], default="amount",
                    help="breakout: 신호가 많을 때 우선순위 (거래대금 / 당일 상승률 / 신고가 돌파폭)")
     r.add_argument("--delay-max-rise", type=float, default=0, help="breakout: 대기 중 신고가 종가 대비 N%% 이상 상승 시 매수 취소")
@@ -1012,6 +1021,9 @@ def main(argv: list[str] | None = None) -> None:
                               entry_delay=args.entry_delay, delay_max_rise_pct=args.delay_max_rise, rank_by=args.rank_by,
                               delay_hold_signal_open=args.delay_hold_open, delay_intraday=args.delay_intraday,
                               min_avg_trading_amount=settings.params.min_avg_trading_amount)
+        if args.kospi_up_days:
+            settings.entry_dates = index_uptrend_days(load_index(args.cache, "KOSPI"), args.kospi_up_days)
+            print(f"코스피가 {args.kospi_up_days}거래일 전보다 높은 날에만 매수")
         runner = lambda y0, y1: run_breakout(data, y0, y1, settings, bs)  # noqa: E731
     elif args.strategy == "surgedoji":
         sd = SurgeDojiSettings(stop_loss_pct=settings.stop_loss_pct, take_profit_pct=settings.take_profit_pct,

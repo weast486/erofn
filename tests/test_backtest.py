@@ -239,3 +239,14 @@ class FirstHighTest(unittest.TestCase):
         wick = calm[:1] + [(10_200, 10_300, 10_000, 10_200)] + calm[:1]  # 저가만 시가 아래
         self.assertEqual(len(run(wick)), 1)  # 종가 기준이면 통과
         self.assertEqual(run(wick, intraday=True), [])  # 장중 기준이면 탈락
+
+
+class IndexFilterTest(unittest.TestCase):
+    def test_index_uptrend_days(self):
+        from tossbot.backtest import index_uptrend_days
+
+        days = weekdays(10)
+        closes = [100, 101, 102, 103, 104, 105, 99, 100, 106, 107]
+        ix = [Bar(d, c, c, c, c, 0) for d, c in zip(days, closes)]
+        # 5거래일 전 종가보다 높은 날만: 5번째(105>100), 8번째(106>104), 9번째(107>105)
+        self.assertEqual(index_uptrend_days(ix, 5), {days[5], days[8], days[9]})

@@ -396,6 +396,7 @@ def run_breakout(
                 prev_high = max(x.close for x in ser.bars[i - b.entry_days:i])
                 if bar.close > budget or (b.max_price and bar.close > b.max_price) or bar.close < b.min_price:
                     continue
+                # 대기 후 매수(entry_delay)면 신호일 상한가도 매수 가능하므로 skip_limit_up 을 끌 수 있다
                 if b.skip_limit_up and bar.close >= ser.bars[i - 1].close * 1.295:
                     continue
                 if b.min_day_amount and bar.close * bar.volume < b.min_day_amount:
@@ -1015,6 +1016,8 @@ def main(argv: list[str] | None = None) -> None:
     r.add_argument("--max-hold", type=int, default=0, help="breakout: 최대 보유 거래일 (0 = 없음)")
     r.add_argument("--first-in-days", type=int, default=0, help="breakout: 직전 N거래일 안에 신고가가 없던 첫 신고가만")
     r.add_argument("--min-day-amount", type=float, default=0, help="breakout: 신호 당일 거래대금 하한 (원)")
+    r.add_argument("--allow-limit-up-signal", action="store_true",
+                   help="breakout: 신호일 상한가 마감도 신호로 인정 (--entry-delay 와 함께)")
     r.add_argument("--no-new-high", action="store_true", help="breakout: 신고가 조건 없이 매수 (--min-change 와 함께)")
     r.add_argument("--min-change", type=float, default=0, help="breakout: 당일 상승률 N%% 이상인 종목만")
     r.add_argument("--min-price", type=float, default=0, help="breakout: 1주 가격 하한 (원)")
@@ -1076,7 +1079,8 @@ def main(argv: list[str] | None = None) -> None:
                               min_candle_pct=args.min_candle, candle_measure=args.candle_measure,
                               max_gap_pct=args.max_gap, max_day_amount=args.max_day_amount,
                               max_price=args.max_price, min_price=args.min_price,
-                              require_new_high=not args.no_new_high, min_change_pct=args.min_change)
+                              require_new_high=not args.no_new_high, min_change_pct=args.min_change,
+                              skip_limit_up=not args.allow_limit_up_signal)
         if args.kospi_not_down:
             settings.entry_dates = index_not_down_days(load_index(args.cache, "KOSPI"))
             print("코스피가 전일보다 낮은 날은 매수 금지")

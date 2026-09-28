@@ -298,6 +298,8 @@ class BreakoutSettings:
     # 신고가 날 봉 길이 하한 (%). body: (종가-시가)/시가 양봉 몸통, range: (고가-저가)/저가
     min_candle_pct: float = 0.0
     candle_measure: str = "body"
+    # 0 보다 크면 신호 당일 거래대금 상한 (원)
+    max_day_amount: float = 0.0
     # 0 보다 크면 신고가 날 시가 갭(시가 / 전일 종가 - 1)이 이 % 이하인 종목만 매수
     max_gap_pct: float = 0.0
     rank_by: str = "amount"  # 신호가 많을 때 우선순위: amount(당일 거래대금) / change(당일 상승률) / strength(신고가 돌파폭)
@@ -388,6 +390,8 @@ def run_breakout(
                 if b.skip_limit_up and bar.close >= ser.bars[i - 1].close * 1.295:
                     continue
                 if b.min_day_amount and bar.close * bar.volume < b.min_day_amount:
+                    continue
+                if b.max_day_amount and bar.close * bar.volume > b.max_day_amount:
                     continue
                 if b.max_gap_pct and (bar.open / ser.bars[i - 1].close - 1) * 100 > b.max_gap_pct + 1e-9:
                     continue
@@ -1001,6 +1005,7 @@ def main(argv: list[str] | None = None) -> None:
     r.add_argument("--max-hold", type=int, default=0, help="breakout: 최대 보유 거래일 (0 = 없음)")
     r.add_argument("--first-in-days", type=int, default=0, help="breakout: 직전 N거래일 안에 신고가가 없던 첫 신고가만")
     r.add_argument("--min-day-amount", type=float, default=0, help="breakout: 신호 당일 거래대금 하한 (원)")
+    r.add_argument("--max-day-amount", type=float, default=0, help="breakout: 신호 당일 거래대금 상한 (원, 0 = 없음)")
     r.add_argument("--entry-delay", type=int, default=0, help="breakout: 신고가 신호 N거래일 뒤 종가에 매수")
     r.add_argument("--min-candle", type=float, default=0, help="breakout: 신고가 봉 길이 하한 %%")
     r.add_argument("--candle-measure", choices=["body", "range"], default="body",
@@ -1055,7 +1060,7 @@ def main(argv: list[str] | None = None) -> None:
                               delay_hold_signal_open=args.delay_hold_open, delay_intraday=args.delay_intraday,
                               min_avg_trading_amount=settings.params.min_avg_trading_amount,
                               min_candle_pct=args.min_candle, candle_measure=args.candle_measure,
-                              max_gap_pct=args.max_gap)
+                              max_gap_pct=args.max_gap, max_day_amount=args.max_day_amount)
         if args.kospi_not_down:
             settings.entry_dates = index_not_down_days(load_index(args.cache, "KOSPI"))
             print("코스피가 전일보다 낮은 날은 매수 금지")

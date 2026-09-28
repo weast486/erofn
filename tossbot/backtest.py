@@ -321,6 +321,8 @@ class BreakoutSettings:
     recover_after_drop_pct: float = 0.0
     # True 면 손절을 시장가 대신 손절가 지정가로: 갭하락으로 시가가 손절가 아래면 손절가를 회복할 때까지 체결 안 됨
     stop_limit: bool = False
+    # N > 0 이면 N일 신고가(종가 기준)이기도 한 종목은 제외 (예: 200 = 200일 신고가 제외). 이력이 N일 미만이면 제외
+    exclude_high_days: int = 0
     breakeven_lock_pct: float = 0.0  # 올린 손절가 = 매수가 x (1 + 이 %). 0 이면 본전
     # False 면 신고가 조건 없이 매수 (급등주 매매: min_change_pct 와 함께 사용)
     require_new_high: bool = True
@@ -466,6 +468,9 @@ def run_breakout(
                 if b.min_day_amount and bar.close * bar.volume < b.min_day_amount:
                     continue
                 if b.skip_touched_limit_up and bar.high >= ser.bars[i - 1].close * 1.295:
+                    continue
+                if b.exclude_high_days and (i < b.exclude_high_days
+                                            or bar.close > max(x.close for x in ser.bars[i - b.exclude_high_days:i])):
                     continue
                 if b.ma_order:
                     if i + 1 < max(b.ma_order):
@@ -1295,6 +1300,8 @@ def main(argv: list[str] | None = None) -> None:
                    help="breakout: 매수가 대비 N%% 이상 빠지면 다음 날부터 본전 지정가 매도 (0 = 없음)")
     r.add_argument("--stop-limit", action="store_true",
                    help="breakout: 손절을 손절가 지정가로 (갭하락이면 손절가 회복까지 미체결)")
+    r.add_argument("--exclude-high-days", type=int, default=0,
+                   help="breakout: N일 신고가이기도 한 종목 제외 (예: 200)")
     r.add_argument("--lock-profit", type=float, default=0,
                    help="breakout: --breakeven-at 이후 손절가를 매수가 +N%%로 (0 = 본전)")
     r.add_argument("--no-new-high", action="store_true", help="breakout: 신고가 조건 없이 매수 (--min-change 와 함께)")
@@ -1368,7 +1375,7 @@ def main(argv: list[str] | None = None) -> None:
                               max_drop_from_high_pct=args.max_drop_from_high,
                               buy_day_gap_up=args.buy_day_gap_up, buy_day_bullish=args.buy_day_bullish,
                               buy_day_min_wick_ratio=args.buy_day_wick, recover_after_drop_pct=args.recover_after_drop,
-                              stop_limit=args.stop_limit,
+                              stop_limit=args.stop_limit, exclude_high_days=args.exclude_high_days,
                               ma_order=tuple(int(x) for x in args.ma_order.split(",")) if args.ma_order else (),
                               exclude_marcap=tuple(args.exclude_marcap) if args.exclude_marcap else None)
         if args.min_marcap or args.exclude_marcap:

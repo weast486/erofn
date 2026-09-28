@@ -293,6 +293,8 @@ class BreakoutSettings:
     delay_hold_signal_open: bool = False  # 신고가 날 시가 아래로 내려간 적 없어야 매수
     delay_intraday: bool = False  # True 면 위 두 조건을 고가·저가로, False 면 종가로 판정
     # 매수일 봉 조건 (entry_delay 와 함께): 시가 갭상승 / 양봉 / 윗꼬리 >= 몸통 x N (0 = 조건 없음)
+    # 이평선 배열: 위에서부터 순서대로 (예: (60, 5, 20) = 60일선 > 5일선 > 20일선). 신호일 종가 포함 계산
+    ma_order: tuple[int, ...] = ()
     buy_day_gap_up: bool = False
     buy_day_bullish: bool = False
     buy_day_min_wick_ratio: float = 0.0
@@ -442,6 +444,12 @@ def run_breakout(
                     continue
                 if b.skip_touched_limit_up and bar.high >= ser.bars[i - 1].close * 1.295:
                     continue
+                if b.ma_order:
+                    if i + 1 < max(b.ma_order):
+                        continue
+                    mas = [sum(x.close for x in ser.bars[i + 1 - n:i + 1]) / n for n in b.ma_order]
+                    if any(mas[k] <= mas[k + 1] for k in range(len(mas) - 1)):
+                        continue
                 if b.max_drop_from_high_pct and bar.close <= bar.high * (1 - b.max_drop_from_high_pct / 100) + 1e-9:
                     continue
                 if b.min_marcap and (b.marcap or {}).get(sym, {}).get(day, 0) < b.min_marcap:
@@ -1258,6 +1266,8 @@ def main(argv: list[str] | None = None) -> None:
     r.add_argument("--buy-day-bullish", action="store_true", help="breakout: 매수일 양봉일 때만 (--entry-delay)")
     r.add_argument("--buy-day-wick", type=float, default=0,
                    help="breakout: 매수일 윗꼬리가 몸통의 N배 이상일 때만 (--entry-delay, 0 = 없음)")
+    r.add_argument("--ma-order", type=str, default="",
+                   help="breakout: 이평선 배열, 위에서부터 (예: 60,5,20 = 60일선 > 5일선 > 20일선)")
     r.add_argument("--lock-profit", type=float, default=0,
                    help="breakout: --breakeven-at 이후 손절가를 매수가 +N%%로 (0 = 본전)")
     r.add_argument("--no-new-high", action="store_true", help="breakout: 신고가 조건 없이 매수 (--min-change 와 함께)")
@@ -1331,6 +1341,7 @@ def main(argv: list[str] | None = None) -> None:
                               max_drop_from_high_pct=args.max_drop_from_high,
                               buy_day_gap_up=args.buy_day_gap_up, buy_day_bullish=args.buy_day_bullish,
                               buy_day_min_wick_ratio=args.buy_day_wick,
+                              ma_order=tuple(int(x) for x in args.ma_order.split(",")) if args.ma_order else (),
                               exclude_marcap=tuple(args.exclude_marcap) if args.exclude_marcap else None)
         if args.min_marcap or args.exclude_marcap:
             bs.marcap = load_marcap(args.marcap_dir, "2023-01-01")

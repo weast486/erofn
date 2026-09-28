@@ -162,3 +162,22 @@ class LimitUpEngineTest(unittest.TestCase):
     def test_skip_when_opens_at_limit_up(self):
         _, res = self.run_one((16_900, 16_900, 16_900, 16_900))
         self.assertEqual(res.trades, [])
+
+
+class SurgeDojiEngineTest(unittest.TestCase):
+    def test_buy_on_low_volume_small_bearish_candle_after_surge(self):
+        from tossbot.backtest import SurgeDojiSettings, run_surge_doji
+
+        days = weekdays(45)
+        bars = [Bar(d, 10_000, 10_050, 9_950, 10_000, 1_000_000) for d in days[:30]]
+        bars.append(Bar(days[30], 10_000, 11_800, 10_000, 11_700, 5_000_000))  # +17% 급등 (거래대금 1위)
+        bars.append(Bar(days[31], 12_000, 12_100, 11_300, 11_400, 3_000_000))  # 음봉이지만 몸통 5% → 제외
+        bars.append(Bar(days[32], 11_500, 11_550, 11_250, 11_300, 2_000_000))  # 단봉 음봉 + 거래량 40% → 매수
+        bars.append(Bar(days[33], 11_400, 13_100, 11_350, 13_000, 2_000_000))  # 익절
+        other = [Bar(d, 1_000, 1_010, 990, 1_000, 10_000) for d in days[:34]]  # 거래대금 작은 종목
+        res = run_surge_doji({"000010": ("테스트", bars), "000020": ("작은종목", other)},
+                             date(2023, 11, 1), date(2024, 3, 31), BacktestSettings(slippage=0.0),
+                             SurgeDojiSettings())
+        (t,) = res.trades
+        self.assertEqual((t.entry_date, t.entry_price, t.surge_date), (days[32], 11_300, days[30]))
+        self.assertEqual((t.reason, t.exit_price), ("TAKE_PROFIT", round_up_to_tick(11_300 * 1.15)))

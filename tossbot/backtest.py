@@ -301,6 +301,9 @@ class BreakoutSettings:
     # 0 보다 크면 장중 고가가 매수가 대비 이 % 이상 오른 다음 날부터 손절가를 매수가(본전)로 올림
     # 매수 다음 거래일 매도 규칙: "" 없음 / open 시가 / close 종가 / open_if_loss·close_if_loss 매수가 아래일 때만
     next_day_exit: str = ""
+    # N > 0 이면 종가가 N일 이동평균선 아래로 마감한 날 종가에 매도
+    ma_exit_days: int = 0
+    ma_exit_profit_only: bool = False  # True 면 종가가 매수가보다 높을 때만 이평선 이탈 매도 (익절 전용)
     breakeven_trigger_pct: float = 0.0
     breakeven_lock_pct: float = 0.0  # 올린 손절가 = 매수가 x (1 + 이 %). 0 이면 본전
     # False 면 신고가 조건 없이 매수 (급등주 매매: min_change_pct 와 함께 사용)
@@ -389,6 +392,10 @@ def run_breakout(
                 close_position(t, day, bar.close * (1 - s.slippage), f"LOW_{b.exit_days}D")
             elif b.max_hold_days and t.hold_days >= b.max_hold_days:
                 close_position(t, day, bar.close * (1 - s.slippage), "TIME_EXIT")
+            elif (b.ma_exit_days and i >= b.ma_exit_days - 1
+                  and bar.close < sum(x.close for x in ser.bars[i - b.ma_exit_days + 1:i + 1]) / b.ma_exit_days
+                  and (not b.ma_exit_profit_only or bar.close > t.entry_price)):
+                close_position(t, day, bar.close * (1 - s.slippage), f"MA{b.ma_exit_days}_EXIT")
             elif nd == "close" or (nd == "close_if_loss" and bar.close < t.entry_price):
                 close_position(t, day, bar.close * (1 - s.slippage), "NEXT_CLOSE")
             if (b.breakeven_trigger_pct and sym in positions
@@ -1191,6 +1198,8 @@ def main(argv: list[str] | None = None) -> None:
                    help="breakout: 고가가 매수가 대비 N%% 오르면 다음 날부터 손절가를 본전으로 (0 = 없음)")
     r.add_argument("--next-day-exit", choices=["", "open", "close", "open_if_loss", "close_if_loss"], default="",
                    help="breakout: 매수 다음 거래일 매도 (시가/종가, _if_loss 는 매수가 아래일 때만)")
+    r.add_argument("--ma-exit", type=int, default=0, help="breakout: 종가가 N일선 아래로 마감하면 종가 매도 (0 = 없음)")
+    r.add_argument("--ma-exit-profit-only", action="store_true", help="breakout: 이평선 이탈 매도를 수익 중일 때만")
     r.add_argument("--lock-profit", type=float, default=0,
                    help="breakout: --breakeven-at 이후 손절가를 매수가 +N%%로 (0 = 본전)")
     r.add_argument("--no-new-high", action="store_true", help="breakout: 신고가 조건 없이 매수 (--min-change 와 함께)")
@@ -1258,7 +1267,8 @@ def main(argv: list[str] | None = None) -> None:
                               require_new_high=not args.no_new_high, min_change_pct=args.min_change,
                               skip_limit_up=not args.allow_limit_up_signal,
                               breakeven_trigger_pct=args.breakeven_at, breakeven_lock_pct=args.lock_profit,
-                              next_day_exit=args.next_day_exit)
+                              next_day_exit=args.next_day_exit, ma_exit_days=args.ma_exit,
+                              ma_exit_profit_only=args.ma_exit_profit_only)
         if args.kospi_not_down:
             settings.entry_dates = index_not_down_days(load_index(args.cache, "KOSPI"))
             print("코스피가 전일보다 낮은 날은 매수 금지")

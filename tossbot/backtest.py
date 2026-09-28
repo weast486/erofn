@@ -33,6 +33,7 @@ from dataclasses import dataclass, field
 from datetime import date, timedelta
 from pathlib import Path
 
+from .breakout import new_high_flags
 from .broker import round_down_to_tick, round_up_to_tick
 from .config import Config, load_dotenv
 from .selector import Bar, PullbackParams, analyze, touch_zone
@@ -297,23 +298,6 @@ class BreakoutSettings:
     rank_by: str = "amount"  # 신호가 많을 때 우선순위: amount(당일 거래대금) / change(당일 상승률) / strength(신고가 돌파폭)
 
 
-def _new_high_flags(closes: list[float], n: int) -> list[bool]:
-    """각 날의 종가가 직전 n거래일 종가 최고값보다 높은지 (슬라이딩 최대값, O(len))."""
-    from collections import deque
-
-    flags = [False] * len(closes)
-    window: deque[int] = deque()  # 직전 n일 인덱스, 종가 내림차순 유지
-    for i, c in enumerate(closes):
-        while window and window[0] < i - n:
-            window.popleft()
-        if i >= n:
-            flags[i] = c > closes[window[0]]
-        while window and closes[window[-1]] <= c:
-            window.pop()
-        window.append(i)
-    return flags
-
-
 def run_breakout(
     data: dict[str, tuple[str, list[Bar]]],
     start: date,
@@ -336,7 +320,7 @@ def run_breakout(
     calendar = sorted({d for ser in series.values() for d in ser.days if start <= d <= end})
 
     # 종목별로 각 날이 종가 기준 entry_days 일 신고가였는지 미리 계산
-    is_high: dict[str, list[bool]] = {sym: _new_high_flags([x.close for x in ser.bars], b.entry_days)
+    is_high: dict[str, list[bool]] = {sym: new_high_flags([x.close for x in ser.bars], b.entry_days)
                                       for sym, ser in series.items()}
 
     cash = s.initial_cash

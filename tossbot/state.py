@@ -33,6 +33,7 @@ class Position:
 class State:
     # 감시 목록에 올랐던 급등 종목 {symbol: 마지막으로 확인한 날}. 랭킹에서 빠져도 계속 추적하기 위함
     surge_seen: dict[str, str] = field(default_factory=dict)
+    last_buy_date: str | None = None  # 신고가 전략: 마지막으로 매수를 실행한 날
     positions: dict[str, Position] = field(default_factory=dict)
     history: list[dict] = field(default_factory=list)
 
@@ -47,6 +48,7 @@ class StateStore:
         raw = json.loads(self.path.read_text(encoding="utf-8"))
         return State(
             surge_seen=raw.get("surge_seen", {}),
+            last_buy_date=raw.get("last_buy_date"),
             positions={k: Position(**v) for k, v in raw.get("positions", {}).items()},
             history=raw.get("history", []),
         )
@@ -56,6 +58,7 @@ class StateStore:
         tmp = self.path.with_suffix(".tmp")
         data = {
             "surge_seen": state.surge_seen,
+            "last_buy_date": state.last_buy_date,
             "positions": {k: asdict(v) for k, v in state.positions.items()},
             "history": state.history,
         }

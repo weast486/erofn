@@ -1,7 +1,7 @@
 """CLI 진입점.
 
     python -m tossbot check        # API 연결/계좌/매수가능금액 확인
-    python -m tossbot select       # 급등 종목 감시 목록과 7일선 대비 위치 출력 (주문 없음)
+    python -m tossbot select       # 지금 기준 매수 후보 출력 (주문 없음)
     python -m tossbot status       # 봇 보유 포지션 및 매매 이력
     python -m tossbot run          # 자동매매 상주 실행
     python -m tossbot liquidate    # 봇 보유 종목 즉시 전량 매도 (비상용)
@@ -21,7 +21,8 @@ from .config import KST, Config, load_dotenv
 from .market_calendar import TradingDay, trading_day_from_api
 from .selector import build_watchlist, entry_signal
 from .state import StateStore
-from .strategy import PullbackStrategy, params_from_config
+from .breakout import select_breakouts
+from .strategy import BreakoutStrategy, PullbackStrategy, make_strategy, params_from_config
 
 log = logging.getLogger("tossbot")
 
@@ -41,7 +42,7 @@ def setup_logging(cfg: Config, verbose: bool) -> None:
 
 def build(cfg: Config) -> tuple[TossClient, PullbackStrategy]:
     client = TossClient(cfg.client_id, cfg.client_secret, cfg.base_url, cfg.account_seq)
-    strategy = PullbackStrategy(cfg, Broker(client, cfg.dry_run), StateStore(cfg.state_file))
+    strategy = make_strategy(cfg, Broker(client, cfg.dry_run), StateStore(cfg.state_file))
     return client, strategy
 
 
@@ -56,8 +57,16 @@ def cmd_check(cfg: Config, client: TossClient, _s) -> None:
 
 
 def cmd_select(cfg: Config, client: TossClient, strategy: PullbackStrategy) -> None:
-    """급등 종목 감시 목록과 현재 7일선 대비 위치 출력 (주문 없음)."""
+    """지금 기준 매수 후보 출력 (주문 없음). 신고가 전략은 15시 무렵 실행해야 의미가 있다."""
     today = datetime.now(KST).date()
+    if isinstance(strategy, BreakoutStrategy):
+        cands = select_breakouts(client, set(strategy.state.positions), cfg.num_stocks, strategy.params(), today)
+        print(f"{'종목':<16} {'현재가':>9} {'20일최고':>9} {'등락':>7} {'거래대금(억)':>10}")
+        for c in cands:
+            print(f"{c.name[:10]+'('+c.symbol+')':<16} {c.price:>9,.0f} {c.prev_high:>9,.0f} {c.change:>+7.1%} {c.day_amount/1e8:>10,.0f}")
+        if not cands:
+            print("조건을 만족하는 신고가 돌파 종목이 없습니다.")
+        return
     params = params_from_config(cfg)
     watch = build_watchlist(client, set(strategy.state.surge_seen), params, today)
     if not watch:
@@ -102,12 +111,19 @@ def cmd_liquidate(cfg: Config, _c, strategy: PullbackStrategy) -> None:
 
 
 def cmd_run(cfg: Config, client: TossClient, strategy: PullbackStrategy) -> None:
-    log.info(
-        "눌림목 자동매매 시작 [%s] +%s%% 급등 후 %d일선 터치 시 매수 (이탈 한도 -%s%%) (%s~%s), 최대 %d종목 x %s원, "
-        "손절 -%s%% 익절 +%s%%",
-        "DRY_RUN" if cfg.dry_run else "LIVE", cfg.surge_pct, cfg.ma_period, cfg.ma_max_break_pct,
-        cfg.buy_start, cfg.buy_end, cfg.num_stocks, f"{cfg.slot_budget:,}", cfg.stop_loss_pct, cfg.take_profit_pct,
-    )
+    if cfg.strategy == "breakout":
+        log.info(
+            "신고가 돌파 자동매매 시작 [%s] %d일 신고가(%d일 내 첫), 거래대금 %s억 이상, %s~%s 매수, "
+            "최대 %d종목 x %s원, 손절 -%s%% 익절 +%s%%",
+            "DRY_RUN" if cfg.dry_run else "LIVE", cfg.breakout_entry_days, cfg.breakout_first_in_days,
+            f"{cfg.min_day_amount / 1e8:,.0f}", cfg.buy_start, cfg.buy_end, cfg.num_stocks,
+            f"{cfg.slot_budget:,}", cfg.stop_loss_pct, cfg.take_profit_pct,
+        )
+    else:
+        log.info(
+            "눌림목 자동매매 시작 [%s] %d일선 터치, 손절 -%s%% 익절 +%s%%",
+            "DRY_RUN" if cfg.dry_run else "LIVE", cfg.ma_period, cfg.stop_loss_pct, cfg.take_profit_pct,
+        )
     cached: TradingDay | None = None
     while True:
         now = datetime.now(KST)
@@ -126,7 +142,7 @@ def cmd_run(cfg: Config, client: TossClient, strategy: PullbackStrategy) -> None
 
 
 def main(argv: list[str] | None = None) -> None:
-    parser = argparse.ArgumentParser(prog="tossbot", description="토스증권 눌림목 자동매매 봇")
+    parser = argparse.ArgumentParser(prog="tossbot", description="토스증권 자동매매 봇 (신고가 돌파 / 눌림목)")
     parser.add_argument("command", choices=["check", "select", "status", "run", "liquidate"])
     parser.add_argument("--env", default=".env", help=".env 파일 경로")
     parser.add_argument("-v", "--verbose", action="store_true")

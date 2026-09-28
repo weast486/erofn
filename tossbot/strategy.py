@@ -21,6 +21,7 @@ from typing import Callable
 from .broker import CONDITIONAL_DONE, TERMINAL_STATUSES, Broker, round_down_to_tick, round_up_to_tick
 from .config import KST, Config
 from .market_calendar import TradingDay
+from .breakout import BreakoutParams, select_breakouts
 from .selector import PullbackParams, WatchItem, build_watchlist, entry_signal, parse_candles
 from .state import Position, State, StateStore
 
@@ -110,8 +111,12 @@ class PullbackStrategy:
 
         start, end = self.buy_window(day)
         if start <= now < end:
-            self.ensure_watchlist(day.today)
-            self.scan_and_buy(day.today)
+            self.buy_step(now, day, end)
+
+    def buy_step(self, now: datetime, day: TradingDay, deadline: datetime) -> None:
+        """매수 시간대 안에서 매 주기 호출. 눌림목: 감시 목록의 이평선 터치 확인."""
+        self.ensure_watchlist(day.today)
+        self.scan_and_buy(day.today)
 
     # ----------------------------------------------------------- hold days
     def count_hold_days(self, today: date) -> None:
@@ -209,9 +214,18 @@ class PullbackStrategy:
             return []
         signals.sort(key=lambda x: x[0].surge_pct, reverse=True)
 
+        orders = []
+        for w, price, ma in signals[:slots]:
+            note = f"현재가 {price:,.0f}, {w.ma_period}일선 {ma:,.0f} ({w.surge_date:%m/%d} +{w.surge_pct * 100:.1f}% 급등)"
+            orders.append((w.symbol, w.name, price, "눌림목 매수 " + note))
+        return self._place_buys(orders, today)
+
+    def _place_buys(self, orders: list[tuple[str, str, float, str]], today: date) -> list[str]:
+        """(종목, 이름, 현재가, 로그) 순서대로 시장성 지정가 매수. 매수한 종목 코드 반환."""
+        cfg = self.cfg
         bought = []
         cash = self.broker.cash_buying_power()
-        for w, price, ma in signals[:slots]:
+        for symbol, name, price, note in orders:
             limit = round_up_to_tick(price * (1 + BUY_LIMIT_SLIPPAGE))
             qty = cfg.slot_budget // limit
             if qty <= 0:
@@ -219,25 +233,22 @@ class PullbackStrategy:
             if qty * limit > cash:
                 log.warning("매수 가능 금액 부족 (필요 %s, 가능 %s) - 매수 중단", qty * limit, cash)
                 break
-            log.info(
-                "눌림목 매수 %s %s: 현재가 %s, %d일선 %.0f (%s +%.1f%% 급등)",
-                w.symbol, w.name, f"{price:,.0f}", w.ma_period, ma, w.surge_date.strftime("%m/%d"), w.surge_pct * 100,
-            )
+            log.info("%s %s: %s", symbol, name, note)
             try:
-                order_id = self.broker.buy_limit(w.symbol, qty, limit)
+                order_id = self.broker.buy_limit(symbol, qty, limit)
             except Exception as exc:
-                log.error("%s 매수 주문 실패: %s", w.symbol, exc)
+                log.error("%s 매수 주문 실패: %s", symbol, exc)
                 continue
             cash -= qty * limit
-            self.state.positions[w.symbol] = Position(
-                symbol=w.symbol,
-                name=w.name,
+            self.state.positions[symbol] = Position(
+                symbol=symbol,
+                name=name,
                 opened_at=self.now().isoformat(timespec="seconds"),
                 buy_order_id=order_id,
                 buy_open=True,
                 last_day=today.isoformat(),
             )
-            bought.append(w.symbol)
+            bought.append(symbol)
             self.store.save(self.state)
 
         if bought:
@@ -496,3 +507,57 @@ class PullbackStrategy:
             pos.status, pos.sell_order_id = "OPEN", None
             pos.stop_arm_failures = pos.tp_arm_failures = 0
         self.store.save(self.state)
+
+
+class BreakoutStrategy(PullbackStrategy):
+    """20일 신고가 돌파 (한 달 내 첫 신고가, 당일 거래대금 200억 이상) 를 종가 무렵(15:10~15:20)에 매수.
+
+    매도는 눌림목 전략과 같은 장치를 쓴다: 손절(시장가)·익절(지정가) 조건주문 + 봇 가격 감시 백업.
+    """
+
+    def __init__(self, cfg: Config, broker: Broker, store: StateStore, selector=None):
+        super().__init__(cfg, broker, store)
+        self.select = selector or select_breakouts
+
+    def params(self) -> BreakoutParams:
+        cfg = self.cfg
+        return BreakoutParams(
+            slot_budget=cfg.slot_budget,
+            entry_days=cfg.breakout_entry_days,
+            first_in_days=cfg.breakout_first_in_days,
+            min_day_amount=cfg.min_day_amount,
+            min_avg_trading_amount=cfg.min_avg_trading_amount,
+        )
+
+    def buy_step(self, now: datetime, day: TradingDay, deadline: datetime) -> None:
+        today = day.today
+        if self.state.last_buy_date == today.isoformat():
+            return  # 하루 한 번
+        slots = self.cfg.num_stocks - len(self.state.positions)
+        if slots <= 0:
+            log.info("이미 %d종목 보유 중, 오늘은 매수 없음", len(self.state.positions))
+            self._mark_bought(today)
+            return
+        # 조회 오류가 나면 예외가 전파되어 다음 주기(매수 시간대 안)에 다시 시도
+        cands = self.select(self.broker.client, set(self.state.positions), slots, self.params(), today)
+        self._mark_bought(today)
+        if not cands or not self.market_allows_buy(today):
+            return
+        orders = [
+            (c.symbol, c.name, c.price,
+             f"신고가 돌파 매수: 현재가 {c.price:,.0f} (20일 최고 {c.prev_high:,.0f}, "
+             f"{c.change:+.1%}, 거래대금 {c.day_amount / 1e8:,.0f}억)")
+            for c in cands
+        ]
+        if self.now() >= deadline:
+            log.warning("매수 마감 시각 지남 - 오늘 매수 생략")
+            return
+        self._place_buys(orders, today)
+
+    def _mark_bought(self, today: date) -> None:
+        self.state.last_buy_date = today.isoformat()
+        self.store.save(self.state)
+
+
+def make_strategy(cfg: Config, broker: Broker, store: StateStore) -> PullbackStrategy:
+    return BreakoutStrategy(cfg, broker, store) if cfg.strategy == "breakout" else PullbackStrategy(cfg, broker, store)

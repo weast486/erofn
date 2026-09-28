@@ -157,7 +157,9 @@ def watch(symbol, surge_pct=0.12):
 class StrategyTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
-        self.cfg = Config(dry_run=True, state_dir=self.tmp.name, ma_period=5)
+        # 눌림목 전략 시나리오 (기본값이 신고가 전략으로 바뀌었으므로 눌림목 설정을 명시)
+        self.cfg = Config(dry_run=True, state_dir=self.tmp.name, strategy="pullback", ma_period=5,
+                          buy_start="09:00", market_filter="kospi_down", take_profit_pct=15.0, max_hold_days=10)
         # 기본은 5일선보다 10% 위 (아직 눌리지 않음)
         self.client = FakeClient({f"{i:06d}": 11_000 for i in range(1, 30)})
         self.watch = {f"{i:06d}": watch(f"{i:06d}", 0.10 + i / 100) for i in range(1, 16)}

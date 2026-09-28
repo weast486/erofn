@@ -292,6 +292,10 @@ class BreakoutSettings:
     delay_max_rise_pct: float = 0.0  # 신고가 날 종가 대비 이 % 이상 오른 적 없어야 매수
     delay_hold_signal_open: bool = False  # 신고가 날 시가 아래로 내려간 적 없어야 매수
     delay_intraday: bool = False  # True 면 위 두 조건을 고가·저가로, False 면 종가로 판정
+    # 매수일 봉 조건 (entry_delay 와 함께): 시가 갭상승 / 양봉 / 윗꼬리 >= 몸통 x N (0 = 조건 없음)
+    buy_day_gap_up: bool = False
+    buy_day_bullish: bool = False
+    buy_day_min_wick_ratio: float = 0.0
     # N > 0 이면 '직전 N거래일 동안 신고가가 없었던' 첫 신고가만 매수 (예: 20 = 한 달 이내 첫 신고가)
     first_in_days: int = 0
     min_avg_trading_amount: float = 3_000_000_000
@@ -501,6 +505,12 @@ def run_breakout(
                     if b.delay_max_rise_pct and hi >= sig.close * (1 + b.delay_max_rise_pct / 100):
                         continue
                     if b.delay_hold_signal_open and lo < sig.open:
+                        continue
+                    if b.buy_day_gap_up and bar.open <= ser.bars[i - 1].close:
+                        continue
+                    if b.buy_day_bullish and bar.close <= bar.open:
+                        continue
+                    if b.buy_day_min_wick_ratio and (bar.high - bar.close) < (bar.close - bar.open) * b.buy_day_min_wick_ratio:
                         continue
                     signals.append((key, sym, bar, sig_day))
                 pending[:] = keep
@@ -1244,6 +1254,10 @@ def main(argv: list[str] | None = None) -> None:
     r.add_argument("--skip-touched-limit-up", action="store_true", help="breakout: 장중 상한가를 찍었던 종목 제외")
     r.add_argument("--max-drop-from-high", type=float, default=0,
                    help="breakout: 종가가 당일 고가 대비 N%% 이상 내려온 종목 제외 (0 = 없음)")
+    r.add_argument("--buy-day-gap-up", action="store_true", help="breakout: 매수일 시가가 전일 종가보다 높을 때만 (--entry-delay)")
+    r.add_argument("--buy-day-bullish", action="store_true", help="breakout: 매수일 양봉일 때만 (--entry-delay)")
+    r.add_argument("--buy-day-wick", type=float, default=0,
+                   help="breakout: 매수일 윗꼬리가 몸통의 N배 이상일 때만 (--entry-delay, 0 = 없음)")
     r.add_argument("--lock-profit", type=float, default=0,
                    help="breakout: --breakeven-at 이후 손절가를 매수가 +N%%로 (0 = 본전)")
     r.add_argument("--no-new-high", action="store_true", help="breakout: 신고가 조건 없이 매수 (--min-change 와 함께)")
@@ -1315,6 +1329,8 @@ def main(argv: list[str] | None = None) -> None:
                               ma_exit_profit_only=args.ma_exit_profit_only, max_buys_per_day=args.max_buys_per_day,
                               min_marcap=args.min_marcap, skip_touched_limit_up=args.skip_touched_limit_up,
                               max_drop_from_high_pct=args.max_drop_from_high,
+                              buy_day_gap_up=args.buy_day_gap_up, buy_day_bullish=args.buy_day_bullish,
+                              buy_day_min_wick_ratio=args.buy_day_wick,
                               exclude_marcap=tuple(args.exclude_marcap) if args.exclude_marcap else None)
         if args.min_marcap or args.exclude_marcap:
             bs.marcap = load_marcap(args.marcap_dir, "2023-01-01")

@@ -301,6 +301,7 @@ class BreakoutSettings:
     # 0 보다 크면 장중 고가가 매수가 대비 이 % 이상 오른 다음 날부터 손절가를 매수가(본전)로 올림
     # 매수 다음 거래일 매도 규칙: "" 없음 / open 시가 / close 종가 / open_if_loss·close_if_loss 매수가 아래일 때만
     next_day_exit: str = ""
+    max_buys_per_day: int = 0  # 0 보다 크면 하루 신규 매수 종목 수 상한
     # N > 0 이면 종가가 N일 이동평균선 아래로 마감한 날 종가에 매도
     ma_exit_days: int = 0
     ma_exit_profit_only: bool = False  # True 면 종가가 매수가보다 높을 때만 이평선 이탈 매도 (익절 전용)
@@ -486,7 +487,8 @@ def run_breakout(
             if s.entry_dates is not None and day not in s.entry_dates:
                 signals = []  # 시장 필터: 오늘은 신규 매수 안 함 (3일 뒤 매수 대기 신호는 그대로 소멸)
             signals.sort(key=lambda x: x[0], reverse=True)
-            for _, sym, bar, sig_day in signals[:max(slots, 0)]:
+            n_buy = min(max(slots, 0), b.max_buys_per_day) if b.max_buys_per_day else max(slots, 0)
+            for _, sym, bar, sig_day in signals[:n_buy]:
                 price = bar.close * (1 + s.slippage)
                 qty = int(budget // round_up_to_tick(bar.close * (1 + BUY_LIMIT_SLIPPAGE)))
                 cost = qty * price * (1 + s.commission)
@@ -1200,6 +1202,7 @@ def main(argv: list[str] | None = None) -> None:
                    help="breakout: 매수 다음 거래일 매도 (시가/종가, _if_loss 는 매수가 아래일 때만)")
     r.add_argument("--ma-exit", type=int, default=0, help="breakout: 종가가 N일선 아래로 마감하면 종가 매도 (0 = 없음)")
     r.add_argument("--ma-exit-profit-only", action="store_true", help="breakout: 이평선 이탈 매도를 수익 중일 때만")
+    r.add_argument("--max-buys-per-day", type=int, default=0, help="breakout: 하루 신규 매수 종목 수 상한 (0 = 없음)")
     r.add_argument("--lock-profit", type=float, default=0,
                    help="breakout: --breakeven-at 이후 손절가를 매수가 +N%%로 (0 = 본전)")
     r.add_argument("--no-new-high", action="store_true", help="breakout: 신고가 조건 없이 매수 (--min-change 와 함께)")
@@ -1268,7 +1271,7 @@ def main(argv: list[str] | None = None) -> None:
                               skip_limit_up=not args.allow_limit_up_signal,
                               breakeven_trigger_pct=args.breakeven_at, breakeven_lock_pct=args.lock_profit,
                               next_day_exit=args.next_day_exit, ma_exit_days=args.ma_exit,
-                              ma_exit_profit_only=args.ma_exit_profit_only)
+                              ma_exit_profit_only=args.ma_exit_profit_only, max_buys_per_day=args.max_buys_per_day)
         if args.kospi_not_down:
             settings.entry_dates = index_not_down_days(load_index(args.cache, "KOSPI"))
             print("코스피가 전일보다 낮은 날은 매수 금지")

@@ -318,7 +318,9 @@ class BreakoutSettings:
     max_day_amount: float = 0.0
     # 0 보다 크면 신고가 날 시가 갭(시가 / 전일 종가 - 1)이 이 % 이하인 종목만 매수
     max_gap_pct: float = 0.0
-    rank_by: str = "amount"  # 신호가 많을 때 우선순위: amount(당일 거래대금) / change(당일 상승률) / strength(신고가 돌파폭)
+    # 신호가 많을 때 우선순위: amount(당일 거래대금) / change(당일 상승률) / strength(신고가 돌파폭) 큰 순,
+    # weak(돌파폭 작은 순) / calm(당일 상승률 작은 순)
+    rank_by: str = "amount"
 
 
 def run_breakout(
@@ -453,6 +455,10 @@ def run_breakout(
                     key = bar.close * bar.volume
                 elif b.rank_by == "change":
                     key = bar.close / ser.bars[i - 1].close  # 당일 상승률
+                elif b.rank_by == "calm":
+                    key = -bar.close / ser.bars[i - 1].close  # 당일 상승률 작은 순
+                elif b.rank_by == "weak":
+                    key = -bar.close / prev_high  # 신고가를 살짝 넘은 순
                 else:
                     key = bar.close / prev_high
                 if b.entry_delay:
@@ -1223,7 +1229,7 @@ def main(argv: list[str] | None = None) -> None:
     r.add_argument("--regime-slope-days", type=int, default=5, help="breakout: 20일선 기울기 비교 기간 (거래일)")
     r.add_argument("--kospi-up-days", type=int, default=0,
                    help="breakout: 코스피 종가가 N거래일 전보다 높은 날에만 매수 (0 = 필터 없음)")
-    r.add_argument("--rank-by", choices=["amount", "change", "strength"], default="amount",
+    r.add_argument("--rank-by", choices=["amount", "change", "strength", "weak", "calm"], default="amount",
                    help="breakout: 신호가 많을 때 우선순위 (거래대금 / 당일 상승률 / 신고가 돌파폭)")
     r.add_argument("--delay-max-rise", type=float, default=0, help="breakout: 대기 중 신고가 종가 대비 N%% 이상 상승 시 매수 취소")
     r.add_argument("--delay-hold-open", action="store_true", help="breakout: 대기 중 신고가 봉 시가 아래로 내려가면 매수 취소")

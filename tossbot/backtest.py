@@ -266,6 +266,113 @@ def run_backtest(
     return Result(start, end, s.initial_cash, final, trades, equity_curve, len(positions))
 
 
+@dataclass
+class BreakoutSettings:
+    """돌파 매매: 종가 기준 N일 신고가에 매수, M일 신저가에 매도 (체결은 신호 당일 종가 무렵)."""
+    entry_days: int = 20
+    exit_days: int = 10
+    stop_loss_pct: float = 0.0  # 0 이면 손절 없음 (신저가 매도만)
+    min_avg_trading_amount: float = 3_000_000_000
+    rank_by: str = "amount"  # 신호가 많을 때 우선순위: amount(당일 거래대금) / strength(신고가 돌파폭)
+
+
+def run_breakout(
+    data: dict[str, tuple[str, list[Bar]]],
+    start: date,
+    end: date,
+    s: BacktestSettings | None = None,
+    b: BreakoutSettings | None = None,
+) -> Result:
+    """종가 기준 entry_days 일 신고가 매수 / exit_days 일 신저가 매도.
+
+    - 매수 신호: 오늘 종가 > 직전 entry_days 거래일 종가의 최고값 → 오늘 종가에 매수
+    - 매도 신호: 오늘 종가 < 직전 exit_days 거래일 종가의 최저값 → 오늘 종가에 매도
+    - stop_loss_pct > 0 이면 장중 저가가 손절가 이하일 때 손절가(갭이면 시가)에 매도
+    - 종목당 slot_budget, 최대 num_slots 종목. 신호가 많으면 rank_by 순서
+    """
+    s = s or BacktestSettings()
+    b = b or BreakoutSettings()
+    budget = s.params.slot_budget
+    series = _prepare(data)
+    calendar = sorted({d for ser in series.values() for d in ser.days if start <= d <= end})
+
+    cash = s.initial_cash
+    positions: dict[str, Trade] = {}
+    trades: list[Trade] = []
+    equity_curve: list[tuple[date, float]] = []
+    last_close: dict[str, float] = {}
+
+    def close_position(t: Trade, day: date, price: float, reason: str) -> None:
+        nonlocal cash
+        proceeds = _sell_value(t.qty, price, day.year, s)
+        t.exit_date, t.exit_price, t.reason = day, price, reason
+        t.pnl = proceeds - t.qty * t.entry_price * (1 + s.commission)
+        cash += proceeds
+        del positions[t.symbol]
+
+    for day in calendar:
+        # 1) 매도: 손절 → 신저가
+        for sym, t in list(positions.items()):
+            ser = series[sym]
+            i = ser.index.get(day)
+            t.hold_days += 1
+            if i is None:
+                continue
+            bar = ser.bars[i]
+            if b.stop_loss_pct > 0:
+                stop = round_down_to_tick(t.entry_price * (1 - b.stop_loss_pct / 100))
+                if bar.open <= stop:
+                    close_position(t, day, bar.open * (1 - s.slippage), "STOP_LOSS")
+                    continue
+                if bar.low <= stop:
+                    close_position(t, day, stop * (1 - s.slippage), "STOP_LOSS")
+                    continue
+            if i >= b.exit_days and bar.close < min(x.close for x in ser.bars[i - b.exit_days:i]):
+                close_position(t, day, bar.close * (1 - s.slippage), f"LOW_{b.exit_days}D")
+
+        # 2) 매수: 종가 신고가
+        slots = s.num_slots - len(positions)
+        if slots > 0:
+            signals = []
+            for sym, ser in series.items():
+                if sym in positions:
+                    continue
+                i = ser.index.get(day)
+                if i is None or i < max(b.entry_days, 20):
+                    continue
+                bar = ser.bars[i]
+                prev_high = max(x.close for x in ser.bars[i - b.entry_days:i])
+                if bar.close <= prev_high or bar.close > budget:
+                    continue
+                avg_amount = sum(x.close * x.volume for x in ser.bars[i - 20:i]) / 20
+                if avg_amount < b.min_avg_trading_amount:
+                    continue
+                key = bar.close * bar.volume if b.rank_by == "amount" else bar.close / prev_high
+                signals.append((key, sym, bar))
+            signals.sort(key=lambda x: x[0], reverse=True)
+            for _, sym, bar in signals[:slots]:
+                price = bar.close * (1 + s.slippage)
+                qty = int(budget // round_up_to_tick(bar.close * (1 + BUY_LIMIT_SLIPPAGE)))
+                cost = qty * price * (1 + s.commission)
+                if qty <= 0 or cost > cash:
+                    continue
+                cash -= cost
+                t = Trade(sym, series[sym].name, day, price, qty, surge_date=day)
+                positions[sym] = t
+                trades.append(t)
+
+        # 3) 평가
+        for sym in positions:
+            i = series[sym].index.get(day)
+            if i is not None:
+                last_close[sym] = series[sym].bars[i].close
+        equity = cash + sum(t.qty * last_close.get(sym, t.entry_price) for sym, t in positions.items())
+        equity_curve.append((day, equity))
+
+    final = equity_curve[-1][1] if equity_curve else s.initial_cash
+    return Result(start, end, s.initial_cash, final, trades, equity_curve, len(positions))
+
+
 # -------------------------------------------------------------------- data
 def load_cache(cache_dir: Path) -> dict[str, tuple[str, list[Bar]]]:
     names = {}
@@ -466,6 +573,11 @@ def main(argv: list[str] | None = None) -> None:
     r.add_argument("--cache", type=Path, default=DEFAULT_CACHE)
     r.add_argument("--out", type=Path, default=Path("backtest_results"))
     r.add_argument("--env", default=".env")
+    r.add_argument("--strategy", choices=["pullback", "breakout"], default="pullback",
+                   help="pullback: 급등 후 이평선 터치 / breakout: 종가 N일 신고가 매수·M일 신저가 매도")
+    r.add_argument("--entry-days", type=int, default=20, help="breakout: 매수 신고가 기간")
+    r.add_argument("--exit-days", type=int, default=10, help="breakout: 매도 신저가 기간")
+    r.add_argument("--stop-loss", type=float, default=0.0, help="breakout: 손절 %% (0 = 없음)")
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
 
@@ -482,9 +594,13 @@ def main(argv: list[str] | None = None) -> None:
     if not data:
         raise SystemExit(f"{args.cache} 에 데이터가 없습니다. 먼저 download 를 실행하세요.")
     last_day = max(b.day for _, bars in data.values() for b in bars[-1:])
-    results = [
-        run_backtest(data, date(y, 1, 1), min(date(y, 12, 31), last_day), settings) for y in args.years
-    ]
+    if args.strategy == "breakout":
+        bs = BreakoutSettings(args.entry_days, args.exit_days, args.stop_loss,
+                              min_avg_trading_amount=settings.params.min_avg_trading_amount)
+        runner = lambda y0, y1: run_breakout(data, y0, y1, settings, bs)  # noqa: E731
+    else:
+        runner = lambda y0, y1: run_backtest(data, y0, y1, settings)  # noqa: E731
+    results = [runner(date(y, 1, 1), min(date(y, 12, 31), last_day)) for y in args.years]
     print(f"종목 {len(data)}개, 연도마다 {settings.initial_cash:,.0f}원으로 새로 시작\n")
     print_report(results)
     print(f"\n거래 내역: {save_trades(results, args.out)}")

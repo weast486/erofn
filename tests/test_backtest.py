@@ -214,3 +214,28 @@ class FirstHighTest(unittest.TestCase):
                            BacktestSettings(slippage=0.0), b)
         (t,) = res.trades
         self.assertEqual((t.surge_date, t.entry_date, t.entry_price), (days[40], days[43], 10_280))
+
+    def test_entry_delay_conditions(self):
+        from tossbot.backtest import BreakoutSettings, run_breakout
+
+        days = weekdays(70)
+
+        def run(after, intraday=False):
+            base = [Bar(d, 10_000, 10_050, 9_950, 10_000, 5_000_000) for d in days[:40]]
+            sig = Bar(days[40], 10_100, 10_350, 10_050, 10_300, 5_000_000)  # 신고가 날: 시가 10,100 / 종가 10,300
+            rest = [Bar(days[41 + k], *ohlc, 5_000_000) for k, ohlc in enumerate(after)]
+            b = BreakoutSettings(stop_loss_pct=7.0, take_profit_pct=20.0, exit_on_low=False, first_in_days=20,
+                                 min_day_amount=10_000_000_000, entry_delay=3, delay_max_rise_pct=5.0,
+                                 delay_hold_signal_open=True, delay_intraday=intraday)
+            return run_breakout({"000010": ("테스트", base + [sig] + rest)}, date(2023, 11, 1), date(2024, 3, 31),
+                                BacktestSettings(slippage=0.0), b).trades
+
+        calm = [(10_300, 10_400, 10_200, 10_250)] * 3
+        self.assertEqual(len(run(calm)), 1)  # 조건 통과 → 3일째 매수
+        risen = calm[:1] + [(10_300, 10_900, 10_250, 10_850)] + calm[:1]  # 종가 +5.3%
+        self.assertEqual(run(risen), [])
+        broke = calm[:1] + [(10_200, 10_250, 10_000, 10_050)] + calm[:1]  # 종가 10,050 < 시가 10,100
+        self.assertEqual(run(broke), [])
+        wick = calm[:1] + [(10_200, 10_300, 10_000, 10_200)] + calm[:1]  # 저가만 시가 아래
+        self.assertEqual(len(run(wick)), 1)  # 종가 기준이면 통과
+        self.assertEqual(run(wick, intraday=True), [])  # 장중 기준이면 탈락

@@ -287,6 +287,10 @@ class BreakoutSettings:
     min_day_amount: float = 0.0
     # N > 0 이면 신고가 신호 N거래일 뒤 종가에 매수 (그날 종가가 예산 이하이고 상한가 마감이 아닐 때)
     entry_delay: int = 0
+    # 대기 기간(신호 다음 날 ~ 매수일) 조건. 0/False 면 사용 안 함
+    delay_max_rise_pct: float = 0.0  # 신고가 날 종가 대비 이 % 이상 오른 적 없어야 매수
+    delay_hold_signal_open: bool = False  # 신고가 날 시가 아래로 내려간 적 없어야 매수
+    delay_intraday: bool = False  # True 면 위 두 조건을 고가·저가로, False 면 종가로 판정
     # N > 0 이면 '직전 N거래일 동안 신고가가 없었던' 첫 신고가만 매수 (예: 20 = 한 달 이내 첫 신고가)
     first_in_days: int = 0
     min_avg_trading_amount: float = 3_000_000_000
@@ -414,6 +418,14 @@ def run_breakout(
                         continue  # 거래정지 등으로 매수일을 지나쳤거나 이미 보유
                     bar = ser.bars[i]
                     if bar.close > budget or bar.close >= ser.bars[i - 1].close * 1.295:
+                        continue
+                    sig = ser.bars[ser.index[sig_day]]
+                    waiting = ser.bars[ser.index[sig_day] + 1:i + 1]
+                    hi = max((x.high if b.delay_intraday else x.close) for x in waiting)
+                    lo = min((x.low if b.delay_intraday else x.close) for x in waiting)
+                    if b.delay_max_rise_pct and hi >= sig.close * (1 + b.delay_max_rise_pct / 100):
+                        continue
+                    if b.delay_hold_signal_open and lo < sig.open:
                         continue
                     signals.append((key, sym, bar, sig_day))
                 pending[:] = keep
@@ -942,6 +954,9 @@ def main(argv: list[str] | None = None) -> None:
     r.add_argument("--first-in-days", type=int, default=0, help="breakout: 직전 N거래일 안에 신고가가 없던 첫 신고가만")
     r.add_argument("--min-day-amount", type=float, default=0, help="breakout: 신호 당일 거래대금 하한 (원)")
     r.add_argument("--entry-delay", type=int, default=0, help="breakout: 신고가 신호 N거래일 뒤 종가에 매수")
+    r.add_argument("--delay-max-rise", type=float, default=0, help="breakout: 대기 중 신고가 종가 대비 N%% 이상 상승 시 매수 취소")
+    r.add_argument("--delay-hold-open", action="store_true", help="breakout: 대기 중 신고가 봉 시가 아래로 내려가면 매수 취소")
+    r.add_argument("--delay-intraday", action="store_true", help="breakout: 대기 조건을 종가 대신 고가·저가로 판정")
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
 
@@ -974,7 +989,8 @@ def main(argv: list[str] | None = None) -> None:
         bs = BreakoutSettings(args.entry_days, args.exit_days, args.stop_loss, args.take_profit,
                               exit_on_low=not args.no_exit_on_low, max_hold_days=args.max_hold,
                               first_in_days=args.first_in_days, min_day_amount=args.min_day_amount,
-                              entry_delay=args.entry_delay,
+                              entry_delay=args.entry_delay, delay_max_rise_pct=args.delay_max_rise,
+                              delay_hold_signal_open=args.delay_hold_open, delay_intraday=args.delay_intraday,
                               min_avg_trading_amount=settings.params.min_avg_trading_amount)
         runner = lambda y0, y1: run_breakout(data, y0, y1, settings, bs)  # noqa: E731
     elif args.strategy == "surgedoji":

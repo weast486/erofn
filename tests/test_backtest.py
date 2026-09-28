@@ -8,6 +8,8 @@ from tossbot.broker import round_down_to_tick, round_up_to_tick
 from tossbot.selector import Bar, PullbackParams, analyze, touch_zone
 
 START = date(2024, 1, 1)
+# 엔진(체결·청산·비용) 검증용 시나리오는 7일선 기준으로 만들어져 있으므로 명시적으로 고정
+P7 = PullbackParams(ma_period=7)
 
 
 def weekdays(n, start=date(2023, 11, 1)):
@@ -27,9 +29,9 @@ def make_stock(after_entry):
         vol = 3_000_000 if c == 11_500 else 500_000
         bars.append(Bar(days[len(bars)], c, c * 1.01, c * 0.99, c, vol))
     # 진입일: 7일선 터치 구간 상단(hi) 위에서 시작해 hi 아래까지 내려옴
-    item, reason = analyze("X", "X", bars, days[len(bars)], PullbackParams())
+    item, reason = analyze("X", "X", bars, days[len(bars)], P7)
     assert item, reason
-    lo, hi = touch_zone(item, PullbackParams())
+    lo, hi = touch_zone(item, P7)
     bars.append(Bar(days[len(bars)], hi * 1.01, hi * 1.01, hi * 0.995, hi, 600_000))
     for o, h, l, c in after_entry(hi):
         bars.append(Bar(days[len(bars)], o, h, l, c, 600_000))
@@ -39,7 +41,7 @@ def make_stock(after_entry):
 class BacktestEngineTest(unittest.TestCase):
     def run_one(self, after_entry, **kw):
         bars, hi = make_stock(after_entry)
-        s = BacktestSettings(slippage=0.0, **kw)
+        s = BacktestSettings(params=P7, slippage=0.0, **kw)
         res = run_backtest({"000010": ("테스트", bars)}, date(2023, 12, 1), date(2024, 3, 31), s)
         return res, hi
 
@@ -72,7 +74,7 @@ class BacktestEngineTest(unittest.TestCase):
         self.assertEqual((t.reason, t.hold_days), ("TIME_EXIT", 10))
 
     def test_no_entry_when_rules_disabled_by_params(self):
-        s = PullbackParams(min_days_after_surge=5)  # 급등 후 4일째 진입이므로 막혀야 함
+        s = PullbackParams(ma_period=7, min_days_after_surge=5)  # 급등 후 4일째 진입이므로 막혀야 함
         bars, _ = make_stock(lambda hi: [])
         res = run_backtest({"000010": ("테스트", bars)}, date(2023, 12, 1), date(2024, 3, 31),
                            BacktestSettings(params=s))

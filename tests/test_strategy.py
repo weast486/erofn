@@ -47,9 +47,9 @@ class SelectorTest(unittest.TestCase):
         self.assertEqual(reason, "")
         self.assertAlmostEqual(item.surge_pct, 0.12, places=6)
         self.assertEqual(item.surge_date, TODAY - timedelta(days=3))
-        # 오늘(장중) 봉은 계산에서 제외: 직전 6거래일 종가 합
+        # 오늘(장중) 봉은 계산에서 제외: 직전 4거래일 종가 합
         closes = surge_series()
-        self.assertAlmostEqual(item.prev_closes_sum, sum(closes[-6:]))
+        self.assertAlmostEqual(item.prev_closes_sum, sum(closes[-4:]))
 
     def test_analyze_rejections(self):
         p = PullbackParams()
@@ -59,8 +59,8 @@ class SelectorTest(unittest.TestCase):
         self.assertIn("급등 없음", analyze("A", "A", parse_candles(closes_to_candles(too_old)), TODAY, p)[1])
         gave_back = surge_series(days_after=(0.9, 0.9))
         self.assertEqual(analyze("A", "A", parse_candles(closes_to_candles(gave_back)), TODAY, p)[1], "급등분 모두 반납")
-        below_ma = surge_series(surge_pct=0.20, days_after=(0.95, 0.95, 0.95))  # 전일 종가가 이미 7일선 아래
-        self.assertIn("7일선 아래", analyze("A", "A", parse_candles(closes_to_candles(below_ma)), TODAY, p)[1])
+        below_ma = surge_series(surge_pct=0.20, days_after=(0.95, 0.95, 0.95))  # 전일 종가가 이미 5일선 아래
+        self.assertIn("5일선 아래", analyze("A", "A", parse_candles(closes_to_candles(below_ma)), TODAY, p)[1])
         heavy = surge_series()
         heavy_vol = [1_000_000] * (len(heavy) - 3) + [3_000_000, 2_000_000, 2_000_000]  # 눌림 중 거래량 많음
         self.assertEqual(
@@ -78,12 +78,12 @@ class SelectorTest(unittest.TestCase):
 
     def test_entry_signal_touch_ma7(self):
         p = PullbackParams()
-        item = WatchItem("A", "A", TODAY, 0.12, pre_surge_close=8_000, prev_closes_sum=6 * 10_000)
-        self.assertTrue(entry_signal(item, 10_000, p)[0])  # 7일선 = 10,000 에 정확히 터치
-        self.assertFalse(entry_signal(item, 10_050, p)[0])  # 아직 7일선 위 (7일선 10,007)
-        self.assertTrue(entry_signal(item, 9_900, p)[0])  # 살짝 뚫음 (7일선 9,986 대비 -0.9%)
+        item = WatchItem("A", "A", TODAY, 0.12, pre_surge_close=8_000, prev_closes_sum=4 * 10_000)
+        self.assertTrue(entry_signal(item, 10_000, p)[0])  # 5일선 = 10,000 에 정확히 터치
+        self.assertFalse(entry_signal(item, 10_050, p)[0])  # 아직 5일선 위 (5일선 10,010)
+        self.assertTrue(entry_signal(item, 9_900, p)[0])  # 살짝 뚫음 (5일선 9,980 대비 -0.8%)
         self.assertFalse(entry_signal(item, 9_800, p)[0])  # -1.7%: 이미 이탈
-        low_base = WatchItem("A", "A", TODAY, 0.12, pre_surge_close=10_100, prev_closes_sum=6 * 10_000)
+        low_base = WatchItem("A", "A", TODAY, 0.12, pre_surge_close=10_100, prev_closes_sum=4 * 10_000)
         self.assertFalse(entry_signal(low_base, 10_000, p)[0])  # 급등 전 가격 아래
 
     def test_build_watchlist_uses_rankings_and_memory(self):
@@ -128,16 +128,16 @@ MON, TUE, WED = trading_day(date(2026, 9, 21)), trading_day(date(2026, 9, 22)), 
 
 
 def watch(symbol, surge_pct=0.12):
-    # 직전 6일 종가 합 60,000 → 현재가 10,000 이면 7일선 10,000 (괴리 0%)
+    # 직전 4일 종가 합 40,000 → 현재가 10,000 이면 5일선 10,000 (괴리 0%)
     return WatchItem(symbol, f"종목{symbol}", date(2026, 9, 17), surge_pct, pre_surge_close=8_000,
-                     prev_closes_sum=60_000)
+                     prev_closes_sum=40_000)
 
 
 class StrategyTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.cfg = Config(dry_run=True, state_dir=self.tmp.name)
-        # 기본은 7일선보다 10% 위 (아직 눌리지 않음)
+        # 기본은 5일선보다 10% 위 (아직 눌리지 않음)
         self.client = FakeClient({f"{i:06d}": 11_000 for i in range(1, 30)})
         self.watch = {f"{i:06d}": watch(f"{i:06d}", 0.10 + i / 100) for i in range(1, 16)}
         self.builds = 0
@@ -158,10 +158,10 @@ class StrategyTest(unittest.TestCase):
         s = self.strategy
         self.tick(MON, 9, 0)
         self.assertEqual(len(s.state.positions), 0)
-        self.client.prices["000003"] = 10_050  # 아직 7일선(10,007) 위
+        self.client.prices["000003"] = 10_050  # 아직 5일선(10,007) 위
         self.tick(MON, 11, 0)
         self.assertEqual(len(s.state.positions), 0)
-        self.client.prices["000003"] = 10_000  # 7일선 터치
+        self.client.prices["000003"] = 10_000  # 5일선 터치
         self.tick(MON, 13, 47)  # 시간대 상관없이 장중 아무 때나
         self.assertEqual(list(s.state.positions), ["000003"])
         self.assertEqual(s.state.positions["000003"].quantity, 9)  # 10,050원 지정가 → 9주
@@ -197,7 +197,7 @@ class StrategyTest(unittest.TestCase):
         self.tick(MON, 11, 0)
         self.assertNotIn("000001", s.state.positions)
         self.assertEqual(s.state.history[-1]["reason"], "STOP_LOSS")
-        # 다시 7일선 부근이 와도 쿨다운(5일) 동안은 재매수하지 않음
+        # 다시 5일선 부근이 와도 쿨다운(5일) 동안은 재매수하지 않음
         self.client.prices["000001"] = 10_000
         self.tick(TUE, 10, 0)
         self.assertNotIn("000001", s.state.positions)

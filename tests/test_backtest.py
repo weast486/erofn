@@ -131,3 +131,34 @@ class BreakoutEngineTest(unittest.TestCase):
         (t,) = run(BreakoutSettings()).trades
         self.assertEqual(t.entry_date, days[31])
         self.assertEqual(run(BreakoutSettings(skip_limit_up=False)).trades[0].entry_date, days[30])
+
+
+class LimitUpEngineTest(unittest.TestCase):
+    def _bars(self, next_day):
+        days = weekdays(40)
+        closes = [10_000] * 30 + [13_000]  # 30번째 날 상한가 마감
+        bars = [Bar(d, c, c * 1.01, c * 0.99, c, 1_000_000) for d, c in zip(days, closes)]
+        bars.append(Bar(days[31], *next_day, 1_000_000))
+        return days, bars
+
+    def run_one(self, next_day):
+        from tossbot.backtest import LimitUpSettings, run_limit_up_next_open
+
+        days, bars = self._bars(next_day)
+        res = run_limit_up_next_open({"000010": ("테스트", bars)}, date(2023, 11, 1), date(2024, 3, 31),
+                                     BacktestSettings(slippage=0.0), LimitUpSettings())
+        return days, res
+
+    def test_buy_next_open_and_take_profit_same_day(self):
+        days, res = self.run_one((13_500, 15_600, 13_400, 15_000))
+        (t,) = res.trades
+        self.assertEqual((t.entry_date, t.entry_price), (days[31], 13_500))
+        self.assertEqual((t.reason, t.exit_price), ("TAKE_PROFIT", round_up_to_tick(13_500 * 1.15)))
+
+    def test_both_hit_same_day_counts_as_stop(self):
+        _, res = self.run_one((13_500, 15_600, 12_800, 13_000))
+        self.assertEqual(res.trades[0].reason, "STOP_LOSS")
+
+    def test_skip_when_opens_at_limit_up(self):
+        _, res = self.run_one((16_900, 16_900, 16_900, 16_900))
+        self.assertEqual(res.trades, [])

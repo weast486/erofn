@@ -385,6 +385,121 @@ def run_breakout(
     return Result(start, end, s.initial_cash, final, trades, equity_curve, len(positions))
 
 
+@dataclass
+class LimitUpSettings:
+    """상한가 다음 날 시초가 매수: 전일 상한가 마감 종목을 09:00 시장가(시가)로 매수."""
+    stop_loss_pct: float = 4.7
+    take_profit_pct: float = 15.0
+    max_hold_days: int = 0  # 0 이면 제한 없음. N거래일째 종가에 매도 (1 이면 매수 당일 종가)
+    min_avg_trading_amount: float = 3_000_000_000  # 0 이면 필터 없음
+    limit_up_ratio: float = 1.295  # 전일 대비 이 비율 이상으로 마감하면 상한가로 간주
+
+
+def run_limit_up_next_open(
+    data: dict[str, tuple[str, list[Bar]]],
+    start: date,
+    end: date,
+    s: BacktestSettings | None = None,
+    L: LimitUpSettings | None = None,
+) -> Result:
+    """전일 상한가 마감 종목을 오늘 시가에 매수 → 손절/익절(장중, 매수 당일 포함).
+
+    - 시가가 다시 상한가(전일 종가 x limit_up_ratio 이상)면 시장가로도 체결이 안 되므로 제외
+    - 매수 당일 장중: 저가 <= 손절가 → 손절, 고가 >= 익절가 → 익절 (둘 다면 손절로 가정)
+    - 신호가 많으면 전일(상한가 날) 거래대금 큰 순서
+    """
+    s = s or BacktestSettings()
+    L = L or LimitUpSettings()
+    budget = s.params.slot_budget
+    series = _prepare(data)
+    calendar = sorted({d for ser in series.values() for d in ser.days if start <= d <= end})
+
+    cash = s.initial_cash
+    positions: dict[str, Trade] = {}
+    trades: list[Trade] = []
+    equity_curve: list[tuple[date, float]] = []
+    last_close: dict[str, float] = {}
+
+    def close_position(t: Trade, day: date, price: float, reason: str) -> None:
+        nonlocal cash
+        proceeds = _sell_value(t.qty, price, day.year, s)
+        t.exit_date, t.exit_price, t.reason = day, price, reason
+        t.pnl = proceeds - t.qty * t.entry_price * (1 + s.commission)
+        cash += proceeds
+        del positions[t.symbol]
+
+    def check_exit(t: Trade, day: date, bar: Bar, entry_day: bool) -> None:
+        stop = round_down_to_tick(t.entry_price * (1 - L.stop_loss_pct / 100))
+        tp = round_up_to_tick(t.entry_price * (1 + L.take_profit_pct / 100))
+        if not entry_day and bar.open <= stop:
+            close_position(t, day, bar.open * (1 - s.slippage), "STOP_LOSS")
+        elif not entry_day and bar.open >= tp:
+            close_position(t, day, bar.open, "TAKE_PROFIT")
+        elif bar.low <= stop:
+            close_position(t, day, stop * (1 - s.slippage), "STOP_LOSS")
+        elif bar.high >= tp:
+            close_position(t, day, tp, "TAKE_PROFIT")
+        elif L.max_hold_days and t.hold_days + 1 >= L.max_hold_days:
+            close_position(t, day, bar.close * (1 - s.slippage), "TIME_EXIT")
+
+    for day in calendar:
+        # 1) 기존 보유 종목
+        for sym, t in list(positions.items()):
+            i = series[sym].index.get(day)
+            if i is None:
+                t.hold_days += 1
+                continue
+            check_exit(t, day, series[sym].bars[i], entry_day=False)
+            if sym in positions:
+                t.hold_days += 1
+
+        # 2) 전일 상한가 종목 시가 매수
+        slots = s.num_slots - len(positions)
+        if slots > 0:
+            signals = []
+            for sym, ser in series.items():
+                if sym in positions:
+                    continue
+                i = ser.index.get(day)
+                if i is None or i < 22:
+                    continue
+                y, yy, bar = ser.bars[i - 1], ser.bars[i - 2], ser.bars[i]
+                if (ser.days[i] - ser.days[i - 1]).days > 7:  # 거래정지 후 재개 등은 제외
+                    continue
+                if y.close < yy.close * L.limit_up_ratio:
+                    continue  # 전일 상한가 아님
+                if bar.open >= y.close * L.limit_up_ratio or bar.open > budget:
+                    continue  # 시초가 상한가(매수 불가) 또는 예산 초과
+                if L.min_avg_trading_amount:
+                    avg_amount = sum(x.close * x.volume for x in ser.bars[i - 21:i - 1]) / 20
+                    if avg_amount < L.min_avg_trading_amount:
+                        continue
+                signals.append((y.close * y.volume, sym, bar))
+            signals.sort(key=lambda x: x[0], reverse=True)
+            for _, sym, bar in signals[:slots]:
+                price = bar.open * (1 + s.slippage)
+                qty = int(budget // round_up_to_tick(bar.open * (1 + BUY_LIMIT_SLIPPAGE)))
+                cost = qty * price * (1 + s.commission)
+                if qty <= 0 or cost > cash:
+                    continue
+                cash -= cost
+                t = Trade(sym, series[sym].name, day, price, qty, surge_date=series[sym].days[series[sym].index[day] - 1])
+                positions[sym] = t
+                trades.append(t)
+                check_exit(t, day, bar, entry_day=True)
+
+        # 3) 평가
+        for sym in positions:
+            i = series[sym].index.get(day)
+            if i is not None:
+                last_close[sym] = series[sym].bars[i].close
+        equity = cash + sum(t.qty * last_close.get(sym, t.entry_price) for sym, t in positions.items())
+        equity_curve.append((day, equity))
+
+    final = equity_curve[-1][1] if equity_curve else s.initial_cash
+    return Result(start, end, s.initial_cash, final, trades, equity_curve, len(positions))
+
+
 # -------------------------------------------------------------------- data
 def load_cache(cache_dir: Path) -> dict[str, tuple[str, list[Bar]]]:
     names = {}
@@ -585,8 +700,9 @@ def main(argv: list[str] | None = None) -> None:
     r.add_argument("--cache", type=Path, default=DEFAULT_CACHE)
     r.add_argument("--out", type=Path, default=Path("backtest_results"))
     r.add_argument("--env", default=".env")
-    r.add_argument("--strategy", choices=["pullback", "breakout"], default="pullback",
-                   help="pullback: 급등 후 이평선 터치 / breakout: 종가 N일 신고가 매수·M일 신저가 매도")
+    r.add_argument("--strategy", choices=["pullback", "breakout", "limitup"], default="pullback",
+                   help="pullback: 급등 후 이평선 터치 / breakout: 종가 N일 신고가 매수·M일 신저가 매도 / "
+                        "limitup: 전일 상한가 종목 시초가 매수")
     r.add_argument("--entry-days", type=int, default=20, help="breakout: 매수 신고가 기간")
     r.add_argument("--exit-days", type=int, default=10, help="breakout: 매도 신저가 기간")
     r.add_argument("--stop-loss", type=float, default=0.0, help="breakout: 손절 %% (0 = 없음)")
@@ -614,6 +730,11 @@ def main(argv: list[str] | None = None) -> None:
                               exit_on_low=not args.no_exit_on_low, max_hold_days=args.max_hold,
                               min_avg_trading_amount=settings.params.min_avg_trading_amount)
         runner = lambda y0, y1: run_breakout(data, y0, y1, settings, bs)  # noqa: E731
+    elif args.strategy == "limitup":
+        ls = LimitUpSettings(args.stop_loss or settings.stop_loss_pct, args.take_profit or settings.take_profit_pct,
+                             max_hold_days=args.max_hold,
+                             min_avg_trading_amount=settings.params.min_avg_trading_amount)
+        runner = lambda y0, y1: run_limit_up_next_open(data, y0, y1, settings, ls)  # noqa: E731
     else:
         runner = lambda y0, y1: run_backtest(data, y0, y1, settings)  # noqa: E731
     results = [runner(date(y, 1, 1), min(date(y, 12, 31), last_day)) for y in args.years]

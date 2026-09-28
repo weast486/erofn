@@ -329,6 +329,9 @@ class BreakoutSettings:
     # N일 최저가(장중 저가) 대비 종가 상승률이 pct % 초과면 매수 금지
     low_rise_days: int = 0
     max_rise_from_low_pct: float = 0.0
+    # 0 보다 크면 신고가 돌파폭(종가 / 직전 entry_days 일 최고값 - 1)이 이 % 이하인 종목만
+    max_breakout_pct: float = 0.0
+    breakout_basis: str = "close"  # 직전 최고값 기준: close = 종가 최고값 / high = 장중 고가 최고값
     exclude_symbols: frozenset = frozenset()  # 매수 제외 종목코드 (예: 제약·바이오)
     breakeven_lock_pct: float = 0.0  # 올린 손절가 = 매수가 x (1 + 이 %). 0 이면 본전
     # False 면 신고가 조건 없이 매수 (급등주 매매: min_change_pct 와 함께 사용)
@@ -482,6 +485,10 @@ def run_breakout(
                     ma = sum(x.close for x in ser.bars[i + 1 - b.ma_resist_days:i + 1]) / b.ma_resist_days
                     if bar.close < ma < bar.close * (1 + b.ma_resist_pct / 100):
                         continue  # 바로 위에 이평선 저항
+                if b.max_breakout_pct:
+                    ref = max((x.high if b.breakout_basis == "high" else x.close) for x in ser.bars[i - b.entry_days:i])
+                    if bar.close > ref * (1 + b.max_breakout_pct / 100) + 1e-9:
+                        continue
                 if b.low_rise_days:
                     if i + 1 < b.low_rise_days:
                         continue
@@ -1326,6 +1333,10 @@ def main(argv: list[str] | None = None) -> None:
                    help="breakout: 종가가 DAYS일선 아래이고 DAYS일선까지 PCT%% 미만 남았으면 매수 금지 (예: 200 5)")
     r.add_argument("--max-rise-from-low", type=float, nargs=2, metavar=("DAYS", "PCT"),
                    help="breakout: DAYS일 최저가 대비 상승률이 PCT%% 초과면 매수 금지 (예: 250 100)")
+    r.add_argument("--max-breakout", type=float, default=0,
+                   help="breakout: 직전 고점 대비 돌파폭이 N%% 이하인 종목만 (0 = 없음)")
+    r.add_argument("--breakout-basis", choices=["close", "high"], default="close",
+                   help="breakout: --max-breakout 의 직전 고점 = 종가 최고값(close) / 장중 고가 최고값(high)")
     r.add_argument("--lock-profit", type=float, default=0,
                    help="breakout: --breakeven-at 이후 손절가를 매수가 +N%%로 (0 = 본전)")
     r.add_argument("--no-new-high", action="store_true", help="breakout: 신고가 조건 없이 매수 (--min-change 와 함께)")
@@ -1400,6 +1411,7 @@ def main(argv: list[str] | None = None) -> None:
                               buy_day_gap_up=args.buy_day_gap_up, buy_day_bullish=args.buy_day_bullish,
                               buy_day_min_wick_ratio=args.buy_day_wick, recover_after_drop_pct=args.recover_after_drop,
                               stop_limit=args.stop_limit, exclude_high_days=args.exclude_high_days,
+                              max_breakout_pct=args.max_breakout, breakout_basis=args.breakout_basis,
                               low_rise_days=int(args.max_rise_from_low[0]) if args.max_rise_from_low else 0,
                               max_rise_from_low_pct=args.max_rise_from_low[1] if args.max_rise_from_low else 0.0,
                               ma_resist_days=int(args.ma_resist[0]) if args.ma_resist else 0,

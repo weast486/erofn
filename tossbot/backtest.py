@@ -735,6 +735,7 @@ def run_surge_doji(
 class RetestSettings:
     """기준봉(급등 + N일 신고가) 이후 이전 고점까지 되돌릴 때 지정가 매수."""
     surge_pct: float = 15.0  # 기준봉 전일 대비 상승률 하한
+    surge_max_pct: float = 0.0  # 0 보다 크면 기준봉 상승률 상한
     min_amount: float = 20_000_000_000  # 기준봉 거래대금 하한
     entry_days: int = 20  # 기준봉 종가가 직전 N거래일 종가 최고값을 넘어야 함 (N일 신고가)
     level: str = "high"  # 매수가: high = 직전 N거래일 장중 고가 최고값, close = 종가 최고값
@@ -844,6 +845,8 @@ def run_retest(
                 continue
             bar, prev = ser.bars[i], ser.bars[i - 1]
             if bar.close / prev.close - 1 < r.surge_pct / 100 or bar.close * bar.volume < r.min_amount:
+                continue
+            if r.surge_max_pct and bar.close / prev.close - 1 > r.surge_max_pct / 100:
                 continue
             window = ser.bars[i - r.entry_days:i]
             if bar.close <= max(x.close for x in window):
@@ -1145,6 +1148,7 @@ def main(argv: list[str] | None = None) -> None:
                         "surgedoji: 거래대금 상위 +15%% 급등 후 거래량 급감 단봉 음봉 종가 매수 / "
                         "retest: 급등 + N일 신고가 기준봉 이후 이전 고점까지 되돌리면 지정가 매수")
     r.add_argument("--surge-pct", type=float, default=15, help="retest: 기준봉 상승률 하한 %%")
+    r.add_argument("--surge-max-pct", type=float, default=0, help="retest: 기준봉 상승률 상한 %% (0 = 없음)")
     r.add_argument("--retest-level", choices=["high", "close"], default="high",
                    help="retest: 이전 고점 = 직전 N일 장중 고가 최고값(high) / 종가 최고값(close)")
     r.add_argument("--watch-days", type=int, default=10, help="retest: 기준봉 뒤 N거래일 안에 닿아야 매수")
@@ -1239,7 +1243,7 @@ def main(argv: list[str] | None = None) -> None:
             print(f"코스피가 {args.kospi_up_days}거래일 전보다 높은 날에만 매수")
         runner = lambda y0, y1: run_breakout(data, y0, y1, settings, bs)  # noqa: E731
     elif args.strategy == "retest":
-        rt = RetestSettings(surge_pct=args.surge_pct, min_amount=args.min_day_amount or 2e10,
+        rt = RetestSettings(surge_pct=args.surge_pct, surge_max_pct=args.surge_max_pct, min_amount=args.min_day_amount or 2e10,
                             entry_days=args.entry_days, level=args.retest_level, watch_days=args.watch_days,
                             first_in_days=args.first_in_days,
                             max_break_pct=args.max_break, stop_loss_pct=args.stop_loss or 4.7,

@@ -39,6 +39,7 @@ from pathlib import Path
 from .breakout import new_high_flags
 from .broker import round_down_to_tick, round_up_to_tick
 from .config import Config, load_dotenv
+from .rsi import rsi_series
 from .selector import Bar, PullbackParams, analyze, touch_zone
 from .strategy import BUY_LIMIT_SLIPPAGE, params_from_config
 
@@ -1442,23 +1443,6 @@ def run_vol_breakout(
     return Result(start, end, s.initial_cash, final, trades, equity_curve, len(positions))
 
 
-def rsi_series(closes: list[float], period: int) -> list[float | None]:
-    """Wilder RSI. 앞쪽 period 개는 None."""
-    out: list[float | None] = [None] * len(closes)
-    if len(closes) <= period:
-        return out
-    gains = [max(closes[k] - closes[k - 1], 0.0) for k in range(1, period + 1)]
-    losses = [max(closes[k - 1] - closes[k], 0.0) for k in range(1, period + 1)]
-    ag, al = sum(gains) / period, sum(losses) / period
-    for k in range(period, len(closes)):
-        if k > period:
-            ch = closes[k] - closes[k - 1]
-            ag = (ag * (period - 1) + max(ch, 0.0)) / period
-            al = (al * (period - 1) + max(-ch, 0.0)) / period
-        out[k] = 100.0 if al == 0 else 100 - 100 / (1 + ag / al)
-    return out
-
-
 @dataclass
 class RsiSettings:
     """RSI 평균회귀: RSI 가 buy_below 아래로 마감하면 종가 매수, 매도 조건(RSI >= sell_above / 종가 > exit_ma 일선 /
@@ -1745,6 +1729,23 @@ def load_marcap_universe(data_dir: Path, start: str, min_marcap: float, market: 
         df = df[df["Market"] == market]
     df = df[[_is_common_stock(c, n) for c, n in zip(df["Code"], df["Name"])]]
     return {d.date(): set(g["Code"]) for d, g in df.groupby("Date")}
+
+
+def write_universe_file(data_dir: Path, top_n: int, out: Path) -> None:
+    """가장 최근 날짜의 코스피 시가총액 상위 top_n 종목을 '종목코드 종목명' 으로 저장 (실전 RSI 전략 대상)."""
+    import pandas as pd
+
+    files = sorted(data_dir.glob("marcap-*.parquet"))
+    df = pd.read_parquet(files[-1], columns=["Code", "Name", "Market", "Date", "Marcap"])
+    last = df["Date"].max()
+    df = df[(df["Date"] == last) & (df["Market"] == "KOSPI")]
+    df = df[[_is_common_stock(c, n) for c, n in zip(df["Code"], df["Name"])]].nlargest(top_n, "Marcap")
+    lines = [f"# 코스피 시가총액 상위 {top_n} (우선주 등 제외, 기준일 {last:%Y-%m-%d}). "
+             f"갱신: python -m tossbot.backtest universe"]
+    lines += [f"{c} {n}" for c, n in zip(df["Code"], df["Name"])]
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    print(f"{out}: {len(df)}종목 (기준일 {last:%Y-%m-%d})")
 
 
 def run_envelope(
@@ -2120,6 +2121,10 @@ def main(argv: list[str] | None = None) -> None:
     d.add_argument("--start", default="2023-09-01", help="지표 계산을 위해 백테스트 시작 3~4개월 전부터")
     d.add_argument("--end", default=None)
     d.add_argument("--cache", type=Path, default=DEFAULT_CACHE)
+    u = sub.add_parser("universe", help="실전 RSI 전략 대상 목록 (코스피 시가총액 상위 N) 파일 만들기")
+    u.add_argument("--marcap-dir", type=Path, default=Path("data/marcap/data"))
+    u.add_argument("--top", type=int, default=100)
+    u.add_argument("--out", type=Path, default=Path("tossbot/lists/kospi_top100.txt"))
     r = sub.add_parser("run", help="연도별 백테스트 실행")
     r.add_argument("--years", type=int, nargs="+", default=[2024, 2025, 2026])
     r.add_argument("--cache", type=Path, default=DEFAULT_CACHE)
@@ -2278,6 +2283,9 @@ def main(argv: list[str] | None = None) -> None:
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
 
+    if args.command == "universe":
+        write_universe_file(args.marcap_dir, args.top, args.out)
+        return
     if args.command == "download":
         if args.source == "marcap":
             import_marcap(args.marcap_dir, args.start, args.end, args.cache)

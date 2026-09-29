@@ -14,7 +14,7 @@ def load_dotenv(path: str | os.PathLike = ".env") -> None:
     p = Path(path)
     if not p.exists():
         return
-    for line in p.read_text(encoding="utf-8").splitlines():
+    for line in p.read_text(encoding="utf-8-sig").splitlines():
         line = line.strip()
         if not line or line.startswith("#") or "=" not in line:
             continue
@@ -42,7 +42,8 @@ class Config:
 
     dry_run: bool = True
 
-    # 전략: breakout = 20일 신고가 돌파 (종가 무렵 매수), pullback = 급등 후 이평선 터치 눌림목
+    # 전략: breakout = 20일 신고가 돌파 (종가 무렵 매수), pullback = 급등 후 이평선 터치 눌림목,
+    #       combo = 신고가 + RSI 평균회귀를 한 계좌로 (신고가 후보 먼저, 남는 자리를 RSI 후보로)
     strategy: str = "breakout"
 
     total_budget: int = 1_000_000
@@ -82,6 +83,14 @@ class Config:
     market_filter: str = "none"
     min_days_after_surge: int = 3  # 급등일로부터 N거래일째부터 매수 허용
     pullback_volume_ratio: float = 0.5  # 급등 이후 평균 거래량 <= 급등일 거래량 x N
+    # RSI 평균회귀 (STRATEGY=combo): 코스피 시가총액 상위 목록 중 RSI < RSI_BUY 면 종가 무렵 매수,
+    # RSI >= RSI_SELL 또는 RSI_MAX_HOLD_DAYS 거래일째 종가 무렵 시장가 매도, 손절 -RSI_STOP_LOSS_PCT% 조건주문
+    rsi_period: int = 14
+    rsi_buy: float = 30.0
+    rsi_sell: float = 50.0
+    rsi_stop_loss_pct: float = 10.0
+    rsi_max_hold_days: int = 20
+    rsi_universe_file: str = ""  # 비우면 tossbot/lists/kospi_top100.txt
     # 최대 보유 기간: 매수일로부터 N거래일째 TIME_EXIT_TIME 에 시장가 매도 (0 이면 제한 없음)
     max_hold_days: int = 0
     time_exit_time: str = "15:10"
@@ -141,6 +150,12 @@ class Config:
             pullback_volume_ratio=num("PULLBACK_VOLUME_RATIO", "pullback_volume_ratio"),
             max_hold_days=num("MAX_HOLD_DAYS", "max_hold_days", int),
             time_exit_time=_get("TIME_EXIT_TIME", cls.time_exit_time),
+            rsi_period=num("RSI_PERIOD", "rsi_period", int),
+            rsi_buy=num("RSI_BUY", "rsi_buy"),
+            rsi_sell=num("RSI_SELL", "rsi_sell"),
+            rsi_stop_loss_pct=num("RSI_STOP_LOSS_PCT", "rsi_stop_loss_pct"),
+            rsi_max_hold_days=num("RSI_MAX_HOLD_DAYS", "rsi_max_hold_days", int),
+            rsi_universe_file=_get("RSI_UNIVERSE_FILE", cls.rsi_universe_file),
             state_dir=_get("STATE_DIR", cls.state_dir),
             log_dir=_get("LOG_DIR", cls.log_dir),
         )

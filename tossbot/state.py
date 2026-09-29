@@ -27,6 +27,7 @@ class Position:
     # 보유 거래일 수 (매수일 = 0). 거래일이 바뀔 때마다 1씩 증가
     hold_days: int = 0
     last_day: str = ""
+    kind: str = "breakout"  # 어느 전략으로 샀는지: breakout | rsi (매도 규칙이 다름)
 
 
 @dataclass
@@ -34,6 +35,7 @@ class State:
     # 감시 목록에 올랐던 급등 종목 {symbol: 마지막으로 확인한 날}. 랭킹에서 빠져도 계속 추적하기 위함
     surge_seen: dict[str, str] = field(default_factory=dict)
     last_buy_date: str | None = None  # 신고가 전략: 마지막으로 매수를 실행한 날
+    last_exit_date: str | None = None  # combo: RSI 매도 판정을 마친 날
     positions: dict[str, Position] = field(default_factory=dict)
     history: list[dict] = field(default_factory=list)
 
@@ -49,6 +51,7 @@ class StateStore:
         return State(
             surge_seen=raw.get("surge_seen", {}),
             last_buy_date=raw.get("last_buy_date"),
+            last_exit_date=raw.get("last_exit_date"),
             positions={k: Position(**v) for k, v in raw.get("positions", {}).items()},
             history=raw.get("history", []),
         )
@@ -59,6 +62,7 @@ class StateStore:
         data = {
             "surge_seen": state.surge_seen,
             "last_buy_date": state.last_buy_date,
+            "last_exit_date": state.last_exit_date,
             "positions": {k: asdict(v) for k, v in state.positions.items()},
             "history": state.history,
         }

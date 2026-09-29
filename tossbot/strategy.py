@@ -22,6 +22,7 @@ from .broker import CONDITIONAL_DONE, TERMINAL_STATUSES, Broker, round_down_to_t
 from .config import KST, Config
 from .market_calendar import TradingDay
 from .breakout import BreakoutParams, select_breakouts
+from .rsi import CANDLE_COUNT as RSI_CANDLE_COUNT, DEFAULT_UNIVERSE_FILE, RsiParams, load_universe, select_rsi, today_rsi
 from .selector import PullbackParams, WatchItem, build_watchlist, entry_signal, parse_candles
 from .state import Position, State, StateStore
 
@@ -31,6 +32,8 @@ log = logging.getLogger(__name__)
 BUY_LIMIT_SLIPPAGE = 0.005
 # 조건주문 등록 실패 시 재시도 횟수 (초과하면 봇 가격 감시로만 대응)
 MAX_ARM_FAILURES = 3
+# combo: RSI 매도 판정 조회가 연속 실패하면 N번째에 포기하고 매수 진행
+MAX_EXIT_ATTEMPTS = 3
 # 감시 목록에 올랐던 급등 종목을 랭킹에서 빠진 뒤에도 추적하는 기간(일)
 SURGE_MEMORY_DAYS = 30
 
@@ -88,6 +91,14 @@ class PullbackStrategy:
     def take_profit_price(self, entry: float) -> int:
         """익절 감시가 겸 지정가: 진입가 +15% 이상의 가장 가까운 호가."""
         return round_up_to_tick(entry * (1 + self.cfg.take_profit_pct / 100))
+
+    def stop_for(self, pos: Position) -> int:
+        """포지션의 손절 감시가 (전략별로 다를 수 있음)."""
+        return self.stop_price(pos.entry_price)
+
+    def tp_for(self, pos: Position) -> int | None:
+        """포지션의 익절 감시가. None 이면 익절 조건주문 없음."""
+        return self.take_profit_price(pos.entry_price)
 
     # ------------------------------------------------------------ schedule
     def buy_window(self, day: TradingDay) -> tuple[datetime, datetime]:
@@ -256,8 +267,8 @@ class PullbackStrategy:
         log.info("봇 평가금액 %s원 → 종목당 %s원 (%s%%)", f"{equity:,.0f}", f"{budget:,}", self.cfg.position_pct)
         return budget
 
-    def _place_buys(self, orders: list[tuple[str, str, float, str]], today: date) -> list[str]:
-        """(종목, 이름, 현재가, 로그) 순서대로 시장성 지정가 매수. 매수한 종목 코드 반환."""
+    def _place_buys(self, orders: list[tuple[str, str, float, str]], today: date, kind: str = "breakout") -> list[str]:
+        """(종목, 이름, 현재가, 로그) 순서대로 시장성 지정가 매수. 매수한 종목 코드 반환. kind = 매수한 전략."""
         bought = []
         cash = self.broker.cash_buying_power()
         budget = self.order_budget()
@@ -283,6 +294,7 @@ class PullbackStrategy:
                 buy_order_id=order_id,
                 buy_open=True,
                 last_day=today.isoformat(),
+                kind=kind,
             )
             bought.append(symbol)
             self.store.save(self.state)
@@ -304,13 +316,13 @@ class PullbackStrategy:
             if pos.stop_co_id is None and pos.stop_arm_failures < MAX_ARM_FAILURES:
                 try:
                     pos.stop_co_id = self.broker.place_conditional_sell(
-                        pos.symbol, pos.quantity, self.stop_price(pos.entry_price), expire
+                        pos.symbol, pos.quantity, self.stop_for(pos), expire
                     )
                 except Exception as exc:
                     pos.stop_arm_failures += 1
                     log.error("%s 손절 조건주문 등록 실패(%d회): %s", pos.symbol, pos.stop_arm_failures, exc)
-            if pos.tp_co_id is None and pos.tp_arm_failures < MAX_ARM_FAILURES:
-                tp = self.take_profit_price(pos.entry_price)
+            tp = self.tp_for(pos)
+            if tp is not None and pos.tp_co_id is None and pos.tp_arm_failures < MAX_ARM_FAILURES:
                 try:
                     pos.tp_co_id = self.broker.place_conditional_sell(
                         pos.symbol, pos.quantity, tp, expire, limit_price=tp
@@ -384,12 +396,12 @@ class PullbackStrategy:
             price = prices.get(pos.symbol)
             if price is None or pos.symbol not in self.state.positions:
                 continue
-            stop, tp = self.stop_price(pos.entry_price), self.take_profit_price(pos.entry_price)
+            stop, tp = self.stop_for(pos), self.tp_for(pos)
             if pos.status == "OPEN":
                 if price <= stop and pos.stop_co_id is None:
                     log.info("손절(봇 감시) %s %s: 현재 %s ≤ %s", pos.symbol, pos.name, price, stop)
                     self._sell_now(pos, "STOP_LOSS")
-                elif price >= tp and pos.tp_co_id is None:
+                elif tp is not None and price >= tp and pos.tp_co_id is None:
                     log.info("익절(봇 감시) %s %s: 현재 %s ≥ %s", pos.symbol, pos.name, price, tp)
                     self._sell_limit(pos, tp, "TAKE_PROFIT")
             elif pos.status == "SELLING" and pos.sell_reason == "TAKE_PROFIT":
@@ -514,7 +526,7 @@ class PullbackStrategy:
         exit_price = _dec(ex.get("averageFilledPrice"))
         self.state.history.append(
             {
-                **{k: v for k, v in asdict(pos).items() if k in ("symbol", "name", "entry_price", "opened_at")},
+                **{k: v for k, v in asdict(pos).items() if k in ("symbol", "name", "entry_price", "opened_at", "kind")},
                 "quantity": filled,
                 "exit_price": exit_price,
                 "reason": reason,
@@ -601,5 +613,113 @@ class BreakoutStrategy(PullbackStrategy):
         self.store.save(self.state)
 
 
+class ComboStrategy(BreakoutStrategy):
+    """신고가 돌파 + RSI 평균회귀를 한 계좌(TOTAL_BUDGET, 최대 NUM_STOCKS 종목)로 운용.
+
+    15:10~15:20 (하루 한 번)
+      1. RSI 로 산 종목 매도 판정: RSI(14) >= RSI_SELL 이거나 RSI_MAX_HOLD_DAYS 거래일째면 시장가 매도
+         (매도를 냈으면 매도 대금이 반영되도록 매수는 다음 주기에)
+      2. 매수: 신고가 후보를 먼저, 남는 자리를 RSI 과매도 후보(코스피 시총 상위, RSI 낮은 순)로 채움
+    신고가 종목: 손절 -4.7% / 익절 +20% 조건주문 (기존과 같음)
+    RSI 종목: 손절 -RSI_STOP_LOSS_PCT% 조건주문만 (익절은 RSI 회복 매도)
+    """
+
+    def __init__(self, cfg: Config, broker: Broker, store: StateStore, selector=None, rsi_selector=None):
+        super().__init__(cfg, broker, store, selector)
+        self.select_rsi = rsi_selector or select_rsi
+        self._exit_attempts = 0
+        self.universe = load_universe(cfg.rsi_universe_file or DEFAULT_UNIVERSE_FILE)
+
+    def rsi_params(self) -> RsiParams:
+        cfg = self.cfg
+        return RsiParams(price_cap=cfg.max_price if cfg.max_price > 0 else cfg.slot_budget, period=cfg.rsi_period,
+                         buy_below=cfg.rsi_buy, sell_above=cfg.rsi_sell,
+                         min_avg_trading_amount=cfg.min_avg_trading_amount)
+
+    def stop_for(self, pos: Position) -> int:
+        if pos.kind == "rsi":
+            return round_down_to_tick(pos.entry_price * (1 - self.cfg.rsi_stop_loss_pct / 100))
+        return super().stop_for(pos)
+
+    def tp_for(self, pos: Position) -> int | None:
+        return None if pos.kind == "rsi" else super().tp_for(pos)
+
+    def buy_step(self, now: datetime, day: TradingDay, deadline: datetime) -> None:
+        today = day.today
+        if self.state.last_exit_date != today.isoformat():
+            placed, failed = self.rsi_exits(today)
+            self._exit_attempts = self._exit_attempts + 1 if failed else 0
+            if not failed or self._exit_attempts >= MAX_EXIT_ATTEMPTS:
+                self.state.last_exit_date = today.isoformat()  # 조회 실패가 계속되면 매수까지 막지 않도록 포기
+                self.store.save(self.state)
+            if placed or (failed and self._exit_attempts < MAX_EXIT_ATTEMPTS):
+                return  # 매도 대금 반영 / 조회 실패 재시도 후 다음 주기에 매수
+        if self.state.last_buy_date == today.isoformat():
+            return
+        slots = self.cfg.num_stocks - len(self.state.positions)
+        if slots <= 0:
+            log.info("이미 %d종목 보유 중, 오늘은 매수 없음", len(self.state.positions))
+            self._mark_bought(today)
+            return
+        if not self.market_allows_buy(today):
+            return
+        client = self.broker.client
+        held = set(self.state.positions)
+        bo = self.select(client, held, slots, self.params(), today)
+        rs = []
+        if len(bo) < slots:
+            rs = self.select_rsi(client, self.universe, held | {c.symbol for c in bo}, slots - len(bo),
+                                 self.rsi_params(), today)
+        self._mark_bought(today)
+        if self.now() >= deadline:
+            log.warning("매수 마감 시각 지남 - 오늘 매수 생략")
+            return
+        if bo:
+            self._place_buys([
+                (c.symbol, c.name, c.price,
+                 f"신고가 돌파 매수: 현재가 {c.price:,.0f} (20일 최고 {c.prev_high:,.0f}, "
+                 f"{c.change:+.1%}, 거래대금 {c.day_amount / 1e8:,.0f}억)")
+                for c in bo
+            ], today, kind="breakout")
+        free = self.cfg.num_stocks - len(self.state.positions)
+        rs = [c for c in rs if c.symbol not in self.state.positions][:max(free, 0)]
+        if rs:
+            self._place_buys([
+                (c.symbol, c.name, c.price, f"RSI 과매도 매수: 현재가 {c.price:,.0f}, RSI({self.cfg.rsi_period}) {c.rsi:.1f}")
+                for c in rs
+            ], today, kind="rsi")
+
+    def rsi_exits(self, today: date) -> tuple[int, int]:
+        """RSI 로 산 종목의 매도 판정. (매도 주문 수, 조회 실패 수)."""
+        placed = failed = 0
+        for pos in list(self.state.positions.values()):
+            if pos.kind != "rsi" or pos.status != "OPEN" or pos.buy_open or pos.quantity <= 0 or pos.hold_days < 1:
+                continue
+            if pos.hold_days >= self.cfg.rsi_max_hold_days:
+                log.info("RSI 보유 기간 만료 %s %s (%d거래일): 시장가 매도", pos.symbol, pos.name, pos.hold_days)
+                self._sell_now(pos, "TIME_EXIT")
+                placed += 1
+                continue
+            try:
+                bars = parse_candles(self.broker.client.get_candles(pos.symbol, "1d", RSI_CANDLE_COUNT))
+                price = float(self.broker.last_prices([pos.symbol])[pos.symbol])
+            except Exception as exc:
+                log.warning("%s RSI 매도 판정용 조회 실패: %s", pos.symbol, exc)
+                failed += 1
+                continue
+            rsi = today_rsi(bars, today, price, self.cfg.rsi_period)
+            if rsi is not None and rsi >= self.cfg.rsi_sell:
+                log.info("RSI 회복 매도 %s %s: RSI %.1f ≥ %s (현재 %s, 매수 %s)", pos.symbol, pos.name, rsi,
+                         self.cfg.rsi_sell, f"{price:,.0f}", f"{pos.entry_price:,.0f}")
+                self._sell_now(pos, "RSI_EXIT")
+                placed += 1
+            else:
+                log.info("RSI 보유 유지 %s %s: RSI %s, %d거래일째", pos.symbol, pos.name,
+                         f"{rsi:.1f}" if rsi is not None else "?", pos.hold_days)
+        return placed, failed
+
+
 def make_strategy(cfg: Config, broker: Broker, store: StateStore) -> PullbackStrategy:
+    if cfg.strategy == "combo":
+        return ComboStrategy(cfg, broker, store)
     return BreakoutStrategy(cfg, broker, store) if cfg.strategy == "breakout" else PullbackStrategy(cfg, broker, store)

@@ -23,7 +23,8 @@ from .market_calendar import TradingDay, trading_day_from_api
 from .selector import build_watchlist, entry_signal
 from .state import StateStore
 from .breakout import select_breakouts
-from .strategy import BreakoutStrategy, PullbackStrategy, make_strategy, params_from_config
+from .rsi import select_rsi
+from .strategy import BreakoutStrategy, ComboStrategy, PullbackStrategy, make_strategy, params_from_config
 
 log = logging.getLogger("tossbot")
 
@@ -79,6 +80,14 @@ def cmd_select(cfg: Config, client: TossClient, strategy: PullbackStrategy) -> N
             print(f"{c.name[:10]+'('+c.symbol+')':<16} {c.price:>9,.0f} {c.prev_high:>9,.0f} {c.change:>+7.1%} {c.day_amount/1e8:>10,.0f}")
         if not cands:
             print("조건을 만족하는 신고가 돌파 종목이 없습니다.")
+        if isinstance(strategy, ComboStrategy):
+            rs = select_rsi(client, strategy.universe, set(strategy.state.positions), cfg.num_stocks,
+                            strategy.rsi_params(), today)
+            print(f"\nRSI 과매도 후보 (코스피 시총 상위 {len(strategy.universe)}, RSI({cfg.rsi_period}) < {cfg.rsi_buy:g})")
+            for c in rs:
+                print(f"{c.name[:10]+'('+c.symbol+')':<16} {c.price:>9,.0f}  RSI {c.rsi:5.1f}")
+            if not rs:
+                print("RSI 과매도 종목이 없습니다.")
         return
     params = params_from_config(cfg)
     watch = build_watchlist(client, set(strategy.state.surge_seen), params, today)
@@ -105,16 +114,19 @@ def cmd_status(cfg: Config, _c, strategy: PullbackStrategy) -> None:
     st = strategy.state
     print(f"[{'DRY_RUN' if cfg.dry_run else 'LIVE'}] 보유 {len(st.positions)}/{cfg.num_stocks}")
     for p in st.positions.values():
+        tp = strategy.tp_for(p)
+        tp_text = f"{tp:,}({'조건주문' if p.tp_co_id else '봇감시'})" if tp else f"RSI {cfg.rsi_sell:g} 회복 시"
         print(
-            f"  {p.symbol} {p.name} {p.quantity}주 @ {p.entry_price:,.0f} {p.hold_days}일째 status={p.status} "
-            f"손절={strategy.stop_price(p.entry_price):,}({'조건주문' if p.stop_co_id else '봇감시'}) "
-            f"익절={strategy.take_profit_price(p.entry_price):,}({'조건주문' if p.tp_co_id else '봇감시'})"
+            f"  [{'RSI' if p.kind == 'rsi' else '신고가'}] {p.symbol} {p.name} {p.quantity}주 @ {p.entry_price:,.0f} "
+            f"{p.hold_days}일째 status={p.status} "
+            f"손절={strategy.stop_for(p):,}({'조건주문' if p.stop_co_id else '봇감시'}) 익절={tp_text}"
         )
     if st.history:
         rets = [h["return_pct"] for h in st.history if h.get("return_pct") is not None]
         print(f"청산 {len(st.history)}건, 평균 수익률 {sum(rets)/len(rets):.2f}%" if rets else f"청산 {len(st.history)}건")
         for h in st.history[-20:]:
-            print(f"  {h['closed_at']} {h['symbol']} {h['name']} {h['reason']} {h.get('return_pct')}%")
+            kind = "RSI" if h.get("kind") == "rsi" else "신고가"
+            print(f"  {h['closed_at']} [{kind}] {h['symbol']} {h['name']} {h['reason']} {h.get('return_pct')}%")
 
 
 def cmd_liquidate(cfg: Config, _c, strategy: PullbackStrategy) -> None:
@@ -124,7 +136,15 @@ def cmd_liquidate(cfg: Config, _c, strategy: PullbackStrategy) -> None:
 
 
 def cmd_run(cfg: Config, client: TossClient, strategy: PullbackStrategy) -> None:
-    if cfg.strategy == "breakout":
+    if cfg.strategy == "combo":
+        log.info(
+            "신고가 + RSI 한 계좌 자동매매 시작 [%s] %s~%s, 최대 %d종목. 신고가 먼저(손절 -%s%% 익절 +%s%%), "
+            "남는 자리 RSI(%d) < %s (코스피 시총 상위 목록, RSI %s 이상·%d거래일째 매도, 손절 -%s%%)",
+            "DRY_RUN" if cfg.dry_run else "LIVE", cfg.buy_start, cfg.buy_end, cfg.num_stocks,
+            cfg.stop_loss_pct, cfg.take_profit_pct, cfg.rsi_period, cfg.rsi_buy, cfg.rsi_sell,
+            cfg.rsi_max_hold_days, cfg.rsi_stop_loss_pct,
+        )
+    elif cfg.strategy == "breakout":
         log.info(
             "신고가 돌파 자동매매 시작 [%s] %d일 신고가(%d일 내 첫), 거래대금 %s억 이상, %s~%s 매수, "
             "최대 %d종목 x %s원, 손절 -%s%% 익절 +%s%%",
@@ -155,7 +175,7 @@ def cmd_run(cfg: Config, client: TossClient, strategy: PullbackStrategy) -> None
 
 
 def main(argv: list[str] | None = None) -> None:
-    parser = argparse.ArgumentParser(prog="tossbot", description="토스증권 자동매매 봇 (신고가 돌파 / 눌림목)")
+    parser = argparse.ArgumentParser(prog="tossbot", description="토스증권 자동매매 봇 (신고가 돌파 / 신고가+RSI / 눌림목)")
     parser.add_argument("command", choices=["config", "check", "select", "status", "run", "liquidate"])
     parser.add_argument("--env", default=".env", help=".env 파일 경로")
     parser.add_argument("-v", "--verbose", action="store_true")

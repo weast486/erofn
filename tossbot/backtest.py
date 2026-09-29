@@ -378,6 +378,47 @@ class BreakoutSettings:
     engulf: bool = False
     # N > 0 이면 당일 종가가 N일선(당일 포함) 아래인 종목만
     below_ma: int = 0
+    # N자 패턴: "" 없음 / A = 눌림 저점 다음 첫 양봉 종가 매수 / B = 1차 고점(종가) 돌파 종가 매수.
+    # 1차 고점 = 직전 np_lookback 거래일 종가 최고값, 그 전 np_lookback 거래일 최저 종가 대비 np_rise_pct % 이상 상승,
+    # 상승 구간(저점~고점) 중 하루라도 거래대금 np_amount 이상. 고점 뒤 눌림 저점(종가)이 고점 대비
+    # np_min_pull ~ np_max_pull % 하락, 1차 상승분의 절반 아래로는 안 빠짐. 고점과 오늘 사이 최소 2거래일
+    npattern: str = ""
+    np_lookback: int = 20
+    np_rise_pct: float = 15.0
+    np_min_pull: float = 5.0
+    np_max_pull: float = 15.0
+    np_amount: float = 20_000_000_000
+
+
+def n_pattern_signal(bars: list[Bar], i: int, b: "BreakoutSettings") -> bool:
+    """오늘(i) 종가 기준 N자 패턴 매수 신호인지 (BreakoutSettings.npattern 설명 참고)."""
+    L = b.np_lookback
+    if i < 2 * L + 1:
+        return False
+    closes = [x.close for x in bars[i - 2 * L:i + 1]]  # closes[-1] = 오늘
+    base = 2 * L  # 오늘의 closes 인덱스
+    win = range(base - L, base)  # 직전 L 거래일
+    p = max(win, key=lambda k: (closes[k], k))  # 1차 고점 (같으면 최근)
+    if base - p < 3:
+        return False  # 고점 뒤 눌림이 최소 2거래일
+    peak = closes[p]
+    lo_k = min(range(max(p - L, 0), p), key=lambda k: closes[k])
+    low = closes[lo_k]
+    if peak < low * (1 + b.np_rise_pct / 100):
+        return False
+    j0 = i - base  # closes 인덱스 → bars 인덱스
+    if max(bars[j0 + k].close * bars[j0 + k].volume for k in range(lo_k, p + 1)) < b.np_amount:
+        return False
+    after = closes[p + 1:base]  # 고점 다음 날 ~ 어제
+    trough = min(after)
+    pull = (1 - trough / peak) * 100
+    if not (b.np_min_pull <= pull <= b.np_max_pull) or trough < low + (peak - low) / 2:
+        return False
+    today, yday = bars[i], bars[i - 1]
+    if b.npattern == "A":
+        # 어제가 눌림 저점이고, 오늘 양봉으로 반등 (아직 고점 아래)
+        return yday.close == trough and today.close > today.open and today.close > yday.close and today.close <= peak
+    return today.close > peak  # B: 고점 돌파 (직전 L일 최고 종가라 첫 돌파)
 
 
 def kelly_fraction(rets: list[float]) -> float:
@@ -530,6 +571,8 @@ def run_breakout(
                 if b.min_change_pct and (ser.bars[i].close / ser.bars[i - 1].close - 1) * 100 < b.min_change_pct - 1e-9:
                     continue
                 if b.max_amount_rank and amount_ranks.get(day, {}).get(sym, 10**9) > b.max_amount_rank:
+                    continue
+                if b.npattern and not n_pattern_signal(ser.bars, i, b):
                     continue
                 if b.engulf:
                     pb, cb = ser.bars[i - 1], ser.bars[i]
@@ -1818,6 +1861,13 @@ def main(argv: list[str] | None = None) -> None:
                    help="breakout: 코스피 종가가 N거래일 전보다 높은 날에만 매수 (0 = 필터 없음)")
     r.add_argument("--slot-budget", type=float, default=0,
                    help="종목당 매수 금액·1주 가격 상한 (원). 시작 자금 = 이 값 x 최대 종목 수 (0 = .env 설정)")
+    r.add_argument("--npattern", choices=["", "A", "B"], default="",
+                   help="breakout: N자 패턴 (A = 눌림 저점 뒤 첫 양봉 매수 / B = 1차 고점 돌파 매수)")
+    r.add_argument("--np-lookback", type=int, default=20, help="breakout N자: 1차 고점·상승 탐색 기간 (거래일)")
+    r.add_argument("--np-rise", type=float, default=15.0, help="breakout N자: 1차 상승폭 하한 %%")
+    r.add_argument("--np-pull", type=float, nargs=2, default=[5.0, 15.0], metavar=("MIN", "MAX"),
+                   help="breakout N자: 눌림 깊이 범위 %% (고점 대비)")
+    r.add_argument("--np-amount", type=float, default=2e10, help="breakout N자: 1차 상승 구간 거래대금 하한 (원)")
     r.add_argument("--engulf", action="store_true",
                    help="breakout: 상승 장악형만 (전일 음봉을 당일 양봉 몸통이 감쌈)")
     r.add_argument("--below-ma", type=int, default=0, help="breakout: 당일 종가가 N일선 아래인 종목만 (0 = 없음)")
@@ -1867,6 +1917,8 @@ def main(argv: list[str] | None = None) -> None:
                               exit_on_low=not args.no_exit_on_low, max_hold_days=args.max_hold,
                               first_in_days=args.first_in_days, min_day_amount=args.min_day_amount,
                               entry_delay=args.entry_delay, delay_max_rise_pct=args.delay_max_rise, rank_by=args.rank_by, max_amount_rank=args.max_amount_rank, cross_ma=args.cross_ma, engulf=args.engulf, below_ma=args.below_ma,
+                              npattern=args.npattern, np_lookback=args.np_lookback, np_rise_pct=args.np_rise,
+                              np_min_pull=args.np_pull[0], np_max_pull=args.np_pull[1], np_amount=args.np_amount,
                               delay_hold_signal_open=args.delay_hold_open, delay_intraday=args.delay_intraday,
                               min_avg_trading_amount=settings.params.min_avg_trading_amount,
                               min_candle_pct=args.min_candle, candle_measure=args.candle_measure,

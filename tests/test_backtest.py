@@ -375,3 +375,21 @@ class MaPullbackTest(unittest.TestCase):
         self.assertEqual(len(run_ma_pullback({"A": ("A", bars)}, days[0], days[-1], s, m).trades), 1)
         m.bear_min_ma = 5
         self.assertEqual(run_ma_pullback({"A": ("A", bars)}, days[0], days[-1], s, m).trades, [])
+
+
+class NPatternTest(unittest.TestCase):
+    def test_n_pattern_signals(self):
+        from tossbot.backtest import BreakoutSettings, n_pattern_signal
+        days = weekdays(60)
+        # 보합 → 20일 동안 10,000 → 12,000 (+20%) → 눌림 11,000 (-8.3%) → 반등 → 돌파
+        closes = [10_000] * 30 + [10_000 + 100 * k for k in range(1, 21)] + [11_500, 11_000, 11_300, 11_800, 12_200]
+        bars = [Bar(d, c * 0.995, c * 1.01, c * 0.99, c, 3_000_000) for d, c in zip(days, closes)]
+        a = BreakoutSettings(npattern="A")
+        bb = BreakoutSettings(npattern="B")
+        i_a, i_b = 52, 54  # 11,300 (저점 다음 양봉) / 12,200 (고점 12,000 돌파)
+        self.assertTrue(n_pattern_signal(bars, i_a, a))
+        self.assertFalse(n_pattern_signal(bars, i_a, bb))
+        self.assertTrue(n_pattern_signal(bars, i_b, bb))
+        self.assertFalse(n_pattern_signal(bars, 53, bb))  # 11,800 은 아직 고점 아래
+        a.np_min_pull = 10  # 눌림 8.3% < 10%
+        self.assertFalse(n_pattern_signal(bars, i_a, a))

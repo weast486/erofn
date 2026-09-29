@@ -76,6 +76,16 @@ class EvaluateTest(unittest.TestCase):
             bt = run_breakout({"000010": ("A", bars)}, TODAY, TODAY, BacktestSettings(), b)
             self.assertEqual(live is not None, len(bt.trades) == 1, closes[-3:])
 
+    def test_min_volume_ratio(self):
+        """신호일 거래량이 전일의 N배 미만이면 백테스트에서 매수하지 않는다."""
+        bars = history(BASE + [10_800], 2_000_000)
+        bars[-1] = Bar(TODAY, 10_800, 10_900, 10_700, 10_800, 3_000_000)  # 전일 대비 1.5배
+        run = lambda r: run_breakout({"000010": ("A", bars)}, TODAY, TODAY, BacktestSettings(),  # noqa: E731
+                                     BreakoutSettings(first_in_days=20, min_day_amount=2e10, min_volume_ratio=r))
+        self.assertEqual(len(run(0).trades), 1)
+        self.assertEqual(len(run(1.5).trades), 1)
+        self.assertEqual(len(run(2).trades), 0)
+
 
 class FakeClient:
     def __init__(self):

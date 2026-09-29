@@ -1,9 +1,10 @@
+import sys, pathlib; sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 from datetime import date
 from pathlib import Path
 import statistics as st
 from tossbot.backtest import load_cache, run_envelope, load_top_universe, BacktestSettings, EnvelopeSettings, SELL_TAX_BY_YEAR
 data = load_cache(Path('data/ohlcv_long'))
-uni, caps = load_top_universe(Path('/home/user/financedata/marcap/data'), '2022-01-01')
+uni, caps = load_top_universe(Path('data/marcap/data'), '2022-01-01')
 def mdd(r):
     pk, w = 0, 0
     for _, v in r.equity_curve:

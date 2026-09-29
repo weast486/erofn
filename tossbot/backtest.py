@@ -374,6 +374,10 @@ class BreakoutSettings:
     max_amount_rank: int = 0
     # N > 0 이면 N일선 돌파일만: 전일 종가 <= 전일 N일선, 당일 종가 > 당일 N일선
     cross_ma: int = 0
+    # True 면 상승 장악형만: 전일 음봉, 당일 양봉, 당일 시가 <= 전일 종가, 당일 종가 >= 전일 시가
+    engulf: bool = False
+    # N > 0 이면 당일 종가가 N일선(당일 포함) 아래인 종목만
+    below_ma: int = 0
 
 
 def kelly_fraction(rets: list[float]) -> float:
@@ -527,6 +531,14 @@ def run_breakout(
                     continue
                 if b.max_amount_rank and amount_ranks.get(day, {}).get(sym, 10**9) > b.max_amount_rank:
                     continue
+                if b.engulf:
+                    pb, cb = ser.bars[i - 1], ser.bars[i]
+                    if not (pb.close < pb.open and cb.close > cb.open and cb.open <= pb.close and cb.close >= pb.open):
+                        continue
+                if b.below_ma:
+                    n = b.below_ma
+                    if i + 1 < n or ser.bars[i].close >= sum(x.close for x in ser.bars[i + 1 - n:i + 1]) / n:
+                        continue
                 if b.cross_ma:
                     n = b.cross_ma
                     if i < n:
@@ -1806,6 +1818,9 @@ def main(argv: list[str] | None = None) -> None:
                    help="breakout: 코스피 종가가 N거래일 전보다 높은 날에만 매수 (0 = 필터 없음)")
     r.add_argument("--slot-budget", type=float, default=0,
                    help="종목당 매수 금액·1주 가격 상한 (원). 시작 자금 = 이 값 x 최대 종목 수 (0 = .env 설정)")
+    r.add_argument("--engulf", action="store_true",
+                   help="breakout: 상승 장악형만 (전일 음봉을 당일 양봉 몸통이 감쌈)")
+    r.add_argument("--below-ma", type=int, default=0, help="breakout: 당일 종가가 N일선 아래인 종목만 (0 = 없음)")
     r.add_argument("--cross-ma", type=int, default=0,
                    help="breakout: N일선 돌파일만 (전일 종가 <= N일선, 당일 종가 > N일선, 0 = 없음)")
     r.add_argument("--max-amount-rank", type=int, default=0,
@@ -1851,7 +1866,7 @@ def main(argv: list[str] | None = None) -> None:
         bs = BreakoutSettings(args.entry_days, args.exit_days, args.stop_loss, args.take_profit,
                               exit_on_low=not args.no_exit_on_low, max_hold_days=args.max_hold,
                               first_in_days=args.first_in_days, min_day_amount=args.min_day_amount,
-                              entry_delay=args.entry_delay, delay_max_rise_pct=args.delay_max_rise, rank_by=args.rank_by, max_amount_rank=args.max_amount_rank, cross_ma=args.cross_ma,
+                              entry_delay=args.entry_delay, delay_max_rise_pct=args.delay_max_rise, rank_by=args.rank_by, max_amount_rank=args.max_amount_rank, cross_ma=args.cross_ma, engulf=args.engulf, below_ma=args.below_ma,
                               delay_hold_signal_open=args.delay_hold_open, delay_intraday=args.delay_intraday,
                               min_avg_trading_amount=settings.params.min_avg_trading_amount,
                               min_candle_pct=args.min_candle, candle_measure=args.candle_measure,

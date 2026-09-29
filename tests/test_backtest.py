@@ -107,6 +107,23 @@ class BreakoutEngineTest(unittest.TestCase):
         self.assertEqual((t.entry_date, t.entry_price), (days[30], 10_500))
         self.assertEqual((t.exit_date, t.exit_price, t.reason), (days[35], 9_000, "LOW_10D"))
 
+    def test_engulf_below_ma(self):
+        from tossbot.backtest import BreakoutSettings, run_breakout
+
+        days = weekdays(40)
+        closes = [10_000] * 30 + [9_000] * 5
+        bars = [Bar(d, c, c * 1.01, c * 0.99, c, 1_000_000) for d, c in zip(days, closes)]
+        bars[32] = Bar(days[32], 9_200, 9_250, 8_800, 8_900, 1_000_000)  # 음봉
+        bars[33] = Bar(days[33], 8_850, 9_300, 8_800, 9_250, 1_000_000)  # 감싸는 양봉 (20일선 아래)
+        b = BreakoutSettings(require_new_high=False, engulf=True, below_ma=20, exit_on_low=False)
+        res = run_breakout({"000010": ("테스트", bars)}, date(2023, 11, 1), date(2024, 3, 31),
+                           BacktestSettings(slippage=0.0), b)
+        self.assertEqual([t.entry_date for t in res.trades], [days[33]])
+        b.below_ma = 3  # 3일선 위라서 제외
+        res = run_breakout({"000010": ("테스트", bars)}, date(2023, 11, 1), date(2024, 3, 31),
+                           BacktestSettings(slippage=0.0), b)
+        self.assertEqual(res.trades, [])
+
     def test_breakout_stop_loss(self):
         from tossbot.backtest import BreakoutSettings, run_breakout
 

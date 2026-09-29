@@ -99,6 +99,7 @@ python -m tossbot liquidate  # 비상시 조건주문 취소 후 봇 보유 종�
 ## 백테스트 (`tossbot/backtest.py`)
 
 ```bash
+# 한 번에 준비: bash scripts/setup_backtest_data.sh  (data/ohlcv_long + data/marcap/data)
 pip install -r requirements-backtest.txt
 # 데이터: FinanceData/marcap (KRX 전 종목 일별, 상장폐지 포함) 에서 필요한 연도 파일만 받기
 git clone --depth 1 --filter=blob:none --no-checkout https://github.com/FinanceData/marcap

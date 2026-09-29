@@ -1,5 +1,6 @@
 """CLI 진입점.
 
+    python -m tossbot config       # .env 를 반영한 실제 적용 설정 (API 키는 가림)
     python -m tossbot check        # API 연결/계좌/매수가능금액 확인
     python -m tossbot select       # 지금 기준 매수 후보 출력 (주문 없음)
     python -m tossbot status       # 봇 보유 포지션 및 매매 이력
@@ -44,6 +45,18 @@ def build(cfg: Config) -> tuple[TossClient, PullbackStrategy]:
     client = TossClient(cfg.client_id, cfg.client_secret, cfg.base_url, cfg.account_seq)
     strategy = make_strategy(cfg, Broker(client, cfg.dry_run), StateStore(cfg.state_file))
     return client, strategy
+
+
+def cmd_config(cfg: Config, _c, _s) -> None:
+    """.env 를 반영한 실제 적용 설정 출력 (API 키는 가림). API 호출 없음."""
+    from dataclasses import fields
+
+    for f in fields(cfg):
+        value = getattr(cfg, f.name)
+        if f.name in ("client_id", "client_secret"):
+            value = "(입력됨)" if value else "(비어 있음)"
+        print(f"{f.name:<28} {value}")
+    print(f"{'slot_budget (1주 가격 상한)':<28} {cfg.slot_budget:,}")
 
 
 def cmd_check(cfg: Config, client: TossClient, _s) -> None:
@@ -143,13 +156,16 @@ def cmd_run(cfg: Config, client: TossClient, strategy: PullbackStrategy) -> None
 
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(prog="tossbot", description="토스증권 자동매매 봇 (신고가 돌파 / 눌림목)")
-    parser.add_argument("command", choices=["check", "select", "status", "run", "liquidate"])
+    parser.add_argument("command", choices=["config", "check", "select", "status", "run", "liquidate"])
     parser.add_argument("--env", default=".env", help=".env 파일 경로")
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args(argv)
 
     load_dotenv(args.env)
     cfg = Config.from_env()
+    if args.command == "config":  # API 키 없이도 설정만 확인
+        cmd_config(cfg, None, None)
+        return
     setup_logging(cfg, args.verbose)
     client, strategy = build(cfg)
     {

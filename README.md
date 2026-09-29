@@ -61,6 +61,7 @@ cp .env.example .env      # TOSS_CLIENT_ID / TOSS_CLIENT_SECRET 입력
 **봇을 실행할 PC/서버의 공인 IP를 허용 목록에 등록**하세요.
 
 ```bash
+python -m tossbot config     # .env 를 반영한 실제 적용 설정 확인 (API 키는 가림)
 python -m tossbot check      # 연결·계좌·매수가능금액·오늘 개장 여부 확인
 python -m tossbot select     # 지금 기준 매수 후보 (주문 없음, 15시 무렵 실행)
 python -m tossbot run        # 자동매매 상주 실행 (DRY_RUN=true 면 모의 체결)

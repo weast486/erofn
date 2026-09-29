@@ -426,3 +426,16 @@ class RsiTest(unittest.TestCase):
         t = res.trades[0]
         self.assertEqual(t.entry_date, days[25])  # 첫 하락일 RSI(2) = 0
         self.assertEqual((t.exit_date, t.reason), (days[30], "RSI_EXIT"))  # RSI 64 → 84
+
+    def test_shared_matches_breakout_alone(self):
+        from tossbot.backtest import BreakoutSettings, RsiSettings, run_breakout, run_shared
+        days = weekdays(60)
+        closes = [10_000] * 30 + [10_500, 10_400, 12_700] + [12_700] * 27
+        bars = [Bar(d, c, c * 1.01, c * 0.99, c, 3_000_000) for d, c in zip(days, closes)]
+        data = {"000010": ("테스트", bars)}
+        b = BreakoutSettings(stop_loss_pct=4.7, take_profit_pct=20, exit_on_low=False)
+        alone = run_breakout(data, days[0], days[-1], BacktestSettings(), b)
+        shared = run_shared(data, days[0], days[-1], BacktestSettings(), b, RsiSettings(buy_below=0))
+        self.assertEqual([(t.entry_date, t.exit_date) for t in alone.trades],
+                         [(t.entry_date, t.exit_date) for t in shared.trades])
+        self.assertAlmostEqual(alone.final_equity, shared.final_equity)

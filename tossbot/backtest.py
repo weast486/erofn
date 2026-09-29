@@ -24,6 +24,7 @@
 from __future__ import annotations
 
 import dataclasses
+import itertools
 
 import argparse
 import bisect
@@ -446,6 +447,7 @@ def run_breakout(
     end: date,
     s: BacktestSettings | None = None,
     b: BreakoutSettings | None = None,
+    signal_log: list | None = None,
 ) -> Result:
     """종가 기준 entry_days 일 신고가 매수 / exit_days 일 신저가 매도.
 
@@ -453,6 +455,7 @@ def run_breakout(
     - 매도 신호: 오늘 종가 < 직전 exit_days 거래일 종가의 최저값 → 오늘 종가에 매도
     - stop_loss_pct > 0 이면 장중 저가가 손절가 이하일 때 손절가(갭이면 시가)에 매도
     - 종목당 slot_budget, 최대 num_slots 종목. 신호가 많으면 rank_by 순서
+    - signal_log 를 주면 매일의 매수 후보 (날짜, 우선순위, 종목) 를 기록 (entry_delay 없을 때)
     """
     s = s or BacktestSettings()
     b = b or BreakoutSettings()
@@ -558,7 +561,7 @@ def run_breakout(
         if b.min_shares and b.position_pct:
             eq = cash + sum(p.qty * last_close.get(ps, p.entry_price) for ps, p in positions.items())
             price_cap = eq * b.max_position_pct / 100 / b.min_shares
-        if slots > 0 or b.entry_delay:
+        if slots > 0 or b.entry_delay or signal_log is not None:
             signals = []
             for sym, ser in series.items():
                 if sym in positions or sym in b.exclude_symbols:
@@ -669,6 +672,8 @@ def run_breakout(
                     pending.append((sym, i + b.entry_delay, key, day))
                 else:
                     signals.append((key, sym, bar, day))
+                    if signal_log is not None:  # 보유·자금과 무관한 매수 후보 기록 (num_slots=0 으로 호출)
+                        signal_log.append((day, key, sym))
             if b.entry_delay:
                 # 오늘이 (신호일 + N거래일)인 대기 신호를 오늘 종가에 매수
                 keep = []
@@ -1573,6 +1578,127 @@ def run_rsi(
     return Result(start, end, s.initial_cash, final, trades, equity_curve, len(positions))
 
 
+def run_shared(
+    data: dict[str, tuple[str, list[Bar]]],
+    start: date,
+    end: date,
+    s: BacktestSettings,
+    b: BreakoutSettings,
+    r: RsiSettings,
+    priority: str = "breakout",
+) -> Result:
+    """신고가(breakout) + RSI 평균회귀를 한 계좌(현금·최대 종목 수 공유)로 운용.
+    매일 매도(각 전략 규칙) → 종가 매수: 빈 자리를 priority 순서로 채움
+    (breakout / rsi = 그 전략 후보 먼저, mix = 번갈아). 종목당 slot_budget 고정. Trade.reason 앞에 전략 표시."""
+    budget = s.params.slot_budget
+    series = _prepare(data)
+    calendar = sorted({d for ser in series.values() for d in ser.days if start <= d <= end})
+    log: list = []
+    run_breakout(data, start, end, BacktestSettings(params=s.params, initial_cash=0, num_slots=0), b, signal_log=log)
+    bo_cands: dict[date, list[str]] = defaultdict(list)
+    for d, key, sym in sorted(log, key=lambda x: (x[0], -x[1])):
+        bo_cands[d].append(sym)
+    rsi = {sym: rsi_series([x.close for x in ser.bars], r.period) for sym, ser in series.items()}
+
+    cash = s.initial_cash
+    positions: dict[str, Trade] = {}
+    kind: dict[str, str] = {}
+    trades: list[Trade] = []
+    equity_curve: list[tuple[date, float]] = []
+    last_close: dict[str, float] = {}
+
+    def close_position(t: Trade, day: date, price: float, reason: str) -> None:
+        nonlocal cash
+        proceeds = _sell_value(t.qty, price, day.year, s)
+        t.exit_date, t.exit_price, t.reason = day, price, f"{kind.pop(t.symbol)}:{reason}"
+        t.pnl = proceeds - t.qty * t.entry_price * (1 + s.commission)
+        cash += proceeds
+        del positions[t.symbol]
+
+    for day in calendar:
+        # 1) 매도
+        for sym, t in list(positions.items()):
+            ser = series[sym]
+            i = ser.index.get(day)
+            t.hold_days += 1
+            if i is None:
+                continue
+            bar = ser.bars[i]
+            if kind[sym] == "BO":
+                stop = round_down_to_tick(t.entry_price * (1 - b.stop_loss_pct / 100))
+                tp = round_up_to_tick(t.entry_price * (1 + b.take_profit_pct / 100))
+                if bar.open <= stop:
+                    close_position(t, day, bar.open * (1 - s.slippage), "STOP_LOSS")
+                elif bar.open >= tp:
+                    close_position(t, day, bar.open, "TAKE_PROFIT")
+                elif bar.low <= stop:
+                    close_position(t, day, stop * (1 - s.slippage), "STOP_LOSS")
+                elif bar.high >= tp:
+                    close_position(t, day, tp, "TAKE_PROFIT")
+            else:
+                stop = round_down_to_tick(t.entry_price * (1 - r.stop_loss_pct / 100)) if r.stop_loss_pct > 0 else None
+                if stop and bar.open <= stop:
+                    close_position(t, day, bar.open * (1 - s.slippage), "STOP_LOSS")
+                elif stop and bar.low <= stop:
+                    close_position(t, day, stop * (1 - s.slippage), "STOP_LOSS")
+                elif r.sell_above and rsi[sym][i] is not None and rsi[sym][i] >= r.sell_above:
+                    close_position(t, day, bar.close * (1 - s.slippage), "RSI_EXIT")
+                elif r.max_hold_days and t.hold_days >= r.max_hold_days:
+                    close_position(t, day, bar.close * (1 - s.slippage), "TIME_EXIT")
+
+        # 2) 매수 후보
+        bo = [("BO", sym) for sym in bo_cands.get(day, [])]
+        rs = []
+        for sym, ser in series.items():
+            i = ser.index.get(day)
+            if i is None or i < 21 or rsi[sym][i] is None or rsi[sym][i] >= r.buy_below:
+                continue
+            bar = ser.bars[i]
+            if r.universe is not None and sym not in r.universe.get(day, ()):
+                continue
+            if bar.close > budget or (r.max_price and bar.close > r.max_price) or bar.close * bar.volume < r.min_amount:
+                continue
+            if sum(x.close * x.volume for x in ser.bars[i - 20:i]) / 20 < 3_000_000_000:
+                continue
+            if bar.close <= ser.bars[i - 1].close * 0.705:
+                continue
+            rs.append((rsi[sym][i], sym))
+        rs = [("RSI", sym) for _, sym in sorted(rs)]
+        if priority == "rsi":
+            order = rs + bo
+        elif priority == "mix":
+            order = [x for pair in itertools.zip_longest(bo, rs) for x in pair if x]
+        else:
+            order = bo + rs
+        for k, sym in order:
+            if len(positions) >= s.num_slots:
+                break
+            if sym in positions:
+                continue
+            bar = series[sym].bars[series[sym].index[day]]
+            price = bar.close * (1 + s.slippage)
+            qty = int(budget // round_up_to_tick(bar.close * (1 + BUY_LIMIT_SLIPPAGE)))
+            cost = qty * price * (1 + s.commission)
+            if qty <= 0 or cost > cash:
+                continue
+            cash -= cost
+            t = Trade(sym, series[sym].name, day, price, qty, surge_date=day)
+            positions[sym] = t
+            kind[sym] = k
+            trades.append(t)
+
+        # 3) 평가
+        for sym in positions:
+            i = series[sym].index.get(day)
+            if i is not None:
+                last_close[sym] = series[sym].bars[i].close
+        equity = cash + sum(t.qty * last_close.get(sym, t.entry_price) for sym, t in positions.items())
+        equity_curve.append((day, equity))
+
+    final = equity_curve[-1][1] if equity_curve else s.initial_cash
+    return Result(start, end, s.initial_cash, final, trades, equity_curve, len(positions))
+
+
 @dataclass
 class EnvelopeSettings:
     """엔벨로프 하단선 근접 종가 매수 → hold_days 거래일 뒤 종가 매도."""
@@ -1985,7 +2111,7 @@ def main(argv: list[str] | None = None) -> None:
     r.add_argument("--cache", type=Path, default=DEFAULT_CACHE)
     r.add_argument("--out", type=Path, default=Path("backtest_results"))
     r.add_argument("--env", default=".env")
-    r.add_argument("--strategy", choices=["pullback", "breakout", "limitup", "surgedoji", "retest", "mapullback", "volbreak", "rsi"], default="pullback",
+    r.add_argument("--strategy", choices=["pullback", "breakout", "limitup", "surgedoji", "retest", "mapullback", "volbreak", "rsi", "combo"], default="pullback",
                    help="pullback: 급등 후 이평선 터치 / breakout: 종가 N일 신고가 매수·M일 신저가 매도 / "
                         "limitup: 전일 상한가 종목 시초가 매수 / "
                         "surgedoji: 거래대금 상위 +15%% 급등 후 거래량 급감 단봉 음봉 종가 매수 / "
@@ -1999,6 +2125,8 @@ def main(argv: list[str] | None = None) -> None:
     r.add_argument("--rsi-sell", type=float, default=50, help="rsi: RSI 가 N 이상으로 마감하면 매도 (0 = 없음)")
     r.add_argument("--rsi-trend-ma", type=int, default=0, help="rsi: 종가가 N일선 위인 종목만 매수 (0 = 없음)")
     r.add_argument("--rsi-exit-ma", type=int, default=0, help="rsi: 종가가 N일선 위로 마감하면 매도 (0 = 없음)")
+    r.add_argument("--combo-priority", choices=["breakout", "rsi", "mix"], default="breakout",
+                   help="combo: 신고가+RSI 한 계좌 운용 시 빈 자리 채우는 순서")
     r.add_argument("--top-universe", type=int, default=0,
                    help="rsi: 코스피 시가총액 상위 N 종목만 (코스피200 근사, --marcap-dir 필요, 0 = 전체)")
     r.add_argument("--vb-k", type=float, default=0.5, help="volbreak: 목표가 = 시가 + 전일 변동폭 x k")
@@ -2220,6 +2348,15 @@ def main(argv: list[str] | None = None) -> None:
                             max_break_pct=args.max_break, stop_loss_pct=args.stop_loss or 4.7,
                             take_profit_pct=args.take_profit or 20.0)
         runner = lambda y0, y1: run_retest(data, y0, y1, settings, rt)  # noqa: E731
+    elif args.strategy == "combo":
+        # 신고가(실전 규칙, 종목당 예산 고정) + RSI(시총 상위 --top-universe, 기본 100) 를 한 계좌로
+        cb = BreakoutSettings(stop_loss_pct=args.stop_loss or 4.7, take_profit_pct=args.take_profit or 20.0,
+                              exit_on_low=False, first_in_days=args.first_in_days or 20,
+                              min_day_amount=args.min_day_amount or 2e10, skip_touched_limit_up=True)
+        cr = RsiSettings(period=args.rsi_period, buy_below=args.rsi_buy, sell_above=args.rsi_sell, stop_loss_pct=10,
+                         max_hold_days=args.max_hold or 20, max_price=args.max_price)
+        cr.universe, _ = load_top_universe(args.marcap_dir, f"{min(args.years) - 1}-12-01", top_n=args.top_universe or 100)
+        runner = lambda y0, y1: run_shared(data, y0, y1, settings, cb, cr, args.combo_priority)  # noqa: E731
     elif args.strategy == "rsi":
         rs = RsiSettings(period=args.rsi_period, buy_below=args.rsi_buy, sell_above=args.rsi_sell,
                          trend_ma=args.rsi_trend_ma, exit_ma=args.rsi_exit_ma, stop_loss_pct=args.stop_loss,

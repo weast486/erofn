@@ -40,8 +40,8 @@
 - API 키·`.env` 내용은 채팅에 받지 않는다
 
 ## 진행 중인 작업 (다음 세션이 이어서)
-- **투자자별 순매수 주체 분석 (2023·2024)**: 매수일 기준 5거래일 동안 기관·외국인·개인 중 누가 순매수 주체였는지, 주체별 익절 비율·평균 수익률 비교.
-  - 스크립트: `scripts/investor_flow.py`. KRX(pykrx)는 이 환경에서 로그인 실패 → **토스 Open API `GET /api/v1/stocks/{symbol}/investor-trading`** 로 전환(기본 `--source toss`). 순매수 주식 수만 주므로 종가를 곱해 금액 근사, 외국인은 등록외국인 기준
-  - 토스 서버는 이 클라우드 환경에서 막혀 있음 → 입력 파일(`reports/investor_flow/input_trades.csv`, `input_closes.csv`, `--prepare` 로 생성)을 커밋해 두고 **사용자 PC에서 `windows\investor_flow.bat`** 실행 (봇 폴더 E:\erofn 의 .env 사용, 장 끝난 뒤 권장)
-  - 남은 일: 사용자가 보내준 `summary.csv`/`trades_investor.csv` 로 결과를 표로 설명. 토스가 2023년까지 과거 데이터를 주는지 아직 모름(데이터 없음 건수로 확인)
-  - 구간 3개: 포함5일(D-4~D), 전일5일(D-5~D-1, 실전 15:10에 알 수 있는 정보), 이후5일(D+1~D+5). 네이버 증권은 이 환경에서 네트워크 차단됨
+- **투자자별 순매수 분석 (2023·2024) 1차 완료** → `reports/investor_flow/결과.md`
+  - 전일5일(D-5~D-1) 기관·외국인 **쌍끌이** 거래: 2023 +3.45% / 2024 +1.57% (전체 +1.46% / +0.18%), 둘 다 순매도는 2024 -1.46%. 필터 후보
+  - 다음: 쌍끌이 필터 백테스트 (빈자리 채움 효과 확인). 매수 후보 전체의 투자자 데이터 + 2025·2026 필요
+  - 데이터는 토스 Open API `GET /api/v1/stocks/{symbol}/investor-trading` (순매수 주식 수 x 종가). 토스·KRX 모두 이 클라우드 환경에서 불가 →
+    `scripts/investor_flow.py --prepare` 로 입력 파일 만들어 커밋 → 사용자 PC `E:\erofn_research`(git worktree)에서 `windows\investor_flow.bat` 실행 → 결과 CSV 업로드받음

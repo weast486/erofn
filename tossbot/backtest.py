@@ -1733,6 +1733,20 @@ def load_top_universe(data_dir: Path, start: str, end: str | None = None, market
     return uni, caps
 
 
+def load_marcap_universe(data_dir: Path, start: str, min_marcap: float, market: str | None = None) -> dict:
+    """날짜별 시가총액 min_marcap 이상 종목 {날짜: 종목 집합}. market 을 주면 그 시장(KOSPI/KOSDAQ)만."""
+    import pandas as pd
+
+    y0 = date.fromisoformat(start).year
+    files = [data_dir / f"marcap-{y}.parquet" for y in range(y0, date.today().year + 1)]
+    df = pd.concat([pd.read_parquet(f, columns=["Code", "Name", "Market", "Date", "Marcap"]) for f in files if f.exists()])
+    df = df[df["Marcap"] >= min_marcap]
+    if market:
+        df = df[df["Market"] == market]
+    df = df[[_is_common_stock(c, n) for c, n in zip(df["Code"], df["Name"])]]
+    return {d.date(): set(g["Code"]) for d, g in df.groupby("Date")}
+
+
 def run_envelope(
     data: dict[str, tuple[str, list[Bar]]],
     start: date,
@@ -2125,6 +2139,8 @@ def main(argv: list[str] | None = None) -> None:
     r.add_argument("--rsi-sell", type=float, default=50, help="rsi: RSI 가 N 이상으로 마감하면 매도 (0 = 없음)")
     r.add_argument("--rsi-trend-ma", type=int, default=0, help="rsi: 종가가 N일선 위인 종목만 매수 (0 = 없음)")
     r.add_argument("--rsi-exit-ma", type=int, default=0, help="rsi: 종가가 N일선 위로 마감하면 매도 (0 = 없음)")
+    r.add_argument("--universe-marcap", type=float, default=0,
+                   help="rsi: 날짜별 시가총액 N원 이상 종목만 (코스피·코스닥, --marcap-dir 필요, 0 = 없음)")
     r.add_argument("--combo-priority", choices=["breakout", "rsi", "mix"], default="breakout",
                    help="combo: 신고가+RSI 한 계좌 운용 시 빈 자리 채우는 순서")
     r.add_argument("--top-universe", type=int, default=0,
@@ -2363,6 +2379,8 @@ def main(argv: list[str] | None = None) -> None:
                          max_hold_days=args.max_hold, min_amount=args.min_day_amount, max_price=args.max_price)
         if args.top_universe:
             rs.universe, _ = load_top_universe(args.marcap_dir, f"{min(args.years) - 1}-12-01", top_n=args.top_universe)
+        elif args.universe_marcap:
+            rs.universe = load_marcap_universe(args.marcap_dir, f"{min(args.years) - 1}-12-01", args.universe_marcap)
         runner = lambda y0, y1: run_rsi(data, y0, y1, settings, rs)  # noqa: E731
     elif args.strategy == "volbreak":
         vb = VolBreakoutSettings(k=args.vb_k, min_amount=args.min_day_amount or 2e10, ma_filter=args.vb_ma,

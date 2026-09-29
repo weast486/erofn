@@ -139,6 +139,14 @@ class BreakoutEngineTest(unittest.TestCase):
         run(BreakoutSettings(record_signals=rec))
         self.assertEqual(rec, [key])
 
+    def test_index_below_ma_days(self):
+        from tossbot.backtest import index_below_ma_days
+
+        days = weekdays(6)
+        idx = [Bar(d, c, c, c, c, 0) for d, c in zip(days, [10, 10, 10, 7, 12, 12])]
+        # 전일 종가 vs 전일까지 3일 평균: days[4] 는 전일 7 < 9 → 약세, days[5] 는 전일 12 > 9.67
+        self.assertEqual(index_below_ma_days(idx, 3), {days[4]})
+
     def test_breakout_skips_limit_up_close(self):
         from tossbot.backtest import BreakoutSettings, run_breakout
 

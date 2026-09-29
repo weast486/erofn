@@ -346,6 +346,8 @@ class BreakoutSettings:
     winrate_cut: float = 0.0
     winrate_window: int = 20
     reduced_slots: int = 8
+    # 약세장 날짜 집합: 이 날은 최대 보유 종목 수를 reduced_slots 로 (예: 전일 지수 종가 < N일선)
+    weak_days: set | None = None
     exclude_symbols: frozenset = frozenset()  # 매수 제외 종목코드 (예: 제약·바이오)
     breakeven_lock_pct: float = 0.0  # 올린 손절가 = 매수가 x (1 + 이 %). 0 이면 본전
     # False 면 신고가 조건 없이 매수 (급등주 매매: min_change_pct 와 함께 사용)
@@ -481,6 +483,8 @@ def run_breakout(
             recent = closed_wins[-b.winrate_window:]
             if sum(recent) / len(recent) * 100 <= b.winrate_cut:
                 max_slots = min(max_slots, b.reduced_slots)  # 최근 승률이 낮으면 보유 종목 수 축소
+        if b.weak_days is not None and day in b.weak_days:
+            max_slots = min(max_slots, b.reduced_slots)  # 약세장이면 보유 종목 수 축소
         slots = max_slots - len(positions)
         price_cap = budget
         if b.min_shares and b.position_pct:
@@ -1422,6 +1426,16 @@ def index_regime_days(index: list[Bar], long: int = 200, short: int = 20, slope_
     return out
 
 
+def index_below_ma_days(index: list[Bar], ma: int = 20) -> set[date]:
+    """전일 지수 종가가 전일까지의 ma 일 이동평균보다 낮은 날 (15:10 매수 시점에 알 수 있는 정보)."""
+    out = set()
+    for i in range(ma, len(index)):
+        closes = [x.close for x in index[i - ma:i]]
+        if closes[-1] < sum(closes) / ma:
+            out.add(index[i].day)
+    return out
+
+
 def index_down_days(index: list[Bar], mode: str = "close") -> set[date]:
     """지수 하락일. mode=close: 종가 < 전일 종가, open: 시가 < 전일 종가, both: 둘 다."""
     out = set()
@@ -1556,6 +1570,9 @@ def main(argv: list[str] | None = None) -> None:
                    help="breakout: 최근 청산 승률이 N%% 이하면 최대 보유 종목 수를 --reduced-slots 로 (0 = 없음)")
     r.add_argument("--winrate-window", type=int, default=20, help="breakout: 최근 승률 계산 청산 건수")
     r.add_argument("--reduced-slots", type=int, default=8, help="breakout: 승률 저하 시 최대 보유 종목 수")
+    r.add_argument("--weak-ma", type=int, default=0,
+                   help="breakout: 전일 지수 종가가 N일선 아래면 최대 보유 종목 수를 --reduced-slots 로 (0 = 끔)")
+    r.add_argument("--weak-index", choices=["KOSPI", "KOSDAQ"], default="KOSPI", help="breakout: --weak-ma 기준 지수")
     r.add_argument("--continuous", action="store_true",
                    help="연도마다 새로 시작하지 않고 첫 해 1월 1일부터 끝까지 한 번에 (복리 확인용)")
     r.add_argument("--lock-profit", type=float, default=0,
@@ -1663,6 +1680,9 @@ def main(argv: list[str] | None = None) -> None:
         if args.min_marcap or args.exclude_marcap:
             bs.marcap = load_marcap(args.marcap_dir, "2023-01-01")
             print(f"시가총액 조건: 하한 {args.min_marcap / 1e8:,.0f}억, 제외 구간 {args.exclude_marcap}")
+        if args.weak_ma:
+            bs.weak_days = index_below_ma_days(load_index(args.cache, args.weak_index), args.weak_ma)
+            print(f"{args.weak_index} 전일 종가가 {args.weak_ma}일선 아래면 최대 {args.reduced_slots}종목")
         if args.kospi_not_down:
             settings.entry_dates = index_not_down_days(load_index(args.cache, "KOSPI"))
             print("코스피가 전일보다 낮은 날은 매수 금지")

@@ -259,3 +259,13 @@ class IndexFilterTest(unittest.TestCase):
         ix = [Bar(d, c, c, c, c, 0) for d, c in zip(days, closes)]
         # 3일 연속 상승: 3번째 날(101→102→103), 7번째 날(102→103→104→105)
         self.assertEqual(index_streak_up_days(ix, 3), {days[3], days[7]})
+
+
+class KellyFractionTest(unittest.TestCase):
+    def test_kelly(self):
+        from tossbot.backtest import kelly_fraction
+        # 승률 50%, 손익비 2 → 0.5 - 0.5 / 2 = 0.25
+        self.assertAlmostEqual(kelly_fraction([0.10, -0.05, 0.10, -0.05]), 0.25)
+        self.assertEqual(kelly_fraction([-0.05, -0.05]), 0.0)
+        self.assertEqual(kelly_fraction([0.1, 0.2]), 1.0)
+        self.assertLess(kelly_fraction([0.10, -0.05, -0.05, -0.05]), 0)

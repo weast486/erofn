@@ -347,6 +347,12 @@ class BreakoutSettings:
     # 최근 winrate_window 건 청산의 승률(수익 청산 비율)이 winrate_cut % 이하면 최대 보유 종목 수를 reduced_slots 로
     winrate_cut: float = 0.0
     winrate_window: int = 20
+    # 0 보다 크면 승률 대비 비중(켈리): 종목당 금액 = 평가금액 x 켈리비율 x kelly_scale, kelly_min_pct ~ 이 % 로 제한.
+    # 켈리비율 = 승률 - (1 - 승률) / (평균수익 / 평균손실), 최근 winrate_window 건 청산 기준.
+    # 청산이 winrate_window 건 모이기 전에는 기본 종목당 금액. 현금이 모자라면 남은 현금만큼만 매수
+    kelly_max_pct: float = 0.0
+    kelly_min_pct: float = 5.0
+    kelly_scale: float = 1.0
     reduced_slots: int = 8
     exclude_symbols: frozenset = frozenset()  # 매수 제외 종목코드 (예: 제약·바이오)
     breakeven_lock_pct: float = 0.0  # 올린 손절가 = 매수가 x (1 + 이 %). 0 이면 본전
@@ -366,6 +372,25 @@ class BreakoutSettings:
     rank_by: str = "amount"
     # N > 0 이면 신호 당일 거래대금 순위(전체 종목 중) N위 이내 종목만
     max_amount_rank: int = 0
+
+
+def kelly_fraction(rets: list[float]) -> float:
+    """승률 - (1 - 승률) / 손익비. 이긴 적이 없으면 0, 진 적이 없으면 1."""
+    wins = [r for r in rets if r > 0]
+    losses = [-r for r in rets if r <= 0]
+    if not wins:
+        return 0.0
+    if not losses or sum(losses) == 0:
+        return 1.0
+    w = len(wins) / len(rets)
+    payoff = (sum(wins) / len(wins)) / (sum(losses) / len(losses))
+    return w - (1 - w) / payoff
+
+
+def kelly_budget(rets: list[float], cash: float, positions: dict, last_close: dict, b: "BreakoutSettings") -> float:
+    equity = cash + sum(p.qty * last_close.get(ps, p.entry_price) for ps, p in positions.items())
+    pct = min(max(kelly_fraction(rets) * b.kelly_scale * 100, b.kelly_min_pct), b.kelly_max_pct)
+    return equity * pct / 100
 
 
 def run_breakout(
@@ -401,6 +426,7 @@ def run_breakout(
     breakeven: set[str] = set()  # 손절가를 본전으로 올린 종목
     recover: set[str] = set()  # 크게 빠져서 본전 탈출을 기다리는 종목
     closed_wins: list[bool] = []  # 청산 순서대로 수익 여부 (최근 승률 계산용)
+    closed_rets: list[float] = []  # 청산 순서대로 수익률 (켈리 비중용)
     amount_ranks = trading_value_ranks(series, calendar) if b.max_amount_rank else {}
 
     def close_position(t: Trade, day: date, price: float, reason: str) -> None:
@@ -410,6 +436,7 @@ def run_breakout(
         t.pnl = proceeds - t.qty * t.entry_price * (1 + s.commission)
         cash += proceeds
         closed_wins.append(t.pnl > 0)
+        closed_rets.append(t.ret)
         del positions[t.symbol]
         breakeven.discard(t.symbol)
         recover.discard(t.symbol)
@@ -624,8 +651,12 @@ def run_breakout(
                         pos_budget = max(budget, (equity_now // 100_000) * 10_000)
                     else:
                         pos_budget = equity_now * b.position_pct / 100
+                if b.kelly_max_pct and len(closed_rets) >= b.winrate_window:
+                    pos_budget = kelly_budget(closed_rets[-b.winrate_window:], cash, positions, last_close, b)
                 unit = round_up_to_tick(px * (1 + BUY_LIMIT_SLIPPAGE))
                 qty = int(pos_budget // unit)
+                if b.kelly_max_pct:
+                    qty = min(qty, int(cash // (price * (1 + s.commission))))
                 if (b.min_shares and b.position_pct and qty < b.min_shares
                         and unit * b.min_shares <= equity_now * b.max_position_pct / 100):
                     qty = b.min_shares
@@ -1529,6 +1560,10 @@ def main(argv: list[str] | None = None) -> None:
                    help="breakout: --min-shares 사용 시 종목당 평가금액 상한 %%")
     r.add_argument("--winrate-cut", type=float, default=0,
                    help="breakout: 최근 청산 승률이 N%% 이하면 최대 보유 종목 수를 --reduced-slots 로 (0 = 없음)")
+    r.add_argument("--kelly-max-pct", type=float, default=0,
+                   help="breakout: 최근 --winrate-window 건 승률·손익비로 켈리 비중, 종목당 평가금액의 최대 N%% (0 = 없음)")
+    r.add_argument("--kelly-min-pct", type=float, default=5, help="breakout: 켈리 비중 최소 %% (켈리가 0 이하여도 이만큼 매수)")
+    r.add_argument("--kelly-scale", type=float, default=1.0, help="breakout: 켈리 비율 배수 (0.5 = 하프 켈리)")
     r.add_argument("--winrate-window", type=int, default=20, help="breakout: 최근 승률 계산 청산 건수")
     r.add_argument("--reduced-slots", type=int, default=8, help="breakout: 승률 저하 시 최대 보유 종목 수")
     r.add_argument("--continuous", action="store_true",
@@ -1617,6 +1652,7 @@ def main(argv: list[str] | None = None) -> None:
                               position_pct=args.position_pct, step_sizing=args.step_sizing,
                               min_shares=args.min_shares, max_position_pct=args.max_position_pct,
                               winrate_cut=args.winrate_cut, winrate_window=args.winrate_window,
+                              kelly_max_pct=args.kelly_max_pct, kelly_min_pct=args.kelly_min_pct, kelly_scale=args.kelly_scale,
                               reduced_slots=args.reduced_slots,
                               max_breakout_pct=args.max_breakout, breakout_basis=args.breakout_basis,
                               low_rise_days=int(args.max_rise_from_low[0]) if args.max_rise_from_low else 0,

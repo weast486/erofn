@@ -1437,6 +1437,141 @@ def run_vol_breakout(
     return Result(start, end, s.initial_cash, final, trades, equity_curve, len(positions))
 
 
+def rsi_series(closes: list[float], period: int) -> list[float | None]:
+    """Wilder RSI. 앞쪽 period 개는 None."""
+    out: list[float | None] = [None] * len(closes)
+    if len(closes) <= period:
+        return out
+    gains = [max(closes[k] - closes[k - 1], 0.0) for k in range(1, period + 1)]
+    losses = [max(closes[k - 1] - closes[k], 0.0) for k in range(1, period + 1)]
+    ag, al = sum(gains) / period, sum(losses) / period
+    for k in range(period, len(closes)):
+        if k > period:
+            ch = closes[k] - closes[k - 1]
+            ag = (ag * (period - 1) + max(ch, 0.0)) / period
+            al = (al * (period - 1) + max(-ch, 0.0)) / period
+        out[k] = 100.0 if al == 0 else 100 - 100 / (1 + ag / al)
+    return out
+
+
+@dataclass
+class RsiSettings:
+    """RSI 평균회귀: RSI 가 buy_below 아래로 마감하면 종가 매수, 매도 조건(RSI >= sell_above / 종가 > exit_ma 일선 /
+    손절 / 최대 보유일) 중 먼저 오는 것에 매도. 신호가 많으면 RSI 낮은 순."""
+    period: int = 14
+    buy_below: float = 30.0
+    sell_above: float = 50.0  # 0 이면 RSI 매도 없음
+    trend_ma: int = 0  # N > 0 이면 종가가 N일선 위인 종목만 매수 (상승 추세 안의 눌림)
+    exit_ma: int = 0  # N > 0 이면 종가가 N일선 위로 마감하면 종가 매도
+    stop_loss_pct: float = 0.0
+    max_hold_days: int = 0
+    min_amount: float = 0.0  # 신호일 거래대금 하한
+    universe: dict | None = None  # {날짜: 종목 집합}
+
+
+def run_rsi(
+    data: dict[str, tuple[str, list[Bar]]],
+    start: date,
+    end: date,
+    s: BacktestSettings | None = None,
+    r: RsiSettings | None = None,
+) -> Result:
+    s = s or BacktestSettings()
+    r = r or RsiSettings()
+    budget = s.params.slot_budget
+    series = _prepare(data)
+    calendar = sorted({d for ser in series.values() for d in ser.days if start <= d <= end})
+    rsi = {sym: rsi_series([x.close for x in ser.bars], r.period) for sym, ser in series.items()}
+    csum: dict[str, list[float]] = {}
+    for sym, ser in series.items():
+        acc, run = [0.0], 0.0
+        for x in ser.bars:
+            run += x.close
+            acc.append(run)
+        csum[sym] = acc
+
+    def ma(sym: str, i: int, n: int) -> float | None:
+        return None if i + 1 < n else (csum[sym][i + 1] - csum[sym][i + 1 - n]) / n
+
+    cash = s.initial_cash
+    positions: dict[str, Trade] = {}
+    trades: list[Trade] = []
+    equity_curve: list[tuple[date, float]] = []
+    last_close: dict[str, float] = {}
+
+    def close_position(t: Trade, day: date, price: float, reason: str) -> None:
+        nonlocal cash
+        proceeds = _sell_value(t.qty, price, day.year, s)
+        t.exit_date, t.exit_price, t.reason = day, price, reason
+        t.pnl = proceeds - t.qty * t.entry_price * (1 + s.commission)
+        cash += proceeds
+        del positions[t.symbol]
+
+    for day in calendar:
+        # 1) 매도
+        for sym, t in list(positions.items()):
+            ser = series[sym]
+            i = ser.index.get(day)
+            t.hold_days += 1
+            if i is None:
+                continue
+            bar = ser.bars[i]
+            stop = round_down_to_tick(t.entry_price * (1 - r.stop_loss_pct / 100)) if r.stop_loss_pct > 0 else None
+            if stop and bar.open <= stop:
+                close_position(t, day, bar.open * (1 - s.slippage), "STOP_LOSS")
+            elif stop and bar.low <= stop:
+                close_position(t, day, stop * (1 - s.slippage), "STOP_LOSS")
+            elif r.sell_above and rsi[sym][i] is not None and rsi[sym][i] >= r.sell_above:
+                close_position(t, day, bar.close * (1 - s.slippage), "RSI_EXIT")
+            elif r.exit_ma and (m := ma(sym, i, r.exit_ma)) is not None and bar.close > m:
+                close_position(t, day, bar.close * (1 - s.slippage), f"MA{r.exit_ma}_EXIT")
+            elif r.max_hold_days and t.hold_days >= r.max_hold_days:
+                close_position(t, day, bar.close * (1 - s.slippage), "TIME_EXIT")
+
+        # 2) 매수 (오늘 종가)
+        signals = []
+        for sym, ser in series.items():
+            if sym in positions:
+                continue
+            i = ser.index.get(day)
+            if i is None or i < 21 or rsi[sym][i] is None or rsi[sym][i] >= r.buy_below:
+                continue
+            bar = ser.bars[i]
+            if r.universe is not None and sym not in r.universe.get(day, ()):
+                continue
+            if bar.close > budget or bar.close * bar.volume < r.min_amount:
+                continue
+            if sum(x.close * x.volume for x in ser.bars[i - 20:i]) / 20 < 3_000_000_000:
+                continue
+            if r.trend_ma and ((m := ma(sym, i, r.trend_ma)) is None or bar.close <= m):
+                continue
+            if bar.close <= ser.bars[i - 1].close * 0.705:
+                continue  # 하한가 마감은 매수 가정에서 제외
+            signals.append((rsi[sym][i], sym, bar))
+        signals.sort(key=lambda x: x[0])
+        for _, sym, bar in signals[:max(s.num_slots - len(positions), 0)]:
+            price = bar.close * (1 + s.slippage)
+            qty = int(budget // round_up_to_tick(bar.close * (1 + BUY_LIMIT_SLIPPAGE)))
+            cost = qty * price * (1 + s.commission)
+            if qty <= 0 or cost > cash:
+                continue
+            cash -= cost
+            t = Trade(sym, series[sym].name, day, price, qty, surge_date=day)
+            positions[sym] = t
+            trades.append(t)
+
+        # 3) 평가
+        for sym in positions:
+            i = series[sym].index.get(day)
+            if i is not None:
+                last_close[sym] = series[sym].bars[i].close
+        equity = cash + sum(t.qty * last_close.get(sym, t.entry_price) for sym, t in positions.items())
+        equity_curve.append((day, equity))
+
+    final = equity_curve[-1][1] if equity_curve else s.initial_cash
+    return Result(start, end, s.initial_cash, final, trades, equity_curve, len(positions))
+
+
 @dataclass
 class EnvelopeSettings:
     """엔벨로프 하단선 근접 종가 매수 → hold_days 거래일 뒤 종가 매도."""
@@ -1849,7 +1984,7 @@ def main(argv: list[str] | None = None) -> None:
     r.add_argument("--cache", type=Path, default=DEFAULT_CACHE)
     r.add_argument("--out", type=Path, default=Path("backtest_results"))
     r.add_argument("--env", default=".env")
-    r.add_argument("--strategy", choices=["pullback", "breakout", "limitup", "surgedoji", "retest", "mapullback", "volbreak"], default="pullback",
+    r.add_argument("--strategy", choices=["pullback", "breakout", "limitup", "surgedoji", "retest", "mapullback", "volbreak", "rsi"], default="pullback",
                    help="pullback: 급등 후 이평선 터치 / breakout: 종가 N일 신고가 매수·M일 신저가 매도 / "
                         "limitup: 전일 상한가 종목 시초가 매수 / "
                         "surgedoji: 거래대금 상위 +15%% 급등 후 거래량 급감 단봉 음봉 종가 매수 / "
@@ -1858,6 +1993,13 @@ def main(argv: list[str] | None = None) -> None:
     r.add_argument("--surge-max-pct", type=float, default=0, help="retest: 기준봉 상승률 상한 %% (0 = 없음)")
     r.add_argument("--retest-level", choices=["high", "close"], default="high",
                    help="retest: 이전 고점 = 직전 N일 장중 고가 최고값(high) / 종가 최고값(close)")
+    r.add_argument("--rsi-period", type=int, default=14, help="rsi: RSI 기간")
+    r.add_argument("--rsi-buy", type=float, default=30, help="rsi: RSI 가 N 아래로 마감하면 매수")
+    r.add_argument("--rsi-sell", type=float, default=50, help="rsi: RSI 가 N 이상으로 마감하면 매도 (0 = 없음)")
+    r.add_argument("--rsi-trend-ma", type=int, default=0, help="rsi: 종가가 N일선 위인 종목만 매수 (0 = 없음)")
+    r.add_argument("--rsi-exit-ma", type=int, default=0, help="rsi: 종가가 N일선 위로 마감하면 매도 (0 = 없음)")
+    r.add_argument("--top-universe", type=int, default=0,
+                   help="rsi: 코스피 시가총액 상위 N 종목만 (코스피200 근사, --marcap-dir 필요, 0 = 전체)")
     r.add_argument("--vb-k", type=float, default=0.5, help="volbreak: 목표가 = 시가 + 전일 변동폭 x k")
     r.add_argument("--vb-ma", type=int, default=0, help="volbreak: 전일 종가가 N일선 위인 종목만 (0 = 없음)")
     r.add_argument("--vb-exit", choices=["open", "close"], default="open",
@@ -2077,6 +2219,13 @@ def main(argv: list[str] | None = None) -> None:
                             max_break_pct=args.max_break, stop_loss_pct=args.stop_loss or 4.7,
                             take_profit_pct=args.take_profit or 20.0)
         runner = lambda y0, y1: run_retest(data, y0, y1, settings, rt)  # noqa: E731
+    elif args.strategy == "rsi":
+        rs = RsiSettings(period=args.rsi_period, buy_below=args.rsi_buy, sell_above=args.rsi_sell,
+                         trend_ma=args.rsi_trend_ma, exit_ma=args.rsi_exit_ma, stop_loss_pct=args.stop_loss,
+                         max_hold_days=args.max_hold, min_amount=args.min_day_amount)
+        if args.top_universe:
+            rs.universe, _ = load_top_universe(args.marcap_dir, f"{min(args.years) - 1}-12-01", top_n=args.top_universe)
+        runner = lambda y0, y1: run_rsi(data, y0, y1, settings, rs)  # noqa: E731
     elif args.strategy == "volbreak":
         vb = VolBreakoutSettings(k=args.vb_k, min_amount=args.min_day_amount or 2e10, ma_filter=args.vb_ma,
                                  stop_loss_pct=args.stop_loss, exit=args.vb_exit, min_range_pct=args.vb_min_range)

@@ -406,3 +406,23 @@ class VolBreakoutTest(unittest.TestCase):
         res = run_vol_breakout({"A": ("A", bars)}, days[25], days[26], s, VolBreakoutSettings(k=0.5, min_amount=1e10))
         (t,) = res.trades
         self.assertEqual((t.entry_date, t.entry_price, t.exit_date, t.exit_price), (days[25], 10_200, days[26], 10_600))
+
+
+class RsiTest(unittest.TestCase):
+    def test_rsi_values(self):
+        from tossbot.backtest import rsi_series
+        self.assertEqual(rsi_series([1, 2, 3, 4, 5], 3)[3:], [100.0, 100.0])
+        r = rsi_series([10, 9, 8, 7, 8], 3)
+        self.assertEqual(r[3], 0.0)
+        self.assertGreater(r[4], 0.0)
+
+    def test_buy_oversold_sell_on_rebound(self):
+        from tossbot.backtest import RsiSettings, run_rsi
+        days = weekdays(40)
+        closes = [10_000] * 25 + [9_700, 9_400, 9_100, 8_800] + [9_300, 9_800] + [9_800] * 9
+        bars = [Bar(d, c, c * 1.01, c * 0.99, c, 1_000_000) for d, c in zip(days, closes)]
+        res = run_rsi({"A": ("A", bars)}, days[0], days[-1], BacktestSettings(slippage=0.0),
+                      RsiSettings(period=2, buy_below=10, sell_above=70))
+        t = res.trades[0]
+        self.assertEqual(t.entry_date, days[25])  # 첫 하락일 RSI(2) = 0
+        self.assertEqual((t.exit_date, t.reason), (days[30], "RSI_EXIT"))  # RSI 64 → 84

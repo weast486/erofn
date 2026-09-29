@@ -147,6 +147,18 @@ class BreakoutEngineTest(unittest.TestCase):
         # 전일 종가 vs 전일까지 3일 평균: days[4] 는 전일 7 < 9 → 약세, days[5] 는 전일 12 > 9.67
         self.assertEqual(index_below_ma_days(idx, 3), {days[4]})
 
+    def test_breakout_weak_months_reduce_slots(self):
+        from tossbot.backtest import BreakoutSettings, run_breakout
+
+        days = weekdays(40)
+        closes = [10_000] * 30 + [10_500, 10_400]
+        bars = [Bar(d, c, c * 1.01, c * 0.99, c, 1_000_000) for d, c in zip(days, closes)]
+        run = lambda b: run_breakout({"000010": ("테스트", bars)}, date(2023, 11, 1), date(2024, 3, 31),  # noqa: E731
+                                     BacktestSettings(slippage=0.0), b)
+        month = days[30].month
+        self.assertEqual(len(run(BreakoutSettings(weak_months=frozenset({month}), reduced_slots=1)).trades), 1)
+        self.assertEqual(len(run(BreakoutSettings(weak_months=frozenset({month}), reduced_slots=0)).trades), 0)
+
     def test_breakout_skips_limit_up_close(self):
         from tossbot.backtest import BreakoutSettings, run_breakout
 

@@ -348,6 +348,7 @@ class BreakoutSettings:
     reduced_slots: int = 8
     # 약세장 날짜 집합: 이 날은 최대 보유 종목 수를 reduced_slots 로 (예: 전일 지수 종가 < N일선)
     weak_days: set | None = None
+    weak_months: frozenset = frozenset()  # 이 달(1~12)에는 최대 보유 종목 수를 reduced_slots 로
     exclude_symbols: frozenset = frozenset()  # 매수 제외 종목코드 (예: 제약·바이오)
     breakeven_lock_pct: float = 0.0  # 올린 손절가 = 매수가 x (1 + 이 %). 0 이면 본전
     # False 면 신고가 조건 없이 매수 (급등주 매매: min_change_pct 와 함께 사용)
@@ -483,7 +484,7 @@ def run_breakout(
             recent = closed_wins[-b.winrate_window:]
             if sum(recent) / len(recent) * 100 <= b.winrate_cut:
                 max_slots = min(max_slots, b.reduced_slots)  # 최근 승률이 낮으면 보유 종목 수 축소
-        if b.weak_days is not None and day in b.weak_days:
+        if (b.weak_days is not None and day in b.weak_days) or day.month in b.weak_months:
             max_slots = min(max_slots, b.reduced_slots)  # 약세장이면 보유 종목 수 축소
         slots = max_slots - len(positions)
         price_cap = budget
@@ -1572,6 +1573,8 @@ def main(argv: list[str] | None = None) -> None:
     r.add_argument("--reduced-slots", type=int, default=8, help="breakout: 승률 저하 시 최대 보유 종목 수")
     r.add_argument("--weak-ma", type=int, default=0,
                    help="breakout: 전일 지수 종가가 N일선 아래면 최대 보유 종목 수를 --reduced-slots 로 (0 = 끔)")
+    r.add_argument("--weak-months", type=int, nargs="+", default=[],
+                   help="breakout: 이 달(1~12)에는 최대 보유 종목 수를 --reduced-slots 로 (예: 5 6 7 8 9 10)")
     r.add_argument("--weak-index", choices=["KOSPI", "KOSDAQ"], default="KOSPI", help="breakout: --weak-ma 기준 지수")
     r.add_argument("--continuous", action="store_true",
                    help="연도마다 새로 시작하지 않고 첫 해 1월 1일부터 끝까지 한 번에 (복리 확인용)")
@@ -1680,6 +1683,9 @@ def main(argv: list[str] | None = None) -> None:
         if args.min_marcap or args.exclude_marcap:
             bs.marcap = load_marcap(args.marcap_dir, "2023-01-01")
             print(f"시가총액 조건: 하한 {args.min_marcap / 1e8:,.0f}억, 제외 구간 {args.exclude_marcap}")
+        if args.weak_months:
+            bs.weak_months = frozenset(args.weak_months)
+            print(f"{sorted(args.weak_months)}월에는 최대 {args.reduced_slots}종목")
         if args.weak_ma:
             bs.weak_days = index_below_ma_days(load_index(args.cache, args.weak_index), args.weak_ma)
             print(f"{args.weak_index} 전일 종가가 {args.weak_ma}일선 아래면 최대 {args.reduced_slots}종목")

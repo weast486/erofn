@@ -1347,6 +1347,7 @@ class VolBreakoutSettings:
     stop_loss_pct: float = 0.0  # 0 보다 크면 매수 당일 저가가 손절가 이하일 때 손절 (보수적: 매수 뒤 닿았다고 가정)
     exit: str = "open"  # open = 다음 날 시가 매도 / close = 매수 당일 종가 매도
     min_range_pct: float = 0.0  # 전일 변동폭(고가-저가)/종가가 이 % 이상인 종목만
+    universe: dict | None = None  # {날짜: 종목 집합} 전일 기준으로 여기 든 종목만 (예: 코스피 시가총액 상위 200)
 
 
 def run_vol_breakout(
@@ -1391,6 +1392,8 @@ def run_vol_breakout(
             if i is None or i < max(v.ma_filter, 21):
                 continue
             prev, bar = ser.bars[i - 1], ser.bars[i]
+            if v.universe is not None and sym not in v.universe.get(prev.day, ()):
+                continue
             if prev.close * prev.volume < v.min_amount:
                 continue
             if sum(x.close * x.volume for x in ser.bars[i - 21:i - 1]) / 20 < 3_000_000_000:
@@ -1859,6 +1862,8 @@ def main(argv: list[str] | None = None) -> None:
     r.add_argument("--vb-ma", type=int, default=0, help="volbreak: 전일 종가가 N일선 위인 종목만 (0 = 없음)")
     r.add_argument("--vb-exit", choices=["open", "close"], default="open",
                    help="volbreak: open = 다음 날 시가 매도 / close = 당일 종가 매도")
+    r.add_argument("--vb-top", type=int, default=0,
+                   help="volbreak: 전일 코스피 시가총액 상위 N 종목만 (코스피200 근사, --marcap-dir 필요, 0 = 전체)")
     r.add_argument("--vb-min-range", type=float, default=0.0, help="volbreak: 전일 변동폭 N%% 이상만")
     r.add_argument("--mp-entry", choices=["ma", "bear"], default="ma",
                    help="mapullback: ma = 이평선 눌림 지정가 매수 / bear = 기준봉 뒤 첫 음봉 종가 매수")
@@ -2075,6 +2080,8 @@ def main(argv: list[str] | None = None) -> None:
     elif args.strategy == "volbreak":
         vb = VolBreakoutSettings(k=args.vb_k, min_amount=args.min_day_amount or 2e10, ma_filter=args.vb_ma,
                                  stop_loss_pct=args.stop_loss, exit=args.vb_exit, min_range_pct=args.vb_min_range)
+        if args.vb_top:
+            vb.universe, _ = load_top_universe(args.marcap_dir, f"{min(args.years) - 1}-12-01", top_n=args.vb_top)
         runner = lambda y0, y1: run_vol_breakout(data, y0, y1, settings, vb)  # noqa: E731
     elif args.strategy == "mapullback":
         mp = MaPullbackSettings(surge_pct=args.surge_pct, min_amount=args.min_day_amount or 2e11,

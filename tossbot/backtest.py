@@ -23,6 +23,8 @@
 """
 from __future__ import annotations
 
+import dataclasses
+
 import argparse
 import bisect
 import csv
@@ -1551,6 +1553,8 @@ def main(argv: list[str] | None = None) -> None:
     r.add_argument("--regime-slope-days", type=int, default=5, help="breakout: 20일선 기울기 비교 기간 (거래일)")
     r.add_argument("--kospi-up-days", type=int, default=0,
                    help="breakout: 코스피 종가가 N거래일 전보다 높은 날에만 매수 (0 = 필터 없음)")
+    r.add_argument("--slot-budget", type=float, default=0,
+                   help="종목당 매수 금액·1주 가격 상한 (원). 시작 자금 = 이 값 x 최대 종목 수 (0 = .env 설정)")
     r.add_argument("--max-amount-rank", type=int, default=0,
                    help="breakout: 신호 당일 거래대금 순위 N위 이내 종목만 (0 = 없음)")
     r.add_argument("--rank-by", choices=["amount", "change", "strength", "weak", "calm"], default="amount",
@@ -1575,6 +1579,9 @@ def main(argv: list[str] | None = None) -> None:
 
     load_dotenv(args.env)
     cfg = Config.from_env()
+    if args.slot_budget:
+        # 종목당 예산(= 1주 가격 상한)을 바꾸고 시작 자금은 종목당 예산 x 최대 종목 수
+        cfg = dataclasses.replace(cfg, total_budget=int(args.slot_budget) * cfg.num_stocks)
     settings = BacktestSettings.from_config(cfg)
     settings.params.min_surge_amount = args.surge_min_amount
     mode = args.kospi_down

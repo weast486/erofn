@@ -1038,6 +1038,128 @@ def run_retest(
     return Result(start, end, s.initial_cash, final, trades, equity_curve, len(positions))
 
 
+@dataclass
+class EnvelopeSettings:
+    """엔벨로프 하단선 근접 종가 매수 → hold_days 거래일 뒤 종가 매도."""
+    period: int = 20  # 이동평균 기간
+    pct: float = 20.0  # 하단선 = 이동평균 x (1 - pct%)
+    near_pct: float = 2.0  # 종가가 하단선의 ±near_pct% 이내 (mode="near") 또는 하단선 x (1 + near_pct%) 이하 (mode="below")
+    mode: str = "near"
+    hold_days: int = 1  # 매수 후 N거래일째 종가에 매도 (1 = 익일 종가)
+    position_pct: float = 10.0  # 종목당 평가금액의 N%
+    stop_loss_pct: float = 0.0  # 0 이면 없음 (장중 손절가 도달 시 매도)
+    universe: dict | None = None  # {날짜: 매수 가능 종목코드 집합} (예: 코스피 시가총액 상위 200)
+    rank: dict | None = None  # {날짜: {종목코드: 시가총액}} 신호가 많을 때 큰 순
+
+
+def load_top_universe(data_dir: Path, start: str, end: str | None = None, market: str = "KOSPI",
+                      top_n: int = 200) -> tuple[dict, dict]:
+    """날짜별 시가총액 상위 top_n 종목 (코스피200 근사). ({날짜: 종목 집합}, {날짜: {종목: 시가총액}})."""
+    import pandas as pd
+
+    y0 = date.fromisoformat(start).year
+    y1 = date.fromisoformat(end).year if end else date.today().year
+    files = [data_dir / f"marcap-{y}.parquet" for y in range(y0, y1 + 1)]
+    df = pd.concat([pd.read_parquet(f, columns=["Code", "Name", "Market", "Date", "Marcap"]) for f in files if f.exists()])
+    df = df[df["Market"] == market]
+    df = df[[_is_common_stock(c, n) for c, n in zip(df["Code"], df["Name"])]]
+    uni, caps = {}, {}
+    for d, g in df.groupby("Date"):
+        top = g.nlargest(top_n, "Marcap")
+        uni[d.date()] = set(top["Code"])
+        caps[d.date()] = dict(zip(top["Code"], top["Marcap"].astype(float)))
+    return uni, caps
+
+
+def run_envelope(
+    data: dict[str, tuple[str, list[Bar]]],
+    start: date,
+    end: date,
+    s: BacktestSettings | None = None,
+    e: EnvelopeSettings | None = None,
+) -> Result:
+    s = s or BacktestSettings()
+    e = e or EnvelopeSettings()
+    series = _prepare(data)
+    calendar = sorted({d for ser in series.values() for d in ser.days if start <= d <= end})
+    cash = s.initial_cash
+    positions: dict[str, Trade] = {}
+    trades: list[Trade] = []
+    equity_curve: list[tuple[date, float]] = []
+    last_close: dict[str, float] = {}
+
+    def close_position(t: Trade, day: date, price: float, reason: str) -> None:
+        nonlocal cash
+        proceeds = _sell_value(t.qty, price, day.year, s)
+        t.exit_date, t.exit_price, t.reason = day, price, reason
+        t.pnl = proceeds - t.qty * t.entry_price * (1 + s.commission)
+        cash += proceeds
+        del positions[t.symbol]
+
+    for day in calendar:
+        # 1) 매도: 손절(장중) → N거래일째 종가
+        for sym, t in list(positions.items()):
+            ser = series[sym]
+            i = ser.index.get(day)
+            if i is None:
+                continue
+            t.hold_days += 1
+            bar = ser.bars[i]
+            stop = round_down_to_tick(t.entry_price * (1 - e.stop_loss_pct / 100)) if e.stop_loss_pct else None
+            if stop and bar.open <= stop:
+                close_position(t, day, bar.open * (1 - s.slippage), "STOP_LOSS")
+            elif stop and bar.low <= stop:
+                close_position(t, day, stop * (1 - s.slippage), "STOP_LOSS")
+            elif t.hold_days >= e.hold_days:
+                close_position(t, day, bar.close * (1 - s.slippage), "TIME_EXIT")
+
+        # 2) 매수: 엔벨로프 하단선 근접 종가
+        slots = s.num_slots - len(positions)
+        uni = e.universe.get(day, set()) if e.universe is not None else None
+        if slots > 0 and (uni is None or uni):
+            signals = []
+            for sym in (uni if uni is not None else series):
+                ser = series.get(sym)
+                if ser is None or sym in positions:
+                    continue
+                i = ser.index.get(day)
+                if i is None or i + 1 < e.period:
+                    continue
+                bar = ser.bars[i]
+                lower = sum(x.close for x in ser.bars[i + 1 - e.period:i + 1]) / e.period * (1 - e.pct / 100)
+                if e.mode == "near":
+                    ok = abs(bar.close / lower - 1) * 100 <= e.near_pct + 1e-9
+                else:
+                    ok = bar.close <= lower * (1 + e.near_pct / 100) + 1e-9
+                if not ok or bar.close >= ser.bars[i - 1].close * 1.295:
+                    continue
+                key = (e.rank or {}).get(day, {}).get(sym, 0.0)
+                signals.append((key, sym, bar))
+            signals.sort(key=lambda x: x[0], reverse=True)
+            equity_now = cash + sum(p.qty * last_close.get(ps, p.entry_price) for ps, p in positions.items())
+            for _, sym, bar in signals[:slots]:
+                price = bar.close * (1 + s.slippage)
+                qty = int(equity_now * e.position_pct / 100 // price)
+                cost = qty * price * (1 + s.commission)
+                if qty <= 0 or cost > cash:
+                    continue
+                cash -= cost
+                t = Trade(sym, series[sym].name, day, price, qty, surge_date=day)
+                positions[sym] = t
+                trades.append(t)
+
+        # 3) 평가
+        for sym in positions:
+            i = series[sym].index.get(day)
+            if i is not None:
+                last_close[sym] = series[sym].bars[i].close
+        equity = cash + sum(t.qty * last_close.get(sym, t.entry_price) for sym, t in positions.items())
+        equity_curve.append((day, equity))
+
+    final = equity_curve[-1][1] if equity_curve else s.initial_cash
+    return Result(start, end, s.initial_cash, final, trades, equity_curve, len(positions))
+
+
 # -------------------------------------------------------------------- data
 def load_cache(cache_dir: Path) -> dict[str, tuple[str, list[Bar]]]:
     names = {}

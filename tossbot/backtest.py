@@ -296,6 +296,8 @@ class BreakoutSettings:
     # 이평선 배열: 위에서부터 순서대로 (예: (60, 5, 20) = 60일선 > 5일선 > 20일선). 신호일 종가 포함 계산
     ma_order: tuple[int, ...] = ()
     buy_day_gap_up: bool = False
+    # entry_delay 와 함께: True 면 매수일 종가 대신 시가에 매수 (당일 장중 손절·익절도 적용, 같은 날 둘 다 닿으면 손절)
+    buy_at_open: bool = False
     buy_day_bullish: bool = False
     buy_day_min_wick_ratio: float = 0.0
     # N > 0 이면 '직전 N거래일 동안 신고가가 없었던' 첫 신고가만 매수 (예: 20 = 한 달 이내 첫 신고가)
@@ -580,8 +582,9 @@ def run_breakout(
                     if i > target or sym in positions:
                         continue  # 거래정지 등으로 매수일을 지나쳤거나 이미 보유
                     bar = ser.bars[i]
-                    if (bar.close > budget or (b.max_price and bar.close > b.max_price) or bar.close < b.min_price
-                            or bar.close >= ser.bars[i - 1].close * 1.295):
+                    px = bar.open if b.buy_at_open else bar.close
+                    if (px > budget or (b.max_price and px > b.max_price) or px < b.min_price
+                            or px >= ser.bars[i - 1].close * 1.295):
                         continue
                     sig = ser.bars[ser.index[sig_day]]
                     waiting = ser.bars[ser.index[sig_day] + 1:i + 1]
@@ -604,7 +607,9 @@ def run_breakout(
             signals.sort(key=lambda x: x[0], reverse=True)
             n_buy = min(max(slots, 0), b.max_buys_per_day) if b.max_buys_per_day else max(slots, 0)
             for _, sym, bar, sig_day in signals[:n_buy]:
-                price = bar.close * (1 + s.slippage)
+                at_open = b.buy_at_open and b.entry_delay
+                px = bar.open if at_open else bar.close
+                price = px * (1 + s.slippage)
                 pos_budget = budget
                 if b.position_pct or b.step_sizing:
                     equity_now = cash + sum(p.qty * last_close.get(ps, p.entry_price) for ps, p in positions.items())
@@ -612,7 +617,7 @@ def run_breakout(
                         pos_budget = max(budget, (equity_now // 100_000) * 10_000)
                     else:
                         pos_budget = equity_now * b.position_pct / 100
-                unit = round_up_to_tick(bar.close * (1 + BUY_LIMIT_SLIPPAGE))
+                unit = round_up_to_tick(px * (1 + BUY_LIMIT_SLIPPAGE))
                 qty = int(pos_budget // unit)
                 if (b.min_shares and b.position_pct and qty < b.min_shares
                         and unit * b.min_shares <= equity_now * b.max_position_pct / 100):
@@ -624,6 +629,13 @@ def run_breakout(
                 t = Trade(sym, series[sym].name, day, price, qty, surge_date=sig_day)
                 positions[sym] = t
                 trades.append(t)
+                if at_open:  # 시가 매수 → 당일 남은 장중에 손절·익절 (둘 다 닿으면 손절로 가정)
+                    stop = round_down_to_tick(price * (1 - b.stop_loss_pct / 100)) if b.stop_loss_pct > 0 else None
+                    tp = round_up_to_tick(price * (1 + b.take_profit_pct / 100)) if b.take_profit_pct > 0 else None
+                    if stop and bar.low <= stop:
+                        close_position(t, day, stop * (1 - s.slippage), "STOP_LOSS")
+                    elif tp and bar.high >= tp:
+                        close_position(t, day, tp, "TAKE_PROFIT")
 
         # 3) 평가
         for sym in positions:
@@ -1351,6 +1363,7 @@ def main(argv: list[str] | None = None) -> None:
     r.add_argument("--max-drop-from-high", type=float, default=0,
                    help="breakout: 종가가 당일 고가 대비 N%% 이상 내려온 종목 제외 (0 = 없음)")
     r.add_argument("--buy-day-gap-up", action="store_true", help="breakout: 매수일 시가가 전일 종가보다 높을 때만 (--entry-delay)")
+    r.add_argument("--buy-at-open", action="store_true", help="breakout: --entry-delay 매수를 매수일 시가에")
     r.add_argument("--buy-day-bullish", action="store_true", help="breakout: 매수일 양봉일 때만 (--entry-delay)")
     r.add_argument("--buy-day-wick", type=float, default=0,
                    help="breakout: 매수일 윗꼬리가 몸통의 N배 이상일 때만 (--entry-delay, 0 = 없음)")
@@ -1456,7 +1469,7 @@ def main(argv: list[str] | None = None) -> None:
                               ma_exit_profit_only=args.ma_exit_profit_only, max_buys_per_day=args.max_buys_per_day,
                               min_marcap=args.min_marcap, skip_touched_limit_up=args.skip_touched_limit_up,
                               max_drop_from_high_pct=args.max_drop_from_high,
-                              buy_day_gap_up=args.buy_day_gap_up, buy_day_bullish=args.buy_day_bullish,
+                              buy_day_gap_up=args.buy_day_gap_up, buy_at_open=args.buy_at_open, buy_day_bullish=args.buy_day_bullish,
                               buy_day_min_wick_ratio=args.buy_day_wick, recover_after_drop_pct=args.recover_after_drop,
                               stop_limit=args.stop_limit, exclude_high_days=args.exclude_high_days,
                               position_pct=args.position_pct, step_sizing=args.step_sizing,

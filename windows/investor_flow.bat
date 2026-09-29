@@ -7,6 +7,9 @@ set "BOT=E:\erofn"
 set "PY=python"
 if exist "%BOT%\.venv\Scripts\python.exe" set "PY=%BOT%\.venv\Scripts\python.exe"
 title 투자자별 순매수 분석
+echo [0/2] 필요한 부품(pandas) 확인...
+"%PY%" -c "import pandas" 2>nul || "%PY%" -m pip install pandas
+echo.
 echo [1/2] 3건만 시험 조회...
 "%PY%" scripts\investor_flow.py --env "%BOT%\.env" --limit 3
 if errorlevel 1 goto end

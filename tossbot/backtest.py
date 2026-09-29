@@ -1467,6 +1467,7 @@ class RsiSettings:
     max_hold_days: int = 0
     min_amount: float = 0.0  # 신호일 거래대금 하한
     universe: dict | None = None  # {날짜: 종목 집합}
+    max_price: float = 0.0  # 0 보다 크면 1주 가격 상한 (원)
 
 
 def run_rsi(
@@ -1539,7 +1540,7 @@ def run_rsi(
             bar = ser.bars[i]
             if r.universe is not None and sym not in r.universe.get(day, ()):
                 continue
-            if bar.close > budget or bar.close * bar.volume < r.min_amount:
+            if bar.close > budget or bar.close * bar.volume < r.min_amount or (r.max_price and bar.close > r.max_price):
                 continue
             if sum(x.close * x.volume for x in ser.bars[i - 20:i]) / 20 < 3_000_000_000:
                 continue
@@ -2222,7 +2223,7 @@ def main(argv: list[str] | None = None) -> None:
     elif args.strategy == "rsi":
         rs = RsiSettings(period=args.rsi_period, buy_below=args.rsi_buy, sell_above=args.rsi_sell,
                          trend_ma=args.rsi_trend_ma, exit_ma=args.rsi_exit_ma, stop_loss_pct=args.stop_loss,
-                         max_hold_days=args.max_hold, min_amount=args.min_day_amount)
+                         max_hold_days=args.max_hold, min_amount=args.min_day_amount, max_price=args.max_price)
         if args.top_universe:
             rs.universe, _ = load_top_universe(args.marcap_dir, f"{min(args.years) - 1}-12-01", top_n=args.top_universe)
         runner = lambda y0, y1: run_rsi(data, y0, y1, settings, rs)  # noqa: E731

@@ -340,6 +340,10 @@ class BreakoutSettings:
     # 1주 가격 상한도 평가금액 x max_position_pct / N 으로 바뀜 (예: 2주, 20% → 1주 가격 <= 평가금액의 10%)
     min_shares: int = 0
     max_position_pct: float = 0.0
+    # 최근 winrate_window 건 청산의 승률(수익 청산 비율)이 winrate_cut % 이하면 최대 보유 종목 수를 reduced_slots 로
+    winrate_cut: float = 0.0
+    winrate_window: int = 20
+    reduced_slots: int = 8
     exclude_symbols: frozenset = frozenset()  # 매수 제외 종목코드 (예: 제약·바이오)
     breakeven_lock_pct: float = 0.0  # 올린 손절가 = 매수가 x (1 + 이 %). 0 이면 본전
     # False 면 신고가 조건 없이 매수 (급등주 매매: min_change_pct 와 함께 사용)
@@ -390,6 +394,7 @@ def run_breakout(
     last_close: dict[str, float] = {}
     breakeven: set[str] = set()  # 손절가를 본전으로 올린 종목
     recover: set[str] = set()  # 크게 빠져서 본전 탈출을 기다리는 종목
+    closed_wins: list[bool] = []  # 청산 순서대로 수익 여부 (최근 승률 계산용)
 
     def close_position(t: Trade, day: date, price: float, reason: str) -> None:
         nonlocal cash
@@ -397,6 +402,7 @@ def run_breakout(
         t.exit_date, t.exit_price, t.reason = day, price, reason
         t.pnl = proceeds - t.qty * t.entry_price * (1 + s.commission)
         cash += proceeds
+        closed_wins.append(t.pnl > 0)
         del positions[t.symbol]
         breakeven.discard(t.symbol)
         recover.discard(t.symbol)
@@ -461,7 +467,12 @@ def run_breakout(
                 breakeven.add(sym)  # 장중 순서를 알 수 없으므로 다음 날부터 적용
 
         # 2) 매수: 종가 신고가
-        slots = s.num_slots - len(positions)
+        max_slots = s.num_slots
+        if b.winrate_cut and len(closed_wins) >= b.winrate_window:
+            recent = closed_wins[-b.winrate_window:]
+            if sum(recent) / len(recent) * 100 <= b.winrate_cut:
+                max_slots = min(max_slots, b.reduced_slots)  # 최근 승률이 낮으면 보유 종목 수 축소
+        slots = max_slots - len(positions)
         price_cap = budget
         if b.min_shares and b.position_pct:
             eq = cash + sum(p.qty * last_close.get(ps, p.entry_price) for ps, p in positions.items())
@@ -1368,6 +1379,10 @@ def main(argv: list[str] | None = None) -> None:
                    help="breakout: 최소 N주 매수 (--position-pct, --max-position-pct 와 함께)")
     r.add_argument("--max-position-pct", type=float, default=20,
                    help="breakout: --min-shares 사용 시 종목당 평가금액 상한 %%")
+    r.add_argument("--winrate-cut", type=float, default=0,
+                   help="breakout: 최근 청산 승률이 N%% 이하면 최대 보유 종목 수를 --reduced-slots 로 (0 = 없음)")
+    r.add_argument("--winrate-window", type=int, default=20, help="breakout: 최근 승률 계산 청산 건수")
+    r.add_argument("--reduced-slots", type=int, default=8, help="breakout: 승률 저하 시 최대 보유 종목 수")
     r.add_argument("--continuous", action="store_true",
                    help="연도마다 새로 시작하지 않고 첫 해 1월 1일부터 끝까지 한 번에 (복리 확인용)")
     r.add_argument("--lock-profit", type=float, default=0,
@@ -1446,6 +1461,8 @@ def main(argv: list[str] | None = None) -> None:
                               stop_limit=args.stop_limit, exclude_high_days=args.exclude_high_days,
                               position_pct=args.position_pct, step_sizing=args.step_sizing,
                               min_shares=args.min_shares, max_position_pct=args.max_position_pct,
+                              winrate_cut=args.winrate_cut, winrate_window=args.winrate_window,
+                              reduced_slots=args.reduced_slots,
                               max_breakout_pct=args.max_breakout, breakout_basis=args.breakout_basis,
                               low_rise_days=int(args.max_rise_from_low[0]) if args.max_rise_from_low else 0,
                               max_rise_from_low_pct=args.max_rise_from_low[1] if args.max_rise_from_low else 0.0,

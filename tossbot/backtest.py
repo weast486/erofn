@@ -362,6 +362,8 @@ class BreakoutSettings:
     # 신호가 많을 때 우선순위: amount(당일 거래대금) / change(당일 상승률) / strength(신고가 돌파폭) 큰 순,
     # weak(돌파폭 작은 순) / calm(당일 상승률 작은 순)
     rank_by: str = "amount"
+    # N > 0 이면 신호 당일 거래대금 순위(전체 종목 중) N위 이내 종목만
+    max_amount_rank: int = 0
 
 
 def run_breakout(
@@ -397,6 +399,7 @@ def run_breakout(
     breakeven: set[str] = set()  # 손절가를 본전으로 올린 종목
     recover: set[str] = set()  # 크게 빠져서 본전 탈출을 기다리는 종목
     closed_wins: list[bool] = []  # 청산 순서대로 수익 여부 (최근 승률 계산용)
+    amount_ranks = trading_value_ranks(series, calendar) if b.max_amount_rank else {}
 
     def close_position(t: Trade, day: date, price: float, reason: str) -> None:
         nonlocal cash
@@ -490,6 +493,8 @@ def run_breakout(
                 if b.require_new_high and not is_high[sym][i]:
                     continue
                 if b.min_change_pct and (ser.bars[i].close / ser.bars[i - 1].close - 1) * 100 < b.min_change_pct - 1e-9:
+                    continue
+                if b.max_amount_rank and amount_ranks.get(day, {}).get(sym, 10**9) > b.max_amount_rank:
                     continue
                 if b.first_in_days and (i < b.first_in_days or any(is_high[sym][i - b.first_in_days:i])):
                     continue  # 최근 N거래일 안에 이미 신고가가 있었음 → 첫 신고가 아님
@@ -1546,6 +1551,8 @@ def main(argv: list[str] | None = None) -> None:
     r.add_argument("--regime-slope-days", type=int, default=5, help="breakout: 20일선 기울기 비교 기간 (거래일)")
     r.add_argument("--kospi-up-days", type=int, default=0,
                    help="breakout: 코스피 종가가 N거래일 전보다 높은 날에만 매수 (0 = 필터 없음)")
+    r.add_argument("--max-amount-rank", type=int, default=0,
+                   help="breakout: 신호 당일 거래대금 순위 N위 이내 종목만 (0 = 없음)")
     r.add_argument("--rank-by", choices=["amount", "change", "strength", "weak", "calm"], default="amount",
                    help="breakout: 신호가 많을 때 우선순위 (거래대금 / 당일 상승률 / 신고가 돌파폭)")
     r.add_argument("--delay-max-rise", type=float, default=0, help="breakout: 대기 중 신고가 종가 대비 N%% 이상 상승 시 매수 취소")
@@ -1584,7 +1591,7 @@ def main(argv: list[str] | None = None) -> None:
         bs = BreakoutSettings(args.entry_days, args.exit_days, args.stop_loss, args.take_profit,
                               exit_on_low=not args.no_exit_on_low, max_hold_days=args.max_hold,
                               first_in_days=args.first_in_days, min_day_amount=args.min_day_amount,
-                              entry_delay=args.entry_delay, delay_max_rise_pct=args.delay_max_rise, rank_by=args.rank_by,
+                              entry_delay=args.entry_delay, delay_max_rise_pct=args.delay_max_rise, rank_by=args.rank_by, max_amount_rank=args.max_amount_rank,
                               delay_hold_signal_open=args.delay_hold_open, delay_intraday=args.delay_intraday,
                               min_avg_trading_amount=settings.params.min_avg_trading_amount,
                               min_candle_pct=args.min_candle, candle_measure=args.candle_measure,

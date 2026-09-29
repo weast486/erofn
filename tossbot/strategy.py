@@ -229,14 +229,41 @@ class PullbackStrategy:
             orders.append((w.symbol, w.name, price, "눌림목 매수 " + note))
         return self._place_buys(orders, today)
 
+    def bot_equity(self) -> float:
+        """봇 평가금액 = TOTAL_BUDGET + 봇 매매 실현손익 + 보유 종목 평가손익 (수수료·세금 제외 근사)."""
+        realized = sum(
+            (h["exit_price"] - h["entry_price"]) * h["quantity"]
+            for h in self.state.history
+            if h.get("exit_price") and h.get("entry_price") and h.get("quantity")
+        )
+        held = [p for p in self.state.positions.values() if p.quantity > 0 and p.entry_price > 0]
+        unrealized = 0.0
+        if held:
+            try:
+                last = {r["symbol"]: float(r["lastPrice"]) for r in self.broker.client.get_prices([p.symbol for p in held])}
+            except Exception as exc:
+                log.warning("평가금액 계산용 현재가 조회 실패 (보유 종목은 매수가로 계산): %s", exc)
+                last = {}
+            unrealized = sum((last.get(p.symbol, p.entry_price) - p.entry_price) * p.quantity for p in held)
+        return self.cfg.total_budget + realized + unrealized
+
+    def order_budget(self) -> int:
+        """종목당 매수 금액. POSITION_PCT > 0 이면 봇 평가금액의 N%, 아니면 TOTAL_BUDGET / NUM_STOCKS."""
+        if self.cfg.position_pct <= 0:
+            return self.cfg.slot_budget
+        equity = self.bot_equity()
+        budget = int(equity * self.cfg.position_pct / 100)
+        log.info("봇 평가금액 %s원 → 종목당 %s원 (%s%%)", f"{equity:,.0f}", f"{budget:,}", self.cfg.position_pct)
+        return budget
+
     def _place_buys(self, orders: list[tuple[str, str, float, str]], today: date) -> list[str]:
         """(종목, 이름, 현재가, 로그) 순서대로 시장성 지정가 매수. 매수한 종목 코드 반환."""
-        cfg = self.cfg
         bought = []
         cash = self.broker.cash_buying_power()
+        budget = self.order_budget()
         for symbol, name, price, note in orders:
             limit = round_up_to_tick(price * (1 + BUY_LIMIT_SLIPPAGE))
-            qty = cfg.slot_budget // limit
+            qty = budget // limit
             if qty <= 0:
                 continue
             if qty * limit > cash:
@@ -538,6 +565,7 @@ class BreakoutStrategy(PullbackStrategy):
             min_avg_trading_amount=cfg.min_avg_trading_amount,
             max_price=cfg.max_price,
             min_price=cfg.min_price,
+            skip_touched_limit_up=cfg.skip_touched_limit_up,
         )
 
     def buy_step(self, now: datetime, day: TradingDay, deadline: datetime) -> None:

@@ -35,6 +35,7 @@ class BreakoutParams:
     limit_up_ratio: float = 1.295  # 전일 종가 대비 이 비율 이상이면 상한가로 보고 제외
     max_price: float = 0  # 1주 가격 상한 (0 이면 종목당 예산)
     min_price: float = 10_000  # 1주 가격 하한
+    skip_touched_limit_up: bool = True  # 장중 상한가를 찍고 내려온 종목 제외
 
     @property
     def price_cap(self) -> float:
@@ -67,9 +68,10 @@ def new_high_flags(closes: list[float], n: int) -> list[bool]:
 
 
 def evaluate(
-    symbol: str, name: str, bars: list[Bar], today: date, price: float, today_volume: float, p: BreakoutParams
+    symbol: str, name: str, bars: list[Bar], today: date, price: float, today_volume: float, p: BreakoutParams,
+    today_high: float | None = None,
 ) -> tuple[BreakoutCandidate | None, str]:
-    """완성된 일봉(오늘 제외) + 오늘 현재가·거래량으로 매수 조건 판정. (후보, 탈락 사유)."""
+    """완성된 일봉(오늘 제외) + 오늘 현재가·거래량·고가로 매수 조건 판정. (후보, 탈락 사유)."""
     done = [b for b in bars if b.day < today]
     if len(done) < p.entry_days + p.first_in_days:
         return None, "데이터 부족"
@@ -85,6 +87,8 @@ def evaluate(
         return None, f"1주 가격 {p.min_price:,.0f}원 미만"
     if price >= closes[-1] * p.limit_up_ratio:
         return None, "상한가 (체결 불가)"
+    if p.skip_touched_limit_up and today_high and today_high >= closes[-1] * p.limit_up_ratio:
+        return None, "장중 상한가를 찍고 내려옴"
     day_amount = price * today_volume
     if day_amount < p.min_day_amount:
         return None, f"당일 거래대금 {day_amount / 1e8:,.0f}억"
@@ -134,7 +138,7 @@ def select_breakouts(
         today_bar = next((b for b in bars if b.day == today), None)
         if today_bar is None:
             continue
-        cand, reason = evaluate(symbol, name, bars, today, today_bar.close, today_bar.volume, p)
+        cand, reason = evaluate(symbol, name, bars, today, today_bar.close, today_bar.volume, p, today_bar.high)
         if cand:
             cands.append(cand)
         else:

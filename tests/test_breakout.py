@@ -55,6 +55,14 @@ class EvaluateTest(unittest.TestCase):
         self.assertIn("10,000원 미만", self.ev(cheap, 5_400, volume=6_000_000)[1])
         self.assertEqual(self.ev([c * 9 for c in BASE], 97_200, volume=500_000)[1], "")  # 9만7천원 (10만원 이하)
 
+    def test_touched_limit_up_rejected(self):
+        bars = history(BASE)
+        # 장중 고가가 전일 종가 +29.5% 이상(12,950)이었다가 10,800 으로 내려옴
+        self.assertIn("장중 상한가", evaluate("A", "A", bars, TODAY, 10_800, 3_000_000, self.p, 12_950)[1])
+        self.assertEqual(evaluate("A", "A", bars, TODAY, 10_800, 3_000_000, self.p, 12_900)[1], "")
+        off = BreakoutParams(skip_touched_limit_up=False)
+        self.assertEqual(evaluate("A", "A", bars, TODAY, 10_800, 3_000_000, off, 12_950)[1], "")
+
     def test_live_and_backtest_agree(self):
         """같은 일봉이면 실전 판정과 백테스트 매수가 일치해야 한다."""
         cases = [BASE + [10_800], BASE[:40] + [10_500] + [10_300] * 4 + [10_600], BASE + [10_000]]
@@ -123,6 +131,17 @@ class BreakoutStrategyTest(unittest.TestCase):
         self.assertEqual((self.cfg.stop_loss_pct, self.cfg.take_profit_pct, self.cfg.max_hold_days), (4.7, 20.0, 0))
         self.assertIsInstance(make_strategy(Config(strategy="pullback", state_dir=self.tmp.name),
                                             Broker(self.client), StateStore(self.cfg.state_file)), PullbackStrategy)
+
+    def test_order_budget_is_pct_of_bot_equity(self):
+        self.assertEqual(self.s.order_budget(), 100_000)  # 100만원 x 10%
+        # 실현 이익 +20만원, 보유 종목 평가이익 +3만원 → 평가금액 123만원 → 종목당 12.3만원
+        self.s.state.history.append({"symbol": "000020", "entry_price": 10_000, "exit_price": 12_000, "quantity": 100})
+        from tossbot.state import Position
+        self.s.state.positions["000010"] = Position(symbol="000010", name="A", quantity=10, entry_price=7_800)
+        self.assertEqual(self.s.order_budget(), 123_000)
+        fixed = make_strategy(Config(dry_run=True, state_dir=self.tmp.name, position_pct=0),
+                              Broker(self.client, dry_run=True), StateStore(self.cfg.state_file))
+        self.assertEqual(fixed.order_budget(), 100_000)  # POSITION_PCT=0 → TOTAL_BUDGET / NUM_STOCKS
 
     def test_buys_at_1510_once_with_conditional_orders(self):
         self.tick(TODAY, 15, 9)

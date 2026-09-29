@@ -75,6 +75,9 @@ class Config:
     min_day_amount: float = 20_000_000_000  # 당일 거래대금 하한 (200억)
     max_price: float = 0  # 1주 가격 상한 (0 = 종목당 예산까지)
     min_price: float = 10_000  # 1주 가격 하한
+    skip_touched_limit_up: bool = True  # 장중 상한가를 찍고 내려온 종목 제외
+    # 0 보다 크면 종목당 매수 금액 = 봇 평가금액(TOTAL_BUDGET + 실현손익 + 보유 평가손익) x N %. 0 이면 TOTAL_BUDGET / NUM_STOCKS 고정
+    position_pct: float = 10.0
     # 시장 필터: kospi_down = 코스피가 전일 종가보다 낮을 때만 신규 매수, none = 필터 없음
     market_filter: str = "kospi_not_down"
     min_days_after_surge: int = 3  # 급등일로부터 N거래일째부터 매수 허용
@@ -131,6 +134,8 @@ class Config:
             min_day_amount=num("MIN_DAY_AMOUNT", "min_day_amount"),
             max_price=num("MAX_PRICE", "max_price"),
             min_price=num("MIN_PRICE", "min_price"),
+            skip_touched_limit_up=_bool(os.environ.get("SKIP_TOUCHED_LIMIT_UP"), cls.skip_touched_limit_up),
+            position_pct=num("POSITION_PCT", "position_pct"),
             market_filter=_get("MARKET_FILTER", cls.market_filter),
             min_days_after_surge=num("MIN_DAYS_AFTER_SURGE", "min_days_after_surge", int),
             pullback_volume_ratio=num("PULLBACK_VOLUME_RATIO", "pullback_volume_ratio"),

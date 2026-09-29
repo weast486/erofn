@@ -1337,6 +1337,104 @@ def run_ma_pullback(
 
 
 @dataclass
+class VolBreakoutSettings:
+    """변동성 돌파 (래리 윌리엄스): 오늘 시가 + 전일 (고가 - 저가) x k 를 장중에 넘으면 그 가격에 매수,
+    다음 거래일 시가에 매도. 후보는 전일 거래대금 min_amount 이상, 여러 종목이 닿으면 전일 거래대금 큰 순
+    (장중 어느 종목이 먼저 닿았는지 일봉으로는 알 수 없음)."""
+    k: float = 0.5
+    min_amount: float = 20_000_000_000  # 전일 거래대금 하한
+    ma_filter: int = 0  # N > 0 이면 전일 종가가 N일선(전일 포함) 위인 종목만
+    stop_loss_pct: float = 0.0  # 0 보다 크면 매수 당일 저가가 손절가 이하일 때 손절 (보수적: 매수 뒤 닿았다고 가정)
+    exit: str = "open"  # open = 다음 날 시가 매도 / close = 매수 당일 종가 매도
+    min_range_pct: float = 0.0  # 전일 변동폭(고가-저가)/종가가 이 % 이상인 종목만
+
+
+def run_vol_breakout(
+    data: dict[str, tuple[str, list[Bar]]],
+    start: date,
+    end: date,
+    s: BacktestSettings | None = None,
+    v: VolBreakoutSettings | None = None,
+) -> Result:
+    s = s or BacktestSettings()
+    v = v or VolBreakoutSettings()
+    budget = s.params.slot_budget
+    series = _prepare(data)
+    calendar = sorted({d for ser in series.values() for d in ser.days if start <= d <= end})
+    cash = s.initial_cash
+    positions: dict[str, Trade] = {}
+    trades: list[Trade] = []
+    equity_curve: list[tuple[date, float]] = []
+    last_close: dict[str, float] = {}
+
+    def close_position(t: Trade, day: date, price: float, reason: str) -> None:
+        nonlocal cash
+        proceeds = _sell_value(t.qty, price, day.year, s)
+        t.exit_date, t.exit_price, t.reason = day, price, reason
+        t.pnl = proceeds - t.qty * t.entry_price * (1 + s.commission)
+        cash += proceeds
+        del positions[t.symbol]
+
+    for day in calendar:
+        # 1) 전날 산 종목 시가 매도
+        for sym, t in list(positions.items()):
+            ser = series[sym]
+            i = ser.index.get(day)
+            t.hold_days += 1
+            if i is not None:
+                close_position(t, day, ser.bars[i].open * (1 - s.slippage), "NEXT_OPEN")
+
+        # 2) 오늘 목표가 돌파 매수
+        signals = []
+        for sym, ser in series.items():
+            i = ser.index.get(day)
+            if i is None or i < max(v.ma_filter, 21):
+                continue
+            prev, bar = ser.bars[i - 1], ser.bars[i]
+            if prev.close * prev.volume < v.min_amount:
+                continue
+            if sum(x.close * x.volume for x in ser.bars[i - 21:i - 1]) / 20 < 3_000_000_000:
+                continue
+            rng = prev.high - prev.low
+            if rng <= 0 or rng / prev.close * 100 < v.min_range_pct:
+                continue
+            if v.ma_filter and prev.close <= sum(x.close for x in ser.bars[i - v.ma_filter:i]) / v.ma_filter:
+                continue
+            target = round_up_to_tick(bar.open + rng * v.k)
+            if bar.high < target or target >= prev.close * 1.295 or target > budget:
+                continue
+            signals.append((prev.close * prev.volume, sym, target, bar))
+        signals.sort(key=lambda x: x[0], reverse=True)
+        slots = s.num_slots - len(positions)
+        for _, sym, target, bar in signals[:max(slots, 0)]:
+            price = target * (1 + s.slippage)
+            qty = int(budget // round_up_to_tick(target * (1 + BUY_LIMIT_SLIPPAGE)))
+            cost = qty * price * (1 + s.commission)
+            if qty <= 0 or cost > cash:
+                continue
+            cash -= cost
+            t = Trade(sym, series[sym].name, day, price, qty, surge_date=day)
+            positions[sym] = t
+            trades.append(t)
+            stop = round_down_to_tick(price * (1 - v.stop_loss_pct / 100)) if v.stop_loss_pct > 0 else None
+            if stop and bar.low <= stop:
+                close_position(t, day, stop * (1 - s.slippage), "STOP_LOSS")
+            elif v.exit == "close":
+                close_position(t, day, bar.close * (1 - s.slippage), "SAME_CLOSE")
+
+        # 3) 평가
+        for sym in positions:
+            i = series[sym].index.get(day)
+            if i is not None:
+                last_close[sym] = series[sym].bars[i].close
+        equity = cash + sum(t.qty * last_close.get(sym, t.entry_price) for sym, t in positions.items())
+        equity_curve.append((day, equity))
+
+    final = equity_curve[-1][1] if equity_curve else s.initial_cash
+    return Result(start, end, s.initial_cash, final, trades, equity_curve, len(positions))
+
+
+@dataclass
 class EnvelopeSettings:
     """엔벨로프 하단선 근접 종가 매수 → hold_days 거래일 뒤 종가 매도."""
     period: int = 20  # 이동평균 기간
@@ -1748,7 +1846,7 @@ def main(argv: list[str] | None = None) -> None:
     r.add_argument("--cache", type=Path, default=DEFAULT_CACHE)
     r.add_argument("--out", type=Path, default=Path("backtest_results"))
     r.add_argument("--env", default=".env")
-    r.add_argument("--strategy", choices=["pullback", "breakout", "limitup", "surgedoji", "retest", "mapullback"], default="pullback",
+    r.add_argument("--strategy", choices=["pullback", "breakout", "limitup", "surgedoji", "retest", "mapullback", "volbreak"], default="pullback",
                    help="pullback: 급등 후 이평선 터치 / breakout: 종가 N일 신고가 매수·M일 신저가 매도 / "
                         "limitup: 전일 상한가 종목 시초가 매수 / "
                         "surgedoji: 거래대금 상위 +15%% 급등 후 거래량 급감 단봉 음봉 종가 매수 / "
@@ -1757,6 +1855,11 @@ def main(argv: list[str] | None = None) -> None:
     r.add_argument("--surge-max-pct", type=float, default=0, help="retest: 기준봉 상승률 상한 %% (0 = 없음)")
     r.add_argument("--retest-level", choices=["high", "close"], default="high",
                    help="retest: 이전 고점 = 직전 N일 장중 고가 최고값(high) / 종가 최고값(close)")
+    r.add_argument("--vb-k", type=float, default=0.5, help="volbreak: 목표가 = 시가 + 전일 변동폭 x k")
+    r.add_argument("--vb-ma", type=int, default=0, help="volbreak: 전일 종가가 N일선 위인 종목만 (0 = 없음)")
+    r.add_argument("--vb-exit", choices=["open", "close"], default="open",
+                   help="volbreak: open = 다음 날 시가 매도 / close = 당일 종가 매도")
+    r.add_argument("--vb-min-range", type=float, default=0.0, help="volbreak: 전일 변동폭 N%% 이상만")
     r.add_argument("--mp-entry", choices=["ma", "bear"], default="ma",
                    help="mapullback: ma = 이평선 눌림 지정가 매수 / bear = 기준봉 뒤 첫 음봉 종가 매수")
     r.add_argument("--bear-max", type=float, default=3.0, help="mapullback bear: 첫 음봉 하락폭 N%% 이내만 매수")
@@ -1969,6 +2072,10 @@ def main(argv: list[str] | None = None) -> None:
                             max_break_pct=args.max_break, stop_loss_pct=args.stop_loss or 4.7,
                             take_profit_pct=args.take_profit or 20.0)
         runner = lambda y0, y1: run_retest(data, y0, y1, settings, rt)  # noqa: E731
+    elif args.strategy == "volbreak":
+        vb = VolBreakoutSettings(k=args.vb_k, min_amount=args.min_day_amount or 2e10, ma_filter=args.vb_ma,
+                                 stop_loss_pct=args.stop_loss, exit=args.vb_exit, min_range_pct=args.vb_min_range)
+        runner = lambda y0, y1: run_vol_breakout(data, y0, y1, settings, vb)  # noqa: E731
     elif args.strategy == "mapullback":
         mp = MaPullbackSettings(surge_pct=args.surge_pct, min_amount=args.min_day_amount or 2e11,
                                 first_in_days=args.first_in_days, ma_period=args.pullback_ma,

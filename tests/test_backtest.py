@@ -393,3 +393,16 @@ class NPatternTest(unittest.TestCase):
         self.assertFalse(n_pattern_signal(bars, 53, bb))  # 11,800 은 아직 고점 아래
         a.np_min_pull = 10  # 눌림 8.3% < 10%
         self.assertFalse(n_pattern_signal(bars, i_a, a))
+
+
+class VolBreakoutTest(unittest.TestCase):
+    def test_buys_at_target_sells_next_open(self):
+        from tossbot.backtest import VolBreakoutSettings, run_vol_breakout
+        days = weekdays(30)
+        bars = [Bar(d, 10_000, 10_200, 9_800, 10_000, 3_000_000) for d in days[:25]]  # 변동폭 400
+        bars.append(Bar(days[25], 10_000, 10_500, 9_950, 10_400, 3_000_000))  # 목표가 10,200 돌파
+        bars += [Bar(d, 10_600, 10_700, 10_500, 10_600, 3_000_000) for d in days[26:]]
+        s = BacktestSettings(slippage=0.0)
+        res = run_vol_breakout({"A": ("A", bars)}, days[25], days[26], s, VolBreakoutSettings(k=0.5, min_amount=1e10))
+        (t,) = res.trades
+        self.assertEqual((t.entry_date, t.entry_price, t.exit_date, t.exit_price), (days[25], 10_200, days[26], 10_600))

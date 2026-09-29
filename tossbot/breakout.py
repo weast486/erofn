@@ -34,7 +34,7 @@ class BreakoutParams:
     min_avg_trading_amount: float = 3_000_000_000  # 직전 20일 평균 거래대금 하한
     limit_up_ratio: float = 1.295  # 전일 종가 대비 이 비율 이상이면 상한가로 보고 제외
     max_price: float = 0  # 1주 가격 상한 (0 이면 종목당 예산)
-    min_price: float = 10_000  # 1주 가격 하한
+    min_price: float = 0  # 1주 가격 하한 (0 = 없음)
     skip_touched_limit_up: bool = True  # 장중 상한가를 찍고 내려온 종목 제외
 
     @property

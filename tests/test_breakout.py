@@ -52,7 +52,9 @@ class EvaluateTest(unittest.TestCase):
         pricey = [c * 20 for c in BASE]
         self.assertIn("100,000원 초과", self.ev(pricey, 216_000)[1])
         cheap = [c * 0.5 for c in BASE]
-        self.assertIn("10,000원 미만", self.ev(cheap, 5_400, volume=6_000_000)[1])
+        self.assertEqual(self.ev(cheap, 5_400, volume=6_000_000)[1], "")  # 기본값: 가격 하한 없음
+        floor = BreakoutParams(min_price=10_000)
+        self.assertIn("10,000원 미만", evaluate("A", "A", history(cheap), TODAY, 5_400, 6_000_000, floor)[1])
         self.assertEqual(self.ev([c * 9 for c in BASE], 97_200, volume=500_000)[1], "")  # 9만7천원 (10만원 이하)
 
     def test_touched_limit_up_rejected(self):
@@ -159,7 +161,7 @@ class BreakoutStrategyTest(unittest.TestCase):
         self.assertEqual(self.s.state.positions, {})
 
     def test_no_buy_while_kospi_below_prev_close(self):
-        self.assertEqual(self.cfg.market_filter, "kospi_not_down")
+        self.cfg.market_filter = "kospi_not_down"
         self.client.kospi_now = 2_990  # 코스피 하락 중 → 매수 금지
         self.tick(TODAY, 15, 10)
         self.assertEqual(self.s.state.positions, {})
@@ -169,7 +171,7 @@ class BreakoutStrategyTest(unittest.TestCase):
         self.assertIn("000010", self.s.state.positions)
 
     def test_market_filter_off(self):
-        self.cfg.market_filter = "none"
+        self.assertEqual(self.cfg.market_filter, "none")  # 기본값: 시장 필터 없음
         self.client.kospi_now = 2_900
         self.tick(TODAY, 15, 10)
         self.assertIn("000010", self.s.state.positions)

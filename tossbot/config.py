@@ -74,12 +74,12 @@ class Config:
     breakout_first_in_days: int = 20  # 직전 N거래일 안에 신고가가 없던 첫 신고가만
     min_day_amount: float = 20_000_000_000  # 당일 거래대금 하한 (200억)
     max_price: float = 0  # 1주 가격 상한 (0 = 종목당 예산까지)
-    min_price: float = 10_000  # 1주 가격 하한
+    min_price: float = 0  # 1주 가격 하한 (0 = 없음)
     skip_touched_limit_up: bool = True  # 장중 상한가를 찍고 내려온 종목 제외
     # 0 보다 크면 종목당 매수 금액 = 봇 평가금액(TOTAL_BUDGET + 실현손익 + 보유 평가손익) x N %. 0 이면 TOTAL_BUDGET / NUM_STOCKS 고정
     position_pct: float = 10.0
     # 시장 필터: kospi_down = 코스피가 전일 종가보다 낮을 때만 신규 매수, none = 필터 없음
-    market_filter: str = "kospi_not_down"
+    market_filter: str = "none"
     min_days_after_surge: int = 3  # 급등일로부터 N거래일째부터 매수 허용
     pullback_volume_ratio: float = 0.5  # 급등 이후 평균 거래량 <= 급등일 거래량 x N
     # 최대 보유 기간: 매수일로부터 N거래일째 TIME_EXIT_TIME 에 시장가 매도 (0 이면 제한 없음)

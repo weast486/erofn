@@ -1098,6 +1098,7 @@ class MaPullbackSettings:
     # both 거래대금·상승률 모두 1위인 종목만 (다르면 없음) / combo 두 순위 합이 가장 작은 종목 (같으면 거래대금 큰 쪽)
     pick: str = ""
     ma_exit_days: int = 0  # N > 0 이면 종가가 N일선 아래로 마감한 날 종가 매도 (매수 다음 날부터)
+    bear_min_ma: int = 0  # bear: N > 0 이면 첫 음봉 종가가 N일선(당일 종가 포함) 아래면 매수 안 함 (기준봉 폐기)
 
 
 def run_ma_pullback(
@@ -1192,6 +1193,9 @@ def run_ma_pullback(
                     continue
                 if bar.close >= prev.close * 1.295 or sym in positions or bar.close > budget:
                     continue
+                if m.bear_min_ma and (i + 1 < m.bear_min_ma or bar.close < (
+                        csum[sym][i + 1] - csum[sym][i + 1 - m.bear_min_ma]) / m.bear_min_ma):
+                    continue  # 첫 음봉이 이평선 이탈
                 signals.append((key, sym, bar.close, None, ser.bars[k].day))
                 continue
             level_raw = ma(sym, i - 1)
@@ -1695,6 +1699,8 @@ def main(argv: list[str] | None = None) -> None:
                    help="mapullback bear: 하락폭 기준 body = 시가 대비 / change = 전일 종가 대비")
     r.add_argument("--mp-pick", choices=["", "amount", "change", "both", "combo"], default="",
                    help="mapullback: 하루 기준봉 1종목만 (amount 거래대금 1위 / change 상승률 1위 / both 둘 다 1위 / combo 순위 합)")
+    r.add_argument("--bear-min-ma", type=int, default=0,
+                   help="mapullback bear: 첫 음봉 종가가 N일선 아래면 매수 안 함 (0 = 조건 없음)")
     r.add_argument("--no-above-ma", action="store_true", help="mapullback: 기준봉 종가 이평선 위 조건 끄기")
     r.add_argument("--pullback-ma", type=int, default=200, help="mapullback: 눌림 매수 이평선 기간")
     r.add_argument("--watch-days", type=int, default=10, help="retest: 기준봉 뒤 N거래일 안에 닿아야 매수")
@@ -1890,7 +1896,7 @@ def main(argv: list[str] | None = None) -> None:
                                 watch_days=args.watch_days, max_break_pct=args.max_break,
                                 stop_loss_pct=args.stop_loss if args.ma_exit else (args.stop_loss or 5.0),
                                 take_profit_pct=args.take_profit if args.ma_exit else (args.take_profit or 20.0),
-                                pick=args.mp_pick, ma_exit_days=args.ma_exit,
+                                pick=args.mp_pick, ma_exit_days=args.ma_exit, bear_min_ma=args.bear_min_ma,
                                 entry=args.mp_entry, bear_max_pct=args.bear_max, bear_measure=args.bear_measure,
                                 require_above_ma=not args.no_above_ma)
         runner = lambda y0, y1: run_ma_pullback(data, y0, y1, settings, mp)  # noqa: E731

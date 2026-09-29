@@ -339,3 +339,22 @@ class MaPullbackTest(unittest.TestCase):
                          [("B", days[21], days[23], "MA5_EXIT")])
         m.pick = "both"  # 거래대금 1위(A)와 상승률 1위(B)가 달라 매수 없음
         self.assertEqual(run_ma_pullback(data, days[0], days[-1], s, m).trades, [])
+
+    def test_bear_below_ma_skipped(self):
+        from tossbot.backtest import MaPullbackSettings, run_ma_pullback
+        days, d = [], date(2026, 1, 5)
+        while len(days) < 30:
+            if d.weekday() < 5:
+                days.append(d)
+            d += timedelta(days=1)
+        bars = [Bar(dy, 10_000, 10_100, 9_900, 10_000, 1_000_000) for dy in days[:20]]
+        bars.append(Bar(days[20], 10_000, 11_600, 10_000, 11_600, 1_000_000))  # 기준봉
+        bars.append(Bar(days[21], 11_600, 11_600, 10_000, 10_100, 1_000_000))  # 첫 음봉, 5일선(10340) 아래
+        bars += [Bar(dy, 10_100, 10_200, 10_000, 10_100, 1_000_000) for dy in days[22:]]
+        m = MaPullbackSettings(surge_pct=15, min_amount=1e9, first_in_days=10, entry="bear", bear_max_pct=100,
+                               require_above_ma=False, stop_loss_pct=0, take_profit_pct=0, ma_exit_days=5)
+        s = BacktestSettings(initial_cash=10_000_000)
+        s.params.slot_budget = 1_000_000
+        self.assertEqual(len(run_ma_pullback({"A": ("A", bars)}, days[0], days[-1], s, m).trades), 1)
+        m.bear_min_ma = 5
+        self.assertEqual(run_ma_pullback({"A": ("A", bars)}, days[0], days[-1], s, m).trades, [])

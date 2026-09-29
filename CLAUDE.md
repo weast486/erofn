@@ -42,6 +42,8 @@
 ## 진행 중인 작업 (다음 세션이 이어서)
 - **투자자별 순매수 분석 (2023·2024) 1차 완료** → `reports/investor_flow/결과.md`
   - 전일5일(D-5~D-1) 기관·외국인 **쌍끌이** 거래: 2023 +3.45% / 2024 +1.57% (전체 +1.46% / +0.18%), 둘 다 순매도는 2024 -1.46%. 필터 후보
-  - 다음: 쌍끌이 필터 백테스트 (빈자리 채움 효과 확인). 매수 후보 전체의 투자자 데이터 + 2025·2026 필요
+  - 진행 중: 쌍끌이 필터 백테스트 2023·2024. 매수 후보 1411건(`backtest --dump-signals`) → `input_candidates.csv` 커밋 →
+    사용자 PC `windows\investor_flow_candidates.bat` → `candidates_investor.csv` 받으면
+    추천 설정 + `--investor-filter reports/investor_flow/candidates_investor.csv` 로 백테스트해 기존(+28.8% / +4.7%)과 비교
   - 데이터는 토스 Open API `GET /api/v1/stocks/{symbol}/investor-trading` (순매수 주식 수 x 종가). 토스·KRX 모두 이 클라우드 환경에서 불가 →
     `scripts/investor_flow.py --prepare` 로 입력 파일 만들어 커밋 → 사용자 PC `E:\erofn_research`(git worktree)에서 `windows\investor_flow.bat` 실행 → 결과 CSV 업로드받음

@@ -362,6 +362,12 @@ class BreakoutSettings:
     # 신호가 많을 때 우선순위: amount(당일 거래대금) / change(당일 상승률) / strength(신고가 돌파폭) 큰 순,
     # weak(돌파폭 작은 순) / calm(당일 상승률 작은 순)
     rank_by: str = "amount"
+    # 투자자 순매수 필터: {(종목, 신호일): (기관, 외국인)} 매수 전 5거래일(D-5~D-1) 순매수 합.
+    # investor_mode "both" = 둘 다 순매수(쌍끌이)만 매수. 데이터 없는 신호는 매수 안 함
+    investor_flow: dict | None = None
+    investor_mode: str = ""
+    # 리스트를 주면 모든 필터를 통과한 신호 (종목, 신호일)를 기록 (보유 중인 종목도, 투자자 필터 전)
+    record_signals: list | None = None
 
 
 def run_breakout(
@@ -482,7 +488,8 @@ def run_breakout(
         if slots > 0 or b.entry_delay:
             signals = []
             for sym, ser in series.items():
-                if sym in positions or sym in b.exclude_symbols:
+                held = sym in positions
+                if sym in b.exclude_symbols or (held and b.record_signals is None):
                     continue
                 i = ser.index.get(day)
                 if i is None or i < max(b.entry_days, 20):
@@ -556,6 +563,14 @@ def run_breakout(
                 avg_amount = sum(x.close * x.volume for x in ser.bars[i - 20:i]) / 20
                 if avg_amount < b.min_avg_trading_amount:
                     continue
+                if b.record_signals is not None:
+                    b.record_signals.append((sym, day))
+                    if held:
+                        continue
+                if b.investor_mode:
+                    flow = (b.investor_flow or {}).get((sym, day))
+                    if flow is None or not (flow[0] > 0 and flow[1] > 0):
+                        continue
                 if b.rank_by == "amount":
                     key = bar.close * bar.volume
                 elif b.rank_by == "change":
@@ -1167,6 +1182,18 @@ def run_envelope(
 
 
 # -------------------------------------------------------------------- data
+def load_investor_flow(path: Path) -> dict[tuple[str, date], tuple[float, float]]:
+    """scripts/investor_flow.py 결과 CSV → {(종목, 매수일): (기관, 외국인)} 전일5일(D-5~D-1) 순매수 합."""
+    out = {}
+    with path.open(encoding="utf-8-sig") as f:
+        for row in csv.DictReader(f):
+            inst, frgn = row.get("전일5일_기관(억)", ""), row.get("전일5일_외국인(억)", "")
+            if inst in ("", "nan") or frgn in ("", "nan"):
+                continue
+            out[(row["종목코드"].zfill(6), date.fromisoformat(row["매수일"][:10]))] = (float(inst), float(frgn))
+    return out
+
+
 def load_cache(cache_dir: Path) -> dict[str, tuple[str, list[Bar]]]:
     names = {}
     names_file = cache_dir / "_names.csv"
@@ -1550,6 +1577,11 @@ def main(argv: list[str] | None = None) -> None:
                    help="breakout: 신호가 많을 때 우선순위 (거래대금 / 당일 상승률 / 신고가 돌파폭)")
     r.add_argument("--delay-max-rise", type=float, default=0, help="breakout: 대기 중 신고가 종가 대비 N%% 이상 상승 시 매수 취소")
     r.add_argument("--delay-hold-open", action="store_true", help="breakout: 대기 중 신고가 봉 시가 아래로 내려가면 매수 취소")
+    r.add_argument("--investor-filter", type=Path,
+                   help="breakout: 매수 전 5거래일 기관·외국인 모두 순매수(쌍끌이)인 신호만 매수. "
+                        "scripts/investor_flow.py --candidates 결과 CSV (없는 신호는 매수 안 함)")
+    r.add_argument("--dump-signals", type=Path,
+                   help="breakout: 모든 필터를 통과한 매수 후보 (종목, 신호일) 전체를 CSV 로 저장 (보유 종목 수 제한 없이)")
     r.add_argument("--delay-intraday", action="store_true", help="breakout: 대기 조건을 종가 대신 고가·저가로 판정")
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
@@ -1614,6 +1646,12 @@ def main(argv: list[str] | None = None) -> None:
                                   if line.strip() and not line.startswith("#")) if args.exclude_list else frozenset(),
                               ma_order=tuple(int(x) for x in args.ma_order.split(",")) if args.ma_order else (),
                               exclude_marcap=tuple(args.exclude_marcap) if args.exclude_marcap else None)
+        if args.investor_filter:
+            bs.investor_flow, bs.investor_mode = load_investor_flow(args.investor_filter), "both"
+            print(f"투자자 필터: 매수 전 5거래일 기관·외국인 쌍끌이만 (데이터 {len(bs.investor_flow)}건)")
+        if args.dump_signals:
+            bs.record_signals = []
+            settings.num_slots = 10**6  # 매일 후보 전체를 보려고 보유 종목 수 제한을 없앤다
         if args.min_marcap or args.exclude_marcap:
             bs.marcap = load_marcap(args.marcap_dir, "2023-01-01")
             print(f"시가총액 조건: 하한 {args.min_marcap / 1e8:,.0f}억, 제외 구간 {args.exclude_marcap}")
@@ -1653,6 +1691,15 @@ def main(argv: list[str] | None = None) -> None:
     else:
         results = [runner(date(y, 1, 1), min(date(y, 12, 31), last_day)) for y in args.years]
         print(f"종목 {len(data)}개, 연도마다 {settings.initial_cash:,.0f}원으로 새로 시작\n")
+    if args.dump_signals:
+        rows = sorted(set(bs.record_signals), key=lambda x: (x[1], x[0]))
+        args.dump_signals.parent.mkdir(parents=True, exist_ok=True)
+        with args.dump_signals.open("w", newline="", encoding="utf-8-sig") as f:
+            w = csv.writer(f)
+            w.writerow(["연도", "종목코드", "매수일"])
+            w.writerows([d.year, sym, d.isoformat()] for sym, d in rows)
+        print(f"매수 후보 {len(rows)}건 → {args.dump_signals}")
+        return
     print_report(results)
     print(f"\n거래 내역: {save_trades(results, args.out)}")
 

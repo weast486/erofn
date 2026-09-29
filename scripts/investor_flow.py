@@ -114,7 +114,7 @@ def classify(flow, buy_date):
             continue
         s = flow.iloc[i + a:i + b + 1][INVESTORS].sum()
         for inv in INVESTORS:
-            out[f"{name}_{LABEL[inv]}(억)"] = round(s[inv] / 1e8, 2)
+            out[f"{name}_{LABEL[inv]}(억)"] = round(s[inv] / 1e8, 4)
         out[f"{name}_주체"] = LABEL[s.idxmax()]
         out[f"{name}_쌍끌이"] = bool(s["기관합계"] > 0 and s["외국인합계"] > 0)
     return out
@@ -170,7 +170,7 @@ def summarize(df):
     return pd.DataFrame(parts)
 
 
-def prepare(trades, ohlcv_dir, out):
+def prepare(trades, ohlcv_dir, out, tag=""):
     """사용자 PC 용 입력 파일: 매매내역 + 매수일 전후 종가 (data/ 없이 실행 가능하게)."""
     rows = []
     for code, g in trades.groupby("종목코드"):
@@ -180,8 +180,8 @@ def prepare(trades, ohlcv_dir, out):
             rows += [{"종목코드": code, "date": i.strftime("%Y-%m-%d"), "close": v} for i, v in w.items()]
     closes = pd.DataFrame(rows).drop_duplicates(["종목코드", "date"]).sort_values(["종목코드", "date"])
     os.makedirs(out, exist_ok=True)
-    trades.to_csv(os.path.join(out, "input_trades.csv"), index=False, encoding="utf-8-sig")
-    closes.to_csv(os.path.join(out, "input_closes.csv"), index=False, encoding="utf-8-sig")
+    trades.to_csv(os.path.join(out, f"input_{tag or 'trades'}.csv"), index=False, encoding="utf-8-sig")
+    closes.to_csv(os.path.join(out, f"input_closes{'_' + tag if tag else ''}.csv"), index=False, encoding="utf-8-sig")
     print(f"입력 파일 준비: 거래 {len(trades)}건, 종가 {len(closes)}행 → {out}")
 
 
@@ -200,23 +200,27 @@ def main(argv=None):
     p.add_argument("--out", default="reports/investor_flow")
     p.add_argument("--prepare", action="store_true", help="입력 파일만 만든다 (클라우드 세션용)")
     p.add_argument("--env", default=None, help="토스 키가 든 .env 경로 (기본: 이 폴더의 .env)")
+    p.add_argument("--candidates", action="store_true",
+                   help="매수 거래 대신 매수 후보 전체 (backtest --dump-signals 결과) → candidates_investor.csv "
+                        "(backtest --investor-filter 입력)")
     p.add_argument("--limit", type=int, default=0, help="앞에서 N건만 (시험용)")
     a = p.parse_args(argv)
     if a.env:
         a.env = os.path.abspath(a.env)
     os.chdir(ROOT)
-    input_trades = os.path.join(a.out, "input_trades.csv")
-    path = a.trades or (input_trades if os.path.exists(input_trades) and not a.prepare
-                        else "backtest_results/trades.csv")
+    tag = "candidates" if a.candidates else ""
+    input_trades = os.path.join(a.out, f"input_{tag or 'trades'}.csv")
+    raw = os.path.join(a.out, "candidates_signals.csv") if a.candidates else "backtest_results/trades.csv"
+    path = a.trades or (input_trades if os.path.exists(input_trades) and not a.prepare else raw)
     trades = pd.read_csv(path, dtype={"종목코드": str})
     trades = trades[trades["연도"].isin(a.years)]
     if a.limit:
         trades = trades.head(a.limit)
     if a.prepare:
-        prepare(trades, a.ohlcv, a.out)
+        prepare(trades, a.ohlcv, a.out, tag)
         return
     if a.source == "toss":
-        closes = read_closes(os.path.join(a.out, "input_closes.csv"))
+        closes = read_closes(os.path.join(a.out, f"input_closes{'_' + tag if tag else ''}.csv"))
         df = analyze_toss(trades, closes, a.cache, env_path=a.env)
     else:
         if not (os.environ.get("KRX_ID") and os.environ.get("KRX_PW")):
@@ -224,6 +228,12 @@ def main(argv=None):
         df = analyze(trades, a.cache)
     missing = df["포함5일_주체"].isna().sum() if "포함5일_주체" in df else len(df)
     os.makedirs(a.out, exist_ok=True)
+    if a.candidates:
+        df.to_csv(os.path.join(a.out, "candidates_investor.csv"), index=False, encoding="utf-8-sig")
+        both = df["전일5일_쌍끌이"].fillna(False).astype(bool).sum() if "전일5일_쌍끌이" in df else 0
+        print(f"매수 후보 {len(df)}건, 데이터 없음 {missing}건, 전일5일 쌍끌이 {both}건")
+        print("완료: reports/investor_flow/candidates_investor.csv")
+        return
     df.to_csv(os.path.join(a.out, "trades_investor.csv"), index=False, encoding="utf-8-sig")
     summ = summarize(df)
     summ.to_csv(os.path.join(a.out, "summary.csv"), index=False, encoding="utf-8-sig")

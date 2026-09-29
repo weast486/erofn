@@ -119,6 +119,24 @@ class BreakoutEngineTest(unittest.TestCase):
         (t,) = res.trades
         self.assertEqual((t.reason, t.exit_price), ("STOP_LOSS", round_down_to_tick(10_500 * 0.953)))
 
+    def test_breakout_investor_filter_and_signal_dump(self):
+        from tossbot.backtest import BreakoutSettings, run_breakout
+
+        days = weekdays(40)
+        closes = [10_000] * 30 + [10_500, 10_400]
+        bars = [Bar(d, c, c * 1.01, c * 0.99, c, 1_000_000) for d, c in zip(days, closes)]
+        run = lambda b: run_breakout({"000010": ("테스트", bars)}, date(2023, 11, 1), date(2024, 3, 31),  # noqa: E731
+                                     BacktestSettings(slippage=0.0), b)
+        key = ("000010", days[30])
+        self.assertEqual(len(run(BreakoutSettings()).trades), 1)
+        # 쌍끌이(기관·외국인 모두 순매수)만 매수, 데이터 없으면 매수 안 함
+        self.assertEqual(len(run(BreakoutSettings(investor_flow={key: (1.0, 2.0)}, investor_mode="both")).trades), 1)
+        self.assertEqual(len(run(BreakoutSettings(investor_flow={key: (1.0, -2.0)}, investor_mode="both")).trades), 0)
+        self.assertEqual(len(run(BreakoutSettings(investor_flow={}, investor_mode="both")).trades), 0)
+        rec = []
+        run(BreakoutSettings(record_signals=rec))
+        self.assertEqual(rec, [key])
+
     def test_breakout_skips_limit_up_close(self):
         from tossbot.backtest import BreakoutSettings, run_breakout
 

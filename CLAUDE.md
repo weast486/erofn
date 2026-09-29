@@ -33,17 +33,10 @@
 - 급등주 매매(당일/3·5·7일 뒤/20·50일선 눌림/전고점 되돌림)는 모두 손실. 전고점 되돌림은 기준봉 +5~10%·첫 신고가일 때만 소폭 이익
 - 시가총액 1조 이상: 수익은 낮지만 해마다 안정적 (안정형 후보)
 - 엔벨로프(20일, -20%) 하단 ±2% 근접 종가 매수 → 익일 종가 매도: 거래당 +0.8%, 4년 +24.6%(1000만원), 손절·익절로 바꾸면 낙폭 악화
+- 투자자별 순매수(토스 API, 매수 전 5일 기관·외국인): 산 종목 중 쌍끌이는 좋았지만 필터(쌍끌이만/먼저/둘다 순매도 제외/외국인·기관만)로 걸면 2023·2024 모두 악화 → `reports/investor_flow/결과.md`.
+  데이터는 클라우드에서 못 받음 → `scripts/investor_flow.py --prepare` 입력 커밋 → 사용자 PC `E:\erofn_research`(git worktree)에서 `windows\investor_flow*.bat` 실행 → CSV 업로드
 - 주의: 조건을 빼면 빈자리를 다른 신호가 채워 구간 분석과 실제 결과가 자주 다르다. 새 규칙은 **주변 값·연도별 방향**까지 확인하고 판단.
 
 ## 작업 규칙
 - 커밋·푸시는 지정된 작업 브랜치에만. 새 백테스트 옵션은 `backtest.py` 에 옵션으로 추가하고 `python -m unittest discover -s tests` 통과 확인
 - API 키·`.env` 내용은 채팅에 받지 않는다
-
-## 진행 중인 작업 (다음 세션이 이어서)
-- **투자자별 순매수 분석 (2023·2024) 1차 완료** → `reports/investor_flow/결과.md`
-  - 전일5일(D-5~D-1) 기관·외국인 **쌍끌이** 거래: 2023 +3.45% / 2024 +1.57% (전체 +1.46% / +0.18%), 둘 다 순매도는 2024 -1.46%. 필터 후보
-  - 진행 중: 쌍끌이 필터 백테스트 2023·2024. 매수 후보 1411건(`backtest --dump-signals`) → `input_candidates.csv` 커밋 →
-    사용자 PC `windows\investor_flow_candidates.bat` → `candidates_investor.csv` 받으면
-    추천 설정 + `--investor-filter reports/investor_flow/candidates_investor.csv` 로 백테스트해 기존(+28.8% / +4.7%)과 비교
-  - 데이터는 토스 Open API `GET /api/v1/stocks/{symbol}/investor-trading` (순매수 주식 수 x 종가). 토스·KRX 모두 이 클라우드 환경에서 불가 →
-    `scripts/investor_flow.py --prepare` 로 입력 파일 만들어 커밋 → 사용자 PC `E:\erofn_research`(git worktree)에서 `windows\investor_flow.bat` 실행 → 결과 CSV 업로드받음

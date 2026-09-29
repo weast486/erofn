@@ -363,7 +363,8 @@ class BreakoutSettings:
     # weak(돌파폭 작은 순) / calm(당일 상승률 작은 순)
     rank_by: str = "amount"
     # 투자자 순매수 필터: {(종목, 신호일): (기관, 외국인)} 매수 전 5거래일(D-5~D-1) 순매수 합.
-    # investor_mode "both" = 둘 다 순매수(쌍끌이)만 매수. 데이터 없는 신호는 매수 안 함
+    # investor_mode "both" = 둘 다 순매수(쌍끌이)만 매수 (데이터 없는 신호는 매수 안 함),
+    # "rank" = 모두 매수 후보로 두고 쌍끌이를 먼저 매수
     investor_flow: dict | None = None
     investor_mode: str = ""
     # 리스트를 주면 모든 필터를 통과한 신호 (종목, 신호일)를 기록 (보유 중인 종목도, 투자자 필터 전)
@@ -567,9 +568,11 @@ def run_breakout(
                     b.record_signals.append((sym, day))
                     if held:
                         continue
+                both_buy = False
                 if b.investor_mode:
                     flow = (b.investor_flow or {}).get((sym, day))
-                    if flow is None or not (flow[0] > 0 and flow[1] > 0):
+                    both_buy = flow is not None and flow[0] > 0 and flow[1] > 0
+                    if b.investor_mode == "both" and not both_buy:
                         continue
                 if b.rank_by == "amount":
                     key = bar.close * bar.volume
@@ -581,6 +584,8 @@ def run_breakout(
                     key = -bar.close / prev_high  # 신고가를 살짝 넘은 순
                 else:
                     key = bar.close / prev_high
+                if b.investor_mode == "rank":
+                    key = (both_buy, key)
                 if b.entry_delay:
                     pending.append((sym, i + b.entry_delay, key, day))
                 else:
@@ -1580,6 +1585,8 @@ def main(argv: list[str] | None = None) -> None:
     r.add_argument("--investor-filter", type=Path,
                    help="breakout: 매수 전 5거래일 기관·외국인 모두 순매수(쌍끌이)인 신호만 매수. "
                         "scripts/investor_flow.py --candidates 결과 CSV (없는 신호는 매수 안 함)")
+    r.add_argument("--investor-mode", choices=["both", "rank"], default="both",
+                   help="--investor-filter 사용 방식: both = 쌍끌이만 매수, rank = 모두 후보로 두고 쌍끌이 먼저")
     r.add_argument("--dump-signals", type=Path,
                    help="breakout: 모든 필터를 통과한 매수 후보 (종목, 신호일) 전체를 CSV 로 저장 (보유 종목 수 제한 없이)")
     r.add_argument("--delay-intraday", action="store_true", help="breakout: 대기 조건을 종가 대신 고가·저가로 판정")
@@ -1647,8 +1654,9 @@ def main(argv: list[str] | None = None) -> None:
                               ma_order=tuple(int(x) for x in args.ma_order.split(",")) if args.ma_order else (),
                               exclude_marcap=tuple(args.exclude_marcap) if args.exclude_marcap else None)
         if args.investor_filter:
-            bs.investor_flow, bs.investor_mode = load_investor_flow(args.investor_filter), "both"
-            print(f"투자자 필터: 매수 전 5거래일 기관·외국인 쌍끌이만 (데이터 {len(bs.investor_flow)}건)")
+            bs.investor_flow, bs.investor_mode = load_investor_flow(args.investor_filter), args.investor_mode
+            how = "만 매수" if args.investor_mode == "both" else " 먼저 매수"
+            print(f"투자자 필터: 매수 전 5거래일 기관·외국인 쌍끌이{how} (데이터 {len(bs.investor_flow)}건)")
         if args.dump_signals:
             bs.record_signals = []
             settings.num_slots = 10**6  # 매일 후보 전체를 보려고 보유 종목 수 제한을 없앤다

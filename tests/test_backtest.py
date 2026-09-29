@@ -133,6 +133,8 @@ class BreakoutEngineTest(unittest.TestCase):
         self.assertEqual(len(run(BreakoutSettings(investor_flow={key: (1.0, 2.0)}, investor_mode="both")).trades), 1)
         self.assertEqual(len(run(BreakoutSettings(investor_flow={key: (1.0, -2.0)}, investor_mode="both")).trades), 0)
         self.assertEqual(len(run(BreakoutSettings(investor_flow={}, investor_mode="both")).trades), 0)
+        # rank: 쌍끌이가 아니어도 매수 (우선순위만 뒤로)
+        self.assertEqual(len(run(BreakoutSettings(investor_flow={}, investor_mode="rank")).trades), 1)
         rec = []
         run(BreakoutSettings(record_signals=rec))
         self.assertEqual(rec, [key])

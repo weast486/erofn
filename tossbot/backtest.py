@@ -336,6 +336,10 @@ class BreakoutSettings:
     position_pct: float = 0.0
     # True 면 계단식: 종목당 금액 = max(slot_budget, 평가금액 10만원 단위 내림 x 10%). 110만원 → 11만원, 120만원 → 12만원
     step_sizing: bool = False
+    # position_pct 와 함께: N > 0 이면 최소 N주를 사되 종목당 평가금액의 max_position_pct % 까지.
+    # 1주 가격 상한도 평가금액 x max_position_pct / N 으로 바뀜 (예: 2주, 20% → 1주 가격 <= 평가금액의 10%)
+    min_shares: int = 0
+    max_position_pct: float = 0.0
     exclude_symbols: frozenset = frozenset()  # 매수 제외 종목코드 (예: 제약·바이오)
     breakeven_lock_pct: float = 0.0  # 올린 손절가 = 매수가 x (1 + 이 %). 0 이면 본전
     # False 면 신고가 조건 없이 매수 (급등주 매매: min_change_pct 와 함께 사용)
@@ -458,6 +462,10 @@ def run_breakout(
 
         # 2) 매수: 종가 신고가
         slots = s.num_slots - len(positions)
+        price_cap = budget
+        if b.min_shares and b.position_pct:
+            eq = cash + sum(p.qty * last_close.get(ps, p.entry_price) for ps, p in positions.items())
+            price_cap = eq * b.max_position_pct / 100 / b.min_shares
         if slots > 0 or b.entry_delay:
             signals = []
             for sym, ser in series.items():
@@ -474,7 +482,7 @@ def run_breakout(
                     continue  # 최근 N거래일 안에 이미 신고가가 있었음 → 첫 신고가 아님
                 bar = ser.bars[i]
                 prev_high = max(x.close for x in ser.bars[i - b.entry_days:i])
-                if bar.close > budget or (b.max_price and bar.close > b.max_price) or bar.close < b.min_price:
+                if bar.close > price_cap or (b.max_price and bar.close > b.max_price) or bar.close < b.min_price:
                     continue
                 # 대기 후 매수(entry_delay)면 신호일 상한가도 매수 가능하므로 skip_limit_up 을 끌 수 있다
                 if b.skip_limit_up and bar.close >= ser.bars[i - 1].close * 1.295:
@@ -593,7 +601,11 @@ def run_breakout(
                         pos_budget = max(budget, (equity_now // 100_000) * 10_000)
                     else:
                         pos_budget = equity_now * b.position_pct / 100
-                qty = int(pos_budget // round_up_to_tick(bar.close * (1 + BUY_LIMIT_SLIPPAGE)))
+                unit = round_up_to_tick(bar.close * (1 + BUY_LIMIT_SLIPPAGE))
+                qty = int(pos_budget // unit)
+                if (b.min_shares and b.position_pct and qty < b.min_shares
+                        and unit * b.min_shares <= equity_now * b.max_position_pct / 100):
+                    qty = b.min_shares
                 cost = qty * price * (1 + s.commission)
                 if qty <= 0 or cost > cash:
                     continue
@@ -1352,6 +1364,10 @@ def main(argv: list[str] | None = None) -> None:
                    help="breakout: 종목당 매수 금액 = 현재 평가금액의 N%% (복리, 0 = 종목당 예산 고정)")
     r.add_argument("--step-sizing", action="store_true",
                    help="breakout: 평가금액 10만원 늘 때마다 종목당 1만원씩 증액 (110만원 → 11만원, 최소 종목당 예산)")
+    r.add_argument("--min-shares", type=int, default=0,
+                   help="breakout: 최소 N주 매수 (--position-pct, --max-position-pct 와 함께)")
+    r.add_argument("--max-position-pct", type=float, default=20,
+                   help="breakout: --min-shares 사용 시 종목당 평가금액 상한 %%")
     r.add_argument("--continuous", action="store_true",
                    help="연도마다 새로 시작하지 않고 첫 해 1월 1일부터 끝까지 한 번에 (복리 확인용)")
     r.add_argument("--lock-profit", type=float, default=0,
@@ -1429,6 +1445,7 @@ def main(argv: list[str] | None = None) -> None:
                               buy_day_min_wick_ratio=args.buy_day_wick, recover_after_drop_pct=args.recover_after_drop,
                               stop_limit=args.stop_limit, exclude_high_days=args.exclude_high_days,
                               position_pct=args.position_pct, step_sizing=args.step_sizing,
+                              min_shares=args.min_shares, max_position_pct=args.max_position_pct,
                               max_breakout_pct=args.max_breakout, breakout_basis=args.breakout_basis,
                               low_rise_days=int(args.max_rise_from_low[0]) if args.max_rise_from_low else 0,
                               max_rise_from_low_pct=args.max_rise_from_low[1] if args.max_rise_from_low else 0.0,

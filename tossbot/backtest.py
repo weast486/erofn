@@ -1088,6 +1088,12 @@ class MaPullbackSettings:
     max_break_pct: float = 3.0  # 시가가 이평선보다 이 % 넘게 아래서 시작하면 매수 취소
     stop_loss_pct: float = 5.0
     take_profit_pct: float = 20.0
+    # 매수 방식: ma = 이평선 눌림 지정가 / bear = 기준봉 뒤 첫 음봉(종가 < 시가) 종가 매수
+    entry: str = "ma"
+    # bear: 첫 음봉 하락폭이 이 % 이내일 때만 매수 (넘으면 기준봉 폐기). body = 시가 대비, change = 전일 종가 대비
+    bear_max_pct: float = 3.0
+    bear_measure: str = "body"
+    require_above_ma: bool = True  # False 면 기준봉 종가의 이평선 위 조건 없음
 
 
 def run_ma_pullback(
@@ -1168,6 +1174,18 @@ def run_ma_pullback(
             if i - k > m.watch_days:
                 del watch[sym]
                 continue
+            if m.entry == "bear":
+                bar, prev = ser.bars[i], ser.bars[i - 1]
+                if bar.close >= bar.open:
+                    continue  # 음봉 아님
+                del watch[sym]  # 첫 음봉에서만 판단
+                base = bar.open if m.bear_measure == "body" else prev.close
+                if (1 - bar.close / base) * 100 > m.bear_max_pct + 1e-9:
+                    continue
+                if bar.close >= prev.close * 1.295 or sym in positions or bar.close > budget:
+                    continue
+                signals.append((key, sym, bar.close, None, ser.bars[k].day))
+                continue
             level_raw = ma(sym, i - 1)
             if level_raw is None:
                 continue
@@ -1196,7 +1214,7 @@ def run_ma_pullback(
             t = Trade(sym, series[sym].name, day, price, qty, surge_date=surge_day)
             positions[sym] = t
             trades.append(t)
-            if bar.low <= stop_of(price):
+            if bar is not None and bar.low <= stop_of(price):
                 close_position(t, day, stop_of(price) * (1 - s.slippage), "STOP_LOSS")
 
         # 3) 오늘 종가로 새 기준봉 등록
@@ -1206,9 +1224,10 @@ def run_ma_pullback(
                 continue
             if m.first_in_days and (i < m.first_in_days or any(surge_flags[sym][i - m.first_in_days:i])):
                 continue  # 최근 N거래일 안에 이미 기준봉이 있었음
-            level = ma(sym, i)
-            if level is None or ser.bars[i].close <= level:
-                continue  # 종가가 이평선 위가 아님 (또는 이력 부족)
+            if m.require_above_ma:
+                level = ma(sym, i)
+                if level is None or ser.bars[i].close <= level:
+                    continue  # 종가가 이평선 위가 아님 (또는 이력 부족)
             watch[sym] = (i, ser.bars[i].close * ser.bars[i].volume)
 
         # 4) 평가
@@ -1644,6 +1663,12 @@ def main(argv: list[str] | None = None) -> None:
     r.add_argument("--surge-max-pct", type=float, default=0, help="retest: 기준봉 상승률 상한 %% (0 = 없음)")
     r.add_argument("--retest-level", choices=["high", "close"], default="high",
                    help="retest: 이전 고점 = 직전 N일 장중 고가 최고값(high) / 종가 최고값(close)")
+    r.add_argument("--mp-entry", choices=["ma", "bear"], default="ma",
+                   help="mapullback: ma = 이평선 눌림 지정가 매수 / bear = 기준봉 뒤 첫 음봉 종가 매수")
+    r.add_argument("--bear-max", type=float, default=3.0, help="mapullback bear: 첫 음봉 하락폭 N%% 이내만 매수")
+    r.add_argument("--bear-measure", choices=["body", "change"], default="body",
+                   help="mapullback bear: 하락폭 기준 body = 시가 대비 / change = 전일 종가 대비")
+    r.add_argument("--no-above-ma", action="store_true", help="mapullback: 기준봉 종가 이평선 위 조건 끄기")
     r.add_argument("--pullback-ma", type=int, default=200, help="mapullback: 눌림 매수 이평선 기간")
     r.add_argument("--watch-days", type=int, default=10, help="retest: 기준봉 뒤 N거래일 안에 닿아야 매수")
     r.add_argument("--max-break", type=float, default=3.0, help="retest: 시가가 매수가보다 N%% 넘게 낮으면 매수 취소")
@@ -1836,7 +1861,9 @@ def main(argv: list[str] | None = None) -> None:
         mp = MaPullbackSettings(surge_pct=args.surge_pct, min_amount=args.min_day_amount or 2e11,
                                 first_in_days=args.first_in_days, ma_period=args.pullback_ma,
                                 watch_days=args.watch_days, max_break_pct=args.max_break,
-                                stop_loss_pct=args.stop_loss or 5.0, take_profit_pct=args.take_profit or 20.0)
+                                stop_loss_pct=args.stop_loss or 5.0, take_profit_pct=args.take_profit or 20.0,
+                                entry=args.mp_entry, bear_max_pct=args.bear_max, bear_measure=args.bear_measure,
+                                require_above_ma=not args.no_above_ma)
         runner = lambda y0, y1: run_ma_pullback(data, y0, y1, settings, mp)  # noqa: E731
     elif args.strategy == "surgedoji":
         sd = SurgeDojiSettings(stop_loss_pct=settings.stop_loss_pct, take_profit_pct=settings.take_profit_pct,

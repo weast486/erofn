@@ -290,3 +290,24 @@ class MaPullbackTest(unittest.TestCase):
         t = res.trades[0]
         self.assertEqual(t.entry_date, days[24])
         self.assertLess(t.entry_price, 10_600)
+
+    def test_first_bear_candle_entry(self):
+        from tossbot.backtest import MaPullbackSettings, run_ma_pullback
+        days, d = [], date(2026, 1, 5)
+        while len(days) < 30:
+            if d.weekday() < 5:
+                days.append(d)
+            d += timedelta(days=1)
+        bars = [Bar(dy, 10_000, 10_100, 9_900, 10_000, 1_000_000) for dy in days[:20]]
+        bars.append(Bar(days[20], 10_000, 11_100, 10_000, 11_000, 1_000_000))  # 기준봉 +10%
+        bars.append(Bar(days[21], 11_000, 11_500, 10_900, 11_400, 1_000_000))  # 양봉
+        bars.append(Bar(days[22], 11_400, 11_500, 11_000, 11_100, 1_000_000))  # 첫 음봉 -2.6%
+        bars += [Bar(dy, 11_100, 11_200, 11_000, 11_100, 1_000_000) for dy in days[23:]]
+        m = MaPullbackSettings(surge_pct=10, min_amount=1e9, first_in_days=10, entry="bear",
+                               require_above_ma=False, stop_loss_pct=5, take_profit_pct=15)
+        s = BacktestSettings(initial_cash=10_000_000)
+        s.params.slot_budget = 1_000_000
+        res = run_ma_pullback({"A": ("A", bars)}, days[0], days[-1], s, m)
+        self.assertEqual([t.entry_date for t in res.trades], [days[22]])
+        m.bear_max_pct = 2.0  # 첫 음봉이 2% 넘게 빠짐 → 매수 안 함
+        self.assertEqual(run_ma_pullback({"A": ("A", bars)}, days[0], days[-1], s, m).trades, [])

@@ -372,6 +372,8 @@ class BreakoutSettings:
     rank_by: str = "amount"
     # N > 0 이면 신호 당일 거래대금 순위(전체 종목 중) N위 이내 종목만
     max_amount_rank: int = 0
+    # N > 0 이면 N일선 돌파일만: 전일 종가 <= 전일 N일선, 당일 종가 > 당일 N일선
+    cross_ma: int = 0
 
 
 def kelly_fraction(rets: list[float]) -> float:
@@ -525,6 +527,14 @@ def run_breakout(
                     continue
                 if b.max_amount_rank and amount_ranks.get(day, {}).get(sym, 10**9) > b.max_amount_rank:
                     continue
+                if b.cross_ma:
+                    n = b.cross_ma
+                    if i < n:
+                        continue
+                    ma_today = sum(x.close for x in ser.bars[i + 1 - n:i + 1]) / n
+                    ma_prev = sum(x.close for x in ser.bars[i - n:i]) / n
+                    if not (ser.bars[i - 1].close <= ma_prev and ser.bars[i].close > ma_today):
+                        continue
                 if b.first_in_days and (i < b.first_in_days or any(is_high[sym][i - b.first_in_days:i])):
                     continue  # 최근 N거래일 안에 이미 신고가가 있었음 → 첫 신고가 아님
                 bar = ser.bars[i]
@@ -1796,6 +1806,8 @@ def main(argv: list[str] | None = None) -> None:
                    help="breakout: 코스피 종가가 N거래일 전보다 높은 날에만 매수 (0 = 필터 없음)")
     r.add_argument("--slot-budget", type=float, default=0,
                    help="종목당 매수 금액·1주 가격 상한 (원). 시작 자금 = 이 값 x 최대 종목 수 (0 = .env 설정)")
+    r.add_argument("--cross-ma", type=int, default=0,
+                   help="breakout: N일선 돌파일만 (전일 종가 <= N일선, 당일 종가 > N일선, 0 = 없음)")
     r.add_argument("--max-amount-rank", type=int, default=0,
                    help="breakout: 신호 당일 거래대금 순위 N위 이내 종목만 (0 = 없음)")
     r.add_argument("--rank-by", choices=["amount", "change", "strength", "weak", "calm"], default="amount",
@@ -1839,7 +1851,7 @@ def main(argv: list[str] | None = None) -> None:
         bs = BreakoutSettings(args.entry_days, args.exit_days, args.stop_loss, args.take_profit,
                               exit_on_low=not args.no_exit_on_low, max_hold_days=args.max_hold,
                               first_in_days=args.first_in_days, min_day_amount=args.min_day_amount,
-                              entry_delay=args.entry_delay, delay_max_rise_pct=args.delay_max_rise, rank_by=args.rank_by, max_amount_rank=args.max_amount_rank,
+                              entry_delay=args.entry_delay, delay_max_rise_pct=args.delay_max_rise, rank_by=args.rank_by, max_amount_rank=args.max_amount_rank, cross_ma=args.cross_ma,
                               delay_hold_signal_open=args.delay_hold_open, delay_intraday=args.delay_intraday,
                               min_avg_trading_amount=settings.params.min_avg_trading_amount,
                               min_candle_pct=args.min_candle, candle_measure=args.candle_measure,

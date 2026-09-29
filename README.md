@@ -69,6 +69,8 @@ python -m tossbot status     # 보유 종목·손절/익절가·매매 이력·�
 python -m tossbot liquidate  # 비상시 조건주문 취소 후 봇 보유 종목 전량 시장가 매도
 ```
 
+**Windows 바로가기**: `windows\make_shortcuts.bat`를 한 번 더블클릭하면 바탕화면에 "토스봇 실행 / 상태확인 / 설정확인" 바로가기가 생깁니다. "토스봇 실행"은 `git pull`로 최신 코드를 받은 뒤 봇을 켭니다(`.venv`가 있으면 그 파이썬 사용).
+
 `run`은 계속 실행되는 프로세스입니다. 서버에서는 `nohup`, `tmux`, systemd 등으로 띄워 두세요.
 실거래 전환은 `.env`에서 `DRY_RUN=false`로 바꾸면 됩니다.
 

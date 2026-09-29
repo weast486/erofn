@@ -359,6 +359,7 @@ class BreakoutSettings:
     max_day_amount: float = 0.0
     # 0 보다 크면 신호 당일 거래량이 전일 거래량의 이 배 이상인 종목만 (예: 2 = 전일 대비 2배)
     min_volume_ratio: float = 0.0
+    max_volume_ratio: float = 0.0  # 0 보다 크면 신호 당일 거래량이 전일의 이 배 미만인 종목만 (예: 1 = 전일보다 적음)
     # 0 보다 크면 신고가 날 시가 갭(시가 / 전일 종가 - 1)이 이 % 이하인 종목만 매수
     max_gap_pct: float = 0.0
     # 신호가 많을 때 우선순위: amount(당일 거래대금) / change(당일 상승률) / strength(신고가 돌파폭) 큰 순,
@@ -540,6 +541,8 @@ def run_breakout(
                 if b.max_day_amount and bar.close * bar.volume > b.max_day_amount:
                     continue
                 if b.min_volume_ratio and bar.volume < ser.bars[i - 1].volume * b.min_volume_ratio:
+                    continue
+                if b.max_volume_ratio and bar.volume >= ser.bars[i - 1].volume * b.max_volume_ratio:
                     continue
                 if b.max_gap_pct and (bar.open / ser.bars[i - 1].close - 1) * 100 > b.max_gap_pct + 1e-9:
                     continue
@@ -1539,6 +1542,8 @@ def main(argv: list[str] | None = None) -> None:
     r.add_argument("--max-day-amount", type=float, default=0, help="breakout: 신호 당일 거래대금 상한 (원, 0 = 없음)")
     r.add_argument("--min-volume-ratio", type=float, default=0,
                    help="breakout: 신호 당일 거래량이 전일의 N배 이상인 종목만 (0 = 없음)")
+    r.add_argument("--max-volume-ratio", type=float, default=0,
+                   help="breakout: 신호 당일 거래량이 전일의 N배 미만인 종목만 (0 = 없음)")
     r.add_argument("--entry-delay", type=int, default=0, help="breakout: 신고가 신호 N거래일 뒤 종가에 매수")
     r.add_argument("--min-candle", type=float, default=0, help="breakout: 신고가 봉 길이 하한 %%")
     r.add_argument("--candle-measure", choices=["body", "range"], default="body",
@@ -1595,7 +1600,7 @@ def main(argv: list[str] | None = None) -> None:
                               min_avg_trading_amount=settings.params.min_avg_trading_amount,
                               min_candle_pct=args.min_candle, candle_measure=args.candle_measure,
                               max_gap_pct=args.max_gap, max_day_amount=args.max_day_amount,
-                              min_volume_ratio=args.min_volume_ratio,
+                              min_volume_ratio=args.min_volume_ratio, max_volume_ratio=args.max_volume_ratio,
                               max_price=args.max_price, min_price=args.min_price,
                               require_new_high=not args.no_new_high, min_change_pct=args.min_change,
                               skip_limit_up=not args.allow_limit_up_signal,

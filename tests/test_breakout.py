@@ -85,6 +85,10 @@ class EvaluateTest(unittest.TestCase):
         self.assertEqual(len(run(0).trades), 1)
         self.assertEqual(len(run(1.5).trades), 1)
         self.assertEqual(len(run(2).trades), 0)
+        run_max = lambda r: run_breakout({"000010": ("A", bars)}, TODAY, TODAY, BacktestSettings(),  # noqa: E731
+                                         BreakoutSettings(first_in_days=20, min_day_amount=2e10, max_volume_ratio=r))
+        self.assertEqual(len(run_max(1.5).trades), 0)
+        self.assertEqual(len(run_max(2).trades), 1)
 
 
 class FakeClient:

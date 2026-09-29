@@ -1094,6 +1094,10 @@ class MaPullbackSettings:
     bear_max_pct: float = 3.0
     bear_measure: str = "body"
     require_above_ma: bool = True  # False 면 기준봉 종가의 이평선 위 조건 없음
+    # 하루에 기준봉이 여럿이면 1종목만 감시: "" 모두 / amount 거래대금 1위 / change 상승률 1위 /
+    # both 거래대금·상승률 모두 1위인 종목만 (다르면 없음) / combo 두 순위 합이 가장 작은 종목 (같으면 거래대금 큰 쪽)
+    pick: str = ""
+    ma_exit_days: int = 0  # N > 0 이면 종가가 N일선 아래로 마감한 날 종가 매도 (매수 다음 날부터)
 
 
 def run_ma_pullback(
@@ -1154,15 +1158,19 @@ def run_ma_pullback(
             if i is None or t.entry_date == day:
                 continue
             bar = ser.bars[i]
-            stop, tp = stop_of(t.entry_price), round_up_to_tick(t.entry_price * (1 + m.take_profit_pct / 100))
-            if bar.open <= stop:
+            stop = stop_of(t.entry_price) if m.stop_loss_pct > 0 else None
+            tp = round_up_to_tick(t.entry_price * (1 + m.take_profit_pct / 100)) if m.take_profit_pct > 0 else None
+            if stop and bar.open <= stop:
                 close_position(t, day, bar.open * (1 - s.slippage), "STOP_LOSS")
-            elif bar.open >= tp:
+            elif tp and bar.open >= tp:
                 close_position(t, day, bar.open, "TAKE_PROFIT")
-            elif bar.low <= stop:
+            elif stop and bar.low <= stop:
                 close_position(t, day, stop * (1 - s.slippage), "STOP_LOSS")
-            elif bar.high >= tp:
+            elif tp and bar.high >= tp:
                 close_position(t, day, tp, "TAKE_PROFIT")
+            elif m.ma_exit_days and i + 1 >= m.ma_exit_days and bar.close < (
+                    csum[sym][i + 1] - csum[sym][i + 1 - m.ma_exit_days]) / m.ma_exit_days:
+                close_position(t, day, bar.close * (1 - s.slippage), f"MA{m.ma_exit_days}_EXIT")
 
         # 2) 대기 중인 기준봉이 이평선에 닿으면 매수
         signals = []
@@ -1214,10 +1222,11 @@ def run_ma_pullback(
             t = Trade(sym, series[sym].name, day, price, qty, surge_date=surge_day)
             positions[sym] = t
             trades.append(t)
-            if bar is not None and bar.low <= stop_of(price):
+            if bar is not None and m.stop_loss_pct > 0 and bar.low <= stop_of(price):
                 close_position(t, day, stop_of(price) * (1 - s.slippage), "STOP_LOSS")
 
         # 3) 오늘 종가로 새 기준봉 등록
+        new = []
         for sym, ser in series.items():
             i = ser.index.get(day)
             if i is None or sym in positions or not surge_flags[sym][i]:
@@ -1228,7 +1237,23 @@ def run_ma_pullback(
                 level = ma(sym, i)
                 if level is None or ser.bars[i].close <= level:
                     continue  # 종가가 이평선 위가 아님 (또는 이력 부족)
-            watch[sym] = (i, ser.bars[i].close * ser.bars[i].volume)
+            bar = ser.bars[i]
+            new.append((sym, i, bar.close * bar.volume, bar.close / ser.bars[i - 1].close))
+        if m.pick and new:
+            by_amt = sorted(new, key=lambda x: -x[2])
+            by_chg = sorted(new, key=lambda x: -x[3])
+            if m.pick == "amount":
+                new = by_amt[:1]
+            elif m.pick == "change":
+                new = by_chg[:1]
+            elif m.pick == "both":
+                new = by_amt[:1] if by_amt[0][0] == by_chg[0][0] else []
+            else:
+                ra = {x[0]: r for r, x in enumerate(by_amt)}
+                rc = {x[0]: r for r, x in enumerate(by_chg)}
+                new = [min(new, key=lambda x: (ra[x[0]] + rc[x[0]], ra[x[0]]))]
+        for sym, i, amt, _ in new:
+            watch[sym] = (i, amt)
 
         # 4) 평가
         for sym in positions:
@@ -1668,6 +1693,8 @@ def main(argv: list[str] | None = None) -> None:
     r.add_argument("--bear-max", type=float, default=3.0, help="mapullback bear: 첫 음봉 하락폭 N%% 이내만 매수")
     r.add_argument("--bear-measure", choices=["body", "change"], default="body",
                    help="mapullback bear: 하락폭 기준 body = 시가 대비 / change = 전일 종가 대비")
+    r.add_argument("--mp-pick", choices=["", "amount", "change", "both", "combo"], default="",
+                   help="mapullback: 하루 기준봉 1종목만 (amount 거래대금 1위 / change 상승률 1위 / both 둘 다 1위 / combo 순위 합)")
     r.add_argument("--no-above-ma", action="store_true", help="mapullback: 기준봉 종가 이평선 위 조건 끄기")
     r.add_argument("--pullback-ma", type=int, default=200, help="mapullback: 눌림 매수 이평선 기간")
     r.add_argument("--watch-days", type=int, default=10, help="retest: 기준봉 뒤 N거래일 안에 닿아야 매수")
@@ -1861,7 +1888,9 @@ def main(argv: list[str] | None = None) -> None:
         mp = MaPullbackSettings(surge_pct=args.surge_pct, min_amount=args.min_day_amount or 2e11,
                                 first_in_days=args.first_in_days, ma_period=args.pullback_ma,
                                 watch_days=args.watch_days, max_break_pct=args.max_break,
-                                stop_loss_pct=args.stop_loss or 5.0, take_profit_pct=args.take_profit or 20.0,
+                                stop_loss_pct=args.stop_loss if args.ma_exit else (args.stop_loss or 5.0),
+                                take_profit_pct=args.take_profit if args.ma_exit else (args.take_profit or 20.0),
+                                pick=args.mp_pick, ma_exit_days=args.ma_exit,
                                 entry=args.mp_entry, bear_max_pct=args.bear_max, bear_measure=args.bear_measure,
                                 require_above_ma=not args.no_above_ma)
         runner = lambda y0, y1: run_ma_pullback(data, y0, y1, settings, mp)  # noqa: E731

@@ -311,3 +311,31 @@ class MaPullbackTest(unittest.TestCase):
         self.assertEqual([t.entry_date for t in res.trades], [days[22]])
         m.bear_max_pct = 2.0  # 첫 음봉이 2% 넘게 빠짐 → 매수 안 함
         self.assertEqual(run_ma_pullback({"A": ("A", bars)}, days[0], days[-1], s, m).trades, [])
+
+    def test_pick_and_ma_exit(self):
+        from tossbot.backtest import MaPullbackSettings, run_ma_pullback
+        days, d = [], date(2026, 1, 5)
+        while len(days) < 30:
+            if d.weekday() < 5:
+                days.append(d)
+            d += timedelta(days=1)
+
+        def make(surge_close, vol):
+            bars = [Bar(dy, 10_000, 10_100, 9_900, 10_000, vol) for dy in days[:20]]
+            bars.append(Bar(days[20], 10_000, surge_close, 10_000, surge_close, vol))  # 기준봉
+            bars.append(Bar(days[21], surge_close, surge_close, surge_close * 0.97, surge_close * 0.98, vol))  # 첫 음봉
+            bars.append(Bar(days[22], surge_close, surge_close, surge_close * 0.97, surge_close * 0.99, vol))
+            bars.append(Bar(days[23], surge_close, surge_close, surge_close * 0.85, surge_close * 0.9, vol))  # 5일선 이탈
+            bars += [Bar(dy, 10_000, 10_100, 9_900, 10_000, vol) for dy in days[24:]]
+            return bars
+
+        data = {"A": ("A", make(11_600, 1_000_000)), "B": ("B", make(12_000, 500_000))}
+        m = MaPullbackSettings(surge_pct=15, min_amount=1e9, first_in_days=10, entry="bear", bear_max_pct=100,
+                               require_above_ma=False, stop_loss_pct=0, take_profit_pct=0, pick="change", ma_exit_days=5)
+        s = BacktestSettings(initial_cash=10_000_000)
+        s.params.slot_budget = 1_000_000
+        res = run_ma_pullback(data, days[0], days[-1], s, m)
+        self.assertEqual([(t.symbol, t.entry_date, t.exit_date, t.reason) for t in res.trades],
+                         [("B", days[21], days[23], "MA5_EXIT")])
+        m.pick = "both"  # 거래대금 1위(A)와 상승률 1위(B)가 달라 매수 없음
+        self.assertEqual(run_ma_pullback(data, days[0], days[-1], s, m).trades, [])

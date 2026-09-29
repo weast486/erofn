@@ -1077,6 +1077,153 @@ def run_retest(
 
 
 @dataclass
+class MaPullbackSettings:
+    """기준봉(거래대금 + 급등, first_in_days 안에서 첫 번째, 종가가 ma_period 일선 위) 이후
+    ma_period 일선까지 눌리면 이평선 가격에 지정가 매수."""
+    surge_pct: float = 10.0  # 기준봉 전일 대비 상승률 하한
+    min_amount: float = 200_000_000_000  # 기준봉 거래대금 하한
+    first_in_days: int = 60  # 직전 N거래일 안에 같은 조건 기준봉이 없던 첫 기준봉만 (0 = 조건 없음)
+    ma_period: int = 200
+    watch_days: int = 60  # 기준봉 다음 날부터 N거래일 안에 이평선에 닿아야 매수
+    max_break_pct: float = 3.0  # 시가가 이평선보다 이 % 넘게 아래서 시작하면 매수 취소
+    stop_loss_pct: float = 5.0
+    take_profit_pct: float = 20.0
+
+
+def run_ma_pullback(
+    data: dict[str, tuple[str, list[Bar]]],
+    start: date,
+    end: date,
+    s: BacktestSettings | None = None,
+    m: MaPullbackSettings | None = None,
+) -> Result:
+    """매수가 = 전일까지의 ma_period 일 이동평균 (장 시작 전에 알 수 있는 값). 장중 저가가 닿으면 체결
+    (시가가 이미 아래면 시가). 매수 당일 저가가 손절가 이하면 손절로 가정."""
+    s = s or BacktestSettings()
+    m = m or MaPullbackSettings()
+    budget = s.params.slot_budget
+    series = _prepare(data)
+    calendar = sorted({d for ser in series.values() for d in ser.days if start <= d <= end})
+    csum: dict[str, list[float]] = {}  # 종가 누적합 (이동평균 계산용)
+    surge_flags: dict[str, list[bool]] = {}
+    for sym, ser in series.items():
+        acc, run = [0.0], 0.0
+        for x in ser.bars:
+            run += x.close
+            acc.append(run)
+        csum[sym] = acc
+        surge_flags[sym] = [i > 0 and x.close >= ser.bars[i - 1].close * (1 + m.surge_pct / 100)
+                            and x.close * x.volume >= m.min_amount for i, x in enumerate(ser.bars)]
+
+    def ma(sym: str, i: int) -> float | None:
+        """bars[i - ma_period + 1 .. i] 종가 평균."""
+        if i + 1 < m.ma_period:
+            return None
+        return (csum[sym][i + 1] - csum[sym][i + 1 - m.ma_period]) / m.ma_period
+
+    watch: dict[str, tuple[int, float]] = {}  # sym -> (기준봉 인덱스, 우선순위)
+    cash = s.initial_cash
+    positions: dict[str, Trade] = {}
+    trades: list[Trade] = []
+    equity_curve: list[tuple[date, float]] = []
+    last_close: dict[str, float] = {}
+
+    def close_position(t: Trade, day: date, price: float, reason: str) -> None:
+        nonlocal cash
+        proceeds = _sell_value(t.qty, price, day.year, s)
+        t.exit_date, t.exit_price, t.reason = day, price, reason
+        t.pnl = proceeds - t.qty * t.entry_price * (1 + s.commission)
+        cash += proceeds
+        del positions[t.symbol]
+
+    def stop_of(price: float) -> float:
+        return round_down_to_tick(price * (1 - m.stop_loss_pct / 100))
+
+    for day in calendar:
+        # 1) 청산: 손절 / 익절 (같은 날 둘 다면 손절)
+        for sym, t in list(positions.items()):
+            ser = series[sym]
+            i = ser.index.get(day)
+            t.hold_days += 1
+            if i is None or t.entry_date == day:
+                continue
+            bar = ser.bars[i]
+            stop, tp = stop_of(t.entry_price), round_up_to_tick(t.entry_price * (1 + m.take_profit_pct / 100))
+            if bar.open <= stop:
+                close_position(t, day, bar.open * (1 - s.slippage), "STOP_LOSS")
+            elif bar.open >= tp:
+                close_position(t, day, bar.open, "TAKE_PROFIT")
+            elif bar.low <= stop:
+                close_position(t, day, stop * (1 - s.slippage), "STOP_LOSS")
+            elif bar.high >= tp:
+                close_position(t, day, tp, "TAKE_PROFIT")
+
+        # 2) 대기 중인 기준봉이 이평선에 닿으면 매수
+        signals = []
+        for sym, (k, key) in list(watch.items()):
+            ser = series[sym]
+            i = ser.index.get(day)
+            if i is None:
+                continue
+            if i - k > m.watch_days:
+                del watch[sym]
+                continue
+            level_raw = ma(sym, i - 1)
+            if level_raw is None:
+                continue
+            level = round_down_to_tick(level_raw)
+            bar = ser.bars[i]
+            if bar.low > level:
+                continue
+            del watch[sym]  # 첫 터치에서만 판단
+            if bar.open <= level:
+                if bar.open < level * (1 - m.max_break_pct / 100):
+                    continue  # 이평선 아래로 갭하락 출발
+                fill = bar.open
+            else:
+                fill = level
+            if sym not in positions and fill <= budget:
+                signals.append((key, sym, fill, bar, ser.bars[k].day))
+        slots = s.num_slots - len(positions)
+        signals.sort(key=lambda x: x[0], reverse=True)
+        for _, sym, fill, bar, surge_day in signals[:max(slots, 0)]:
+            price = fill * (1 + s.slippage)
+            qty = int(budget // round_up_to_tick(fill * (1 + BUY_LIMIT_SLIPPAGE)))
+            cost = qty * price * (1 + s.commission)
+            if qty <= 0 or cost > cash:
+                continue
+            cash -= cost
+            t = Trade(sym, series[sym].name, day, price, qty, surge_date=surge_day)
+            positions[sym] = t
+            trades.append(t)
+            if bar.low <= stop_of(price):
+                close_position(t, day, stop_of(price) * (1 - s.slippage), "STOP_LOSS")
+
+        # 3) 오늘 종가로 새 기준봉 등록
+        for sym, ser in series.items():
+            i = ser.index.get(day)
+            if i is None or sym in positions or not surge_flags[sym][i]:
+                continue
+            if m.first_in_days and (i < m.first_in_days or any(surge_flags[sym][i - m.first_in_days:i])):
+                continue  # 최근 N거래일 안에 이미 기준봉이 있었음
+            level = ma(sym, i)
+            if level is None or ser.bars[i].close <= level:
+                continue  # 종가가 이평선 위가 아님 (또는 이력 부족)
+            watch[sym] = (i, ser.bars[i].close * ser.bars[i].volume)
+
+        # 4) 평가
+        for sym in positions:
+            i = series[sym].index.get(day)
+            if i is not None:
+                last_close[sym] = series[sym].bars[i].close
+        equity = cash + sum(t.qty * last_close.get(sym, t.entry_price) for sym, t in positions.items())
+        equity_curve.append((day, equity))
+
+    final = equity_curve[-1][1] if equity_curve else s.initial_cash
+    return Result(start, end, s.initial_cash, final, trades, equity_curve, len(positions))
+
+
+@dataclass
 class EnvelopeSettings:
     """엔벨로프 하단선 근접 종가 매수 → hold_days 거래일 뒤 종가 매도."""
     period: int = 20  # 이동평균 기간
@@ -1488,7 +1635,7 @@ def main(argv: list[str] | None = None) -> None:
     r.add_argument("--cache", type=Path, default=DEFAULT_CACHE)
     r.add_argument("--out", type=Path, default=Path("backtest_results"))
     r.add_argument("--env", default=".env")
-    r.add_argument("--strategy", choices=["pullback", "breakout", "limitup", "surgedoji", "retest"], default="pullback",
+    r.add_argument("--strategy", choices=["pullback", "breakout", "limitup", "surgedoji", "retest", "mapullback"], default="pullback",
                    help="pullback: 급등 후 이평선 터치 / breakout: 종가 N일 신고가 매수·M일 신저가 매도 / "
                         "limitup: 전일 상한가 종목 시초가 매수 / "
                         "surgedoji: 거래대금 상위 +15%% 급등 후 거래량 급감 단봉 음봉 종가 매수 / "
@@ -1497,6 +1644,7 @@ def main(argv: list[str] | None = None) -> None:
     r.add_argument("--surge-max-pct", type=float, default=0, help="retest: 기준봉 상승률 상한 %% (0 = 없음)")
     r.add_argument("--retest-level", choices=["high", "close"], default="high",
                    help="retest: 이전 고점 = 직전 N일 장중 고가 최고값(high) / 종가 최고값(close)")
+    r.add_argument("--pullback-ma", type=int, default=200, help="mapullback: 눌림 매수 이평선 기간")
     r.add_argument("--watch-days", type=int, default=10, help="retest: 기준봉 뒤 N거래일 안에 닿아야 매수")
     r.add_argument("--max-break", type=float, default=3.0, help="retest: 시가가 매수가보다 N%% 넘게 낮으면 매수 취소")
     r.add_argument("--entry-days", type=int, default=20, help="breakout: 매수 신고가 기간")
@@ -1684,6 +1832,12 @@ def main(argv: list[str] | None = None) -> None:
                             max_break_pct=args.max_break, stop_loss_pct=args.stop_loss or 4.7,
                             take_profit_pct=args.take_profit or 20.0)
         runner = lambda y0, y1: run_retest(data, y0, y1, settings, rt)  # noqa: E731
+    elif args.strategy == "mapullback":
+        mp = MaPullbackSettings(surge_pct=args.surge_pct, min_amount=args.min_day_amount or 2e11,
+                                first_in_days=args.first_in_days, ma_period=args.pullback_ma,
+                                watch_days=args.watch_days, max_break_pct=args.max_break,
+                                stop_loss_pct=args.stop_loss or 5.0, take_profit_pct=args.take_profit or 20.0)
+        runner = lambda y0, y1: run_ma_pullback(data, y0, y1, settings, mp)  # noqa: E731
     elif args.strategy == "surgedoji":
         sd = SurgeDojiSettings(stop_loss_pct=settings.stop_loss_pct, take_profit_pct=settings.take_profit_pct,
                                max_hold_days=settings.max_hold_days, cooldown_days=settings.cooldown_days)

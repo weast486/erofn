@@ -269,3 +269,24 @@ class KellyFractionTest(unittest.TestCase):
         self.assertEqual(kelly_fraction([-0.05, -0.05]), 0.0)
         self.assertEqual(kelly_fraction([0.1, 0.2]), 1.0)
         self.assertLess(kelly_fraction([0.10, -0.05, -0.05, -0.05]), 0)
+
+
+class MaPullbackTest(unittest.TestCase):
+    def test_buys_at_ma_touch(self):
+        from tossbot.backtest import MaPullbackSettings, run_ma_pullback
+        days, d = [], date(2026, 1, 5)
+        while len(days) < 40:
+            if d.weekday() < 5:
+                days.append(d)
+            d += timedelta(days=1)
+        closes = [10_000.0] * 20 + [11_000.0] + [10_800.0] * 3 + [10_200.0] + [10_300.0] * 15
+        bars = [Bar(dy, c, c * 1.01, c * 0.99, c, 1_000_000) for dy, c in zip(days, closes)]
+        bars[24] = Bar(days[24], 10_600, 10_600, 10_050, 10_200, 1_000_000)  # 저가가 10일선 근처로
+        m = MaPullbackSettings(surge_pct=10, min_amount=1e9, first_in_days=10, ma_period=10, watch_days=10)
+        s = BacktestSettings(initial_cash=10_000_000)
+        s.params.slot_budget = 1_000_000
+        res = run_ma_pullback({"A": ("A", bars)}, days[0], days[-1], s, m)
+        self.assertEqual(len(res.trades), 1)
+        t = res.trades[0]
+        self.assertEqual(t.entry_date, days[24])
+        self.assertLess(t.entry_price, 10_600)

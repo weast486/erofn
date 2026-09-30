@@ -37,7 +37,7 @@ from datetime import date, timedelta
 from pathlib import Path
 
 from .breakout import new_high_flags
-from .broker import round_down_to_tick, round_up_to_tick
+from .broker import round_down_to_tick, round_up_to_tick, tick_size
 from .config import Config, load_dotenv
 from .rsi import rsi_series
 from .selector import Bar, PullbackParams, analyze, touch_zone
@@ -1507,6 +1507,173 @@ def run_ma_cross(
 
 
 @dataclass
+class DoubleBottomSettings:
+    """하락 추세 쌍바닥: (1) 하락 추세 속 저점 L1 (downtrend_days 거래일 최저가 + 그 기간 이평선 하락,
+    drop_pct > 0 이면 drop_lookback 거래일 최고가 대비 drop_pct % 이상 하락) → (2) 거래대금 min_amount 이상 양봉으로 반등,
+    반등 고점 H → (3) L1 ±near_pct % 까지 다시 눌림, 눌림 최저가 L2 → (4) 다시 거래대금 min_amount 이상 양봉 날 종가 매수.
+    손절 = L2 이탈(L2 한 호가 아래), 익절 = H 지정가."""
+    downtrend_days: int = 60
+    drop_pct: float = 0.0
+    drop_lookback: int = 250
+    min_amount: float = 10_000_000_000  # 반등일·매수일 거래대금 하한
+    min_change_pct: float = 0.0  # 반등일·매수일 전일 대비 상승률 하한
+    min_bounce_pct: float = 10.0  # 반등 고점 H 가 L1 대비 이 % 이상이어야 눌림 인정
+    near_pct: float = 5.0  # 눌림 저점이 L1 x (1 ± near_pct %) 안
+    bounce_wait: int = 20  # L1 뒤 N거래일 안에 반등
+    pullback_wait: int = 60  # 반등 뒤 N거래일 안에 눌림
+    entry_wait: int = 20  # 눌림 뒤 N거래일 안에 두 번째 거래대금
+    min_upside_pct: float = 5.0  # 매수가 대비 H 까지 이 % 이상 남아야 매수
+    max_hold_days: int = 0
+
+
+def run_double_bottom(
+    data: dict[str, tuple[str, list[Bar]]],
+    start: date,
+    end: date,
+    s: BacktestSettings | None = None,
+    m: DoubleBottomSettings | None = None,
+) -> Result:
+    s = s or BacktestSettings()
+    m = m or DoubleBottomSettings()
+    budget = s.params.slot_budget
+    series = _prepare(data)
+    calendar = sorted({d for ser in series.values() for d in ser.days if start <= d <= end})
+    n = m.downtrend_days
+    mas: dict[str, list[float | None]] = {}
+    for sym, ser in series.items():
+        acc, run = [0.0], 0.0
+        for x in ser.bars:
+            run += x.close
+            acc.append(run)
+        mas[sym] = [(acc[i + 1] - acc[i + 1 - n]) / n if i + 1 >= n else None for i in range(len(ser.bars))]
+
+    def is_downtrend_low(sym: str, i: int) -> bool:
+        bars = series[sym].bars
+        if i < 2 * n or mas[sym][i] is None or mas[sym][i - n] is None or mas[sym][i] >= mas[sym][i - n]:
+            return False
+        if bars[i].low > min(x.low for x in bars[i - n + 1:i + 1]):
+            return False
+        if m.drop_pct > 0:
+            hi = max(x.high for x in bars[max(0, i - m.drop_lookback):i + 1])
+            if bars[i].low > hi * (1 - m.drop_pct / 100):
+                return False
+        return True
+
+    def big_up(bars: list[Bar], i: int) -> bool:
+        b, p = bars[i], bars[i - 1]
+        return (b.close > b.open and b.close * b.volume >= m.min_amount
+                and b.close >= p.close * (1 + m.min_change_pct / 100) and b.close > p.close)
+
+    # 종목별 상태: [단계, L1, L1 인덱스, H, 반등 인덱스, L2, 눌림 인덱스]  단계 1 저점 / 2 반등 / 3 눌림
+    state: dict[str, list] = {}
+    cash = s.initial_cash
+    positions: dict[str, Trade] = {}
+    exits: dict[str, tuple[float, float]] = {}  # sym -> (손절가, 목표가)
+    trades: list[Trade] = []
+    equity_curve: list[tuple[date, float]] = []
+    last_close: dict[str, float] = {}
+
+    def close_position(t: Trade, day: date, price: float, reason: str) -> None:
+        nonlocal cash
+        proceeds = _sell_value(t.qty, price, day.year, s)
+        t.exit_date, t.exit_price, t.reason = day, price, reason
+        t.pnl = proceeds - t.qty * t.entry_price * (1 + s.commission)
+        cash += proceeds
+        del positions[t.symbol]
+
+    for day in calendar:
+        # 1) 청산: L2 이탈 손절 / H 익절 (같은 날 둘 다면 손절)
+        for sym, t in list(positions.items()):
+            ser = series[sym]
+            i = ser.index.get(day)
+            t.hold_days += 1
+            if i is None or t.entry_date == day:
+                continue
+            bar = ser.bars[i]
+            stop, tp = exits[sym]
+            if bar.open <= stop:
+                close_position(t, day, bar.open * (1 - s.slippage), "STOP_LOSS")
+            elif bar.open >= tp:
+                close_position(t, day, bar.open, "TAKE_PROFIT")
+            elif bar.low <= stop:
+                close_position(t, day, stop * (1 - s.slippage), "STOP_LOSS")
+            elif bar.high >= tp:
+                close_position(t, day, tp, "TAKE_PROFIT")
+            elif m.max_hold_days and t.hold_days >= m.max_hold_days:
+                close_position(t, day, bar.close * (1 - s.slippage), "MAX_HOLD")
+
+        # 2) 패턴 진행, 매수 신호는 종가 기준
+        signals = []
+        for sym, ser in series.items():
+            i = ser.index.get(day)
+            if i is None or i < 1:
+                continue
+            bars, bar = ser.bars, ser.bars[i]
+            st = state.get(sym)
+            if st and st[0] == 3:
+                if bar.low < st[1] * (1 - m.near_pct / 100):
+                    st = None  # 저점 크게 이탈 → 새 저점부터 다시
+                elif i - st[6] > m.entry_wait:
+                    st = None
+                else:
+                    if bar.low < st[5]:
+                        st[5], st[6] = bar.low, i
+                    if i > st[6] and big_up(bars, i):
+                        fill = bar.close
+                        if st[3] >= fill * (1 + m.min_upside_pct / 100) and sym not in positions and fill <= budget:
+                            signals.append((bar.close * bar.volume, sym, fill, st[5], st[3], bars[st[4]].day))
+                        st = None  # 눌림 저점을 만든 날 자체는 매수하지 않음 (다음 날부터)
+            elif st and st[0] == 2:
+                st[3] = max(st[3], bar.high)
+                if bar.low < st[1] * (1 - m.near_pct / 100) or i - st[4] > m.pullback_wait:
+                    st = None
+                elif bar.low <= st[1] * (1 + m.near_pct / 100) and i > st[4]:
+                    if st[3] >= st[1] * (1 + m.min_bounce_pct / 100):
+                        st[0], st[5], st[6] = 3, bar.low, i
+                    else:
+                        st = None
+            elif st and st[0] == 1:
+                if bar.low < st[1]:
+                    st = None  # 더 낮은 저점 → 아래에서 다시 판정
+                elif i - st[2] > m.bounce_wait:
+                    st = None
+                elif big_up(bars, i):
+                    st[0], st[3], st[4] = 2, bar.high, i
+            if st is None and is_downtrend_low(sym, i):
+                st = [1, bar.low, i, 0.0, 0, 0.0, 0]
+            if st is None:
+                state.pop(sym, None)
+            else:
+                state[sym] = st
+
+        slots = s.num_slots - len(positions)
+        signals.sort(key=lambda x: x[0], reverse=True)
+        for _, sym, fill, low2, target, bounce_day in signals[:max(slots, 0)]:
+            price = fill * (1 + s.slippage)
+            qty = int(budget // round_up_to_tick(fill * (1 + BUY_LIMIT_SLIPPAGE)))
+            cost = qty * price * (1 + s.commission)
+            if qty <= 0 or cost > cash:
+                continue
+            cash -= cost
+            t = Trade(sym, series[sym].name, day, price, qty, surge_date=bounce_day)
+            positions[sym] = t
+            stop = round_down_to_tick(low2)
+            stop = round_down_to_tick(stop - tick_size(stop))
+            exits[sym] = (stop, round_up_to_tick(target))
+            trades.append(t)
+
+        for sym in positions:
+            i = series[sym].index.get(day)
+            if i is not None:
+                last_close[sym] = series[sym].bars[i].close
+        equity = cash + sum(t.qty * last_close.get(sym, t.entry_price) for sym, t in positions.items())
+        equity_curve.append((day, equity))
+
+    final = equity_curve[-1][1] if equity_curve else s.initial_cash
+    return Result(start, end, s.initial_cash, final, trades, equity_curve, len(positions))
+
+
+@dataclass
 class VolBreakoutSettings:
     """변동성 돌파 (래리 윌리엄스): 오늘 시가 + 전일 (고가 - 저가) x k 를 장중에 넘으면 그 가격에 매수,
     다음 거래일 시가에 매도. 후보는 전일 거래대금 min_amount 이상, 여러 종목이 닿으면 전일 거래대금 큰 순
@@ -2481,7 +2648,7 @@ def main(argv: list[str] | None = None) -> None:
     r.add_argument("--cache", type=Path, default=DEFAULT_CACHE)
     r.add_argument("--out", type=Path, default=Path("backtest_results"))
     r.add_argument("--env", default=".env")
-    r.add_argument("--strategy", choices=["pullback", "breakout", "limitup", "surgedoji", "retest", "mapullback", "volbreak", "rsi", "combo", "macross"], default="pullback",
+    r.add_argument("--strategy", choices=["pullback", "breakout", "limitup", "surgedoji", "retest", "mapullback", "volbreak", "rsi", "combo", "macross", "dbottom"], default="pullback",
                    help="pullback: 급등 후 이평선 터치 / breakout: 종가 N일 신고가 매수·M일 신저가 매도 / "
                         "limitup: 전일 상한가 종목 시초가 매수 / "
                         "surgedoji: 거래대금 상위 +15%% 급등 후 거래량 급감 단봉 음봉 종가 매수 / "
@@ -2522,6 +2689,13 @@ def main(argv: list[str] | None = None) -> None:
                    help="rsi: N > 0 이면 직전 N거래일 안에 과매도가 한 번 있었고 다시 과매도로 들어온 날만 매수")
     r.add_argument("--rsi-second-reset", type=float, default=0.0, help="rsi: 두 과매도 사이 RSI 가 이 값 이상 회복 (0 = --rsi-buy)")
     r.add_argument("--rsi-diverge", action="store_true", help="rsi: 두 번째 종가 < 첫 최저 종가, RSI > 첫 최저 RSI 일 때만")
+    r.add_argument("--db-days", type=int, default=60, help="dbottom: 하락 추세 = N거래일 최저가 + N일선 하락")
+    r.add_argument("--db-drop", type=float, default=0.0, help="dbottom: 250거래일 최고가 대비 N%% 이상 하락한 저점만 (0 = 조건 없음)")
+    r.add_argument("--db-bounce", type=float, default=10.0, help="dbottom: 반등 고점이 첫 저점 대비 최소 N%%")
+    r.add_argument("--db-near", type=float, default=5.0, help="dbottom: 눌림이 첫 저점 ±N%% 안")
+    r.add_argument("--db-pullback-wait", type=int, default=60, help="dbottom: 반등 뒤 N거래일 안에 눌림")
+    r.add_argument("--db-entry-wait", type=int, default=20, help="dbottom: 눌림 저점 뒤 N거래일 안에 두 번째 거래대금")
+    r.add_argument("--db-upside", type=float, default=5.0, help="dbottom: 매수가 대비 반등 고점까지 최소 여유 %%")
     r.add_argument("--mc-ma", type=int, default=50, help="macross: 이평선 기간")
     r.add_argument("--mc-slope", type=int, default=5, help="macross: 기울기 비교 거래일 수")
     r.add_argument("--mc-lookback", type=int, default=120, help="macross: 전고점 = 돌파 전 N거래일 최고 고가")
@@ -2763,6 +2937,13 @@ def main(argv: list[str] | None = None) -> None:
         if args.vb_top:
             vb.universe, _ = load_top_universe(args.marcap_dir, f"{min(args.years) - 1}-12-01", top_n=args.vb_top)
         runner = lambda y0, y1: run_vol_breakout(data, y0, y1, settings, vb)  # noqa: E731
+    elif args.strategy == "dbottom":
+        dbs = DoubleBottomSettings(downtrend_days=args.db_days, drop_pct=args.db_drop,
+                                   min_amount=args.min_day_amount or 1e10, min_change_pct=args.min_change or 0.0,
+                                   min_bounce_pct=args.db_bounce, near_pct=args.db_near,
+                                   pullback_wait=args.db_pullback_wait, entry_wait=args.db_entry_wait,
+                                   min_upside_pct=args.db_upside, max_hold_days=args.max_hold)
+        runner = lambda y0, y1: run_double_bottom(data, y0, y1, settings, dbs)  # noqa: E731
     elif args.strategy == "macross":
         mc = MaCrossSettings(ma_period=args.mc_ma, slope_days=args.mc_slope, min_amount=args.min_day_amount or 1e10,
                              watch_days=args.watch_days, high_lookback=args.mc_lookback, min_upside_pct=args.mc_upside,

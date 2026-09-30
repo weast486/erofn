@@ -1343,6 +1343,170 @@ def run_ma_pullback(
 
 
 @dataclass
+class MaCrossSettings:
+    """ma_period 일선이 하락 기울기일 때 종가가 이평선을 상향 돌파(기준일) → 이후 watch_days 안에 이평선이
+    상승 기울기로 바뀐 상태에서 위에서 내려와 이평선에 닿으면 이평선 가격(전일까지 평균) 지정가 매수.
+    목표가 = 돌파 전 high_lookback 거래일의 최고 고가(전고점) 지정가 매도, 손절 stop_loss_pct %."""
+    ma_period: int = 50
+    slope_days: int = 5  # 기울기 = 오늘 이평선 vs slope_days 거래일 전 이평선
+    min_amount: float = 10_000_000_000  # 돌파일 거래대금 하한
+    watch_days: int = 60  # 돌파 다음 날부터 N거래일 안에 닿아야 매수
+    high_lookback: int = 120  # 전고점 = 돌파일 직전 N거래일 최고 고가
+    min_upside_pct: float = 5.0  # 매수가 대비 전고점까지 이 % 이상 남아야 매수
+    max_break_pct: float = 3.0  # 시가가 이평선보다 이 % 넘게 아래서 시작하면 매수 취소
+    stop_loss_pct: float = 5.0  # 0 = 손절 없음
+    max_hold_days: int = 0  # 0 = 제한 없음. N거래일째 종가 매도
+    ma_exit_pct: float = 0.0  # > 0 이면 종가가 이평선보다 이 % 넘게 아래로 마감한 날 종가 매도
+    # 전고점 기준: before = 돌파 전 high_lookback 거래일 최고 고가 / since = 돌파일부터 매수 전날까지 최고 고가
+    target: str = "before"
+
+
+def run_ma_cross(
+    data: dict[str, tuple[str, list[Bar]]],
+    start: date,
+    end: date,
+    s: BacktestSettings | None = None,
+    m: MaCrossSettings | None = None,
+) -> Result:
+    s = s or BacktestSettings()
+    m = m or MaCrossSettings()
+    budget = s.params.slot_budget
+    series = _prepare(data)
+    calendar = sorted({d for ser in series.values() for d in ser.days if start <= d <= end})
+    mas: dict[str, list[float | None]] = {}
+    for sym, ser in series.items():
+        acc, run = [0.0], 0.0
+        for x in ser.bars:
+            run += x.close
+            acc.append(run)
+        n = m.ma_period
+        mas[sym] = [(acc[i + 1] - acc[i + 1 - n]) / n if i + 1 >= n else None for i in range(len(ser.bars))]
+
+    def slope(sym: str, i: int) -> int:
+        """1 상승 / -1 하락 / 0 모름·보합."""
+        if i - m.slope_days < 0:
+            return 0
+        a, b = mas[sym][i], mas[sym][i - m.slope_days]
+        if a is None or b is None or a == b:
+            return 0
+        return 1 if a > b else -1
+
+    watch: dict[str, tuple[int, float, float]] = {}  # sym -> (돌파 인덱스, 전고점, 거래대금)
+    cash = s.initial_cash
+    positions: dict[str, Trade] = {}
+    targets: dict[str, float] = {}
+    trades: list[Trade] = []
+    equity_curve: list[tuple[date, float]] = []
+    last_close: dict[str, float] = {}
+
+    def close_position(t: Trade, day: date, price: float, reason: str) -> None:
+        nonlocal cash
+        proceeds = _sell_value(t.qty, price, day.year, s)
+        t.exit_date, t.exit_price, t.reason = day, price, reason
+        t.pnl = proceeds - t.qty * t.entry_price * (1 + s.commission)
+        cash += proceeds
+        del positions[t.symbol]
+
+    def stop_of(price: float) -> float:
+        return round_down_to_tick(price * (1 - m.stop_loss_pct / 100))
+
+    for day in calendar:
+        # 1) 청산: 손절 / 전고점 익절 (같은 날 둘 다면 손절) / 이평선 이탈 / 보유기간
+        for sym, t in list(positions.items()):
+            ser = series[sym]
+            i = ser.index.get(day)
+            t.hold_days += 1
+            if i is None or t.entry_date == day:
+                continue
+            bar = ser.bars[i]
+            stop = stop_of(t.entry_price) if m.stop_loss_pct > 0 else None
+            tp = round_up_to_tick(targets[sym])
+            if stop and bar.open <= stop:
+                close_position(t, day, bar.open * (1 - s.slippage), "STOP_LOSS")
+            elif bar.open >= tp:
+                close_position(t, day, bar.open, "TAKE_PROFIT")
+            elif stop and bar.low <= stop:
+                close_position(t, day, stop * (1 - s.slippage), "STOP_LOSS")
+            elif bar.high >= tp:
+                close_position(t, day, tp, "TAKE_PROFIT")
+            elif m.ma_exit_pct and mas[sym][i] and bar.close < mas[sym][i] * (1 - m.ma_exit_pct / 100):
+                close_position(t, day, bar.close * (1 - s.slippage), "MA_EXIT")
+            elif m.max_hold_days and t.hold_days >= m.max_hold_days:
+                close_position(t, day, bar.close * (1 - s.slippage), "MAX_HOLD")
+
+        # 2) 이평선 상승 기울기에서 위에서 내려와 닿으면 매수
+        signals = []
+        for sym, (k, target, amt) in list(watch.items()):
+            ser = series[sym]
+            i = ser.index.get(day)
+            if i is None or i <= k:
+                continue
+            if i - k > m.watch_days:
+                del watch[sym]
+                continue
+            level_raw = mas[sym][i - 1]
+            if level_raw is None or slope(sym, i - 1) <= 0 or ser.bars[i - 1].close <= level_raw:
+                continue  # 이평선 하락·보합 중이거나 전일 종가가 이평선 아래 (위에서 닿는 것만)
+            level = round_down_to_tick(level_raw)
+            bar = ser.bars[i]
+            if bar.low > level:
+                continue
+            del watch[sym]  # 조건 맞는 첫 터치에서만 판단
+            if m.target == "since":
+                target = max(x.high for x in ser.bars[k:i])
+            if bar.open <= level:
+                if bar.open < level * (1 - m.max_break_pct / 100):
+                    continue
+                fill = bar.open
+            else:
+                fill = level
+            if target < fill * (1 + m.min_upside_pct / 100):
+                continue  # 전고점까지 여유 부족 (이미 넘었거나 가까움)
+            if sym not in positions and fill <= budget:
+                signals.append((amt, sym, fill, bar, target, ser.bars[k].day))
+        slots = s.num_slots - len(positions)
+        signals.sort(key=lambda x: x[0], reverse=True)
+        for _, sym, fill, bar, target, cross_day in signals[:max(slots, 0)]:
+            price = fill * (1 + s.slippage)
+            qty = int(budget // round_up_to_tick(fill * (1 + BUY_LIMIT_SLIPPAGE)))
+            cost = qty * price * (1 + s.commission)
+            if qty <= 0 or cost > cash:
+                continue
+            cash -= cost
+            t = Trade(sym, series[sym].name, day, price, qty, surge_date=cross_day)
+            positions[sym] = t
+            targets[sym] = target
+            trades.append(t)
+            if m.stop_loss_pct > 0 and bar.low <= stop_of(price):
+                close_position(t, day, stop_of(price) * (1 - s.slippage), "STOP_LOSS")
+
+        # 3) 오늘 종가로 하락 기울기 이평선 상향 돌파 등록
+        for sym, ser in series.items():
+            i = ser.index.get(day)
+            if i is None or i < max(1, m.high_lookback) or sym in positions:
+                continue
+            a, a0 = mas[sym][i], mas[sym][i - 1]
+            bar, prev = ser.bars[i], ser.bars[i - 1]
+            if a is None or a0 is None or not (prev.close <= a0 and bar.close > a):
+                continue
+            if slope(sym, i) >= 0 or bar.close * bar.volume < m.min_amount:
+                continue
+            target = max(x.high for x in ser.bars[i - m.high_lookback:i])
+            watch[sym] = (i, target, bar.close * bar.volume)
+
+        # 4) 평가
+        for sym in positions:
+            i = series[sym].index.get(day)
+            if i is not None:
+                last_close[sym] = series[sym].bars[i].close
+        equity = cash + sum(t.qty * last_close.get(sym, t.entry_price) for sym, t in positions.items())
+        equity_curve.append((day, equity))
+
+    final = equity_curve[-1][1] if equity_curve else s.initial_cash
+    return Result(start, end, s.initial_cash, final, trades, equity_curve, len(positions))
+
+
+@dataclass
 class VolBreakoutSettings:
     """변동성 돌파 (래리 윌리엄스): 오늘 시가 + 전일 (고가 - 저가) x k 를 장중에 넘으면 그 가격에 매수,
     다음 거래일 시가에 매도. 후보는 전일 거래대금 min_amount 이상, 여러 종목이 닿으면 전일 거래대금 큰 순
@@ -1457,6 +1621,41 @@ class RsiSettings:
     min_amount: float = 0.0  # 신호일 거래대금 하한
     universe: dict | None = None  # {날짜: 종목 집합}
     max_price: float = 0.0  # 0 보다 크면 1주 가격 상한 (원)
+    # N > 0 이면 "두 번째 과매도"만 매수: RSI 가 buy_below 아래로 새로 들어온 날(전일 >= buy_below),
+    # 직전 N거래일 안에 이미 과매도 구간이 있었고 그 사이 RSI 가 second_reset 이상으로 회복했을 때
+    second_within: int = 0
+    second_reset: float = 0.0  # 0 이면 buy_below (한 번 30 위로 올라오기만 하면 됨)
+    second_diverge: bool = False  # 두 번째 종가가 첫 과매도 최저 종가보다 낮은데 RSI 는 더 높을 때만 (상승 다이버전스)
+
+
+def rsi_second_flags(closes: list[float], rsi: list[float | None], r: RsiSettings) -> list[bool]:
+    """i 날이 두 번째(이상) 과매도 진입일인지."""
+    out = [False] * len(closes)
+    reset = r.second_reset or r.buy_below
+    for i in range(1, len(closes)):
+        if rsi[i] is None or rsi[i - 1] is None or not (rsi[i] < r.buy_below <= rsi[i - 1]):
+            continue
+        recovered = False
+        for j in range(i - 1, max(i - r.second_within, 0) - 1, -1):
+            v = rsi[j]
+            if v is None:
+                break
+            if v >= reset:
+                recovered = True
+            elif v < r.buy_below:
+                if not recovered:
+                    break  # second_reset 까지 회복 못 하고 다시 빠짐 → 같은 구간의 연장으로 봄
+                if r.second_diverge:
+                    k, lo_c, lo_r = j, closes[j], v  # 첫 과매도 구간 최저 종가·RSI
+                    while k - 1 >= 0 and rsi[k - 1] is not None and rsi[k - 1] < r.buy_below:
+                        k -= 1
+                        lo_c, lo_r = min(lo_c, closes[k]), min(lo_r, rsi[k])
+                    out[i] = closes[i] < lo_c and rsi[i] > lo_r
+                else:
+                    out[i] = True
+                break
+        # N거래일 안에 앞선 과매도가 없으면 첫 번째 과매도 → 매수 안 함
+    return out
 
 
 def run_rsi(
@@ -1472,6 +1671,8 @@ def run_rsi(
     series = _prepare(data)
     calendar = sorted({d for ser in series.values() for d in ser.days if start <= d <= end})
     rsi = {sym: rsi_series([x.close for x in ser.bars], r.period) for sym, ser in series.items()}
+    second = {sym: rsi_second_flags([x.close for x in ser.bars], rsi[sym], r) for sym, ser in series.items()
+              } if r.second_within else None
     csum: dict[str, list[float]] = {}
     for sym, ser in series.items():
         acc, run = [0.0], 0.0
@@ -1525,6 +1726,8 @@ def run_rsi(
                 continue
             i = ser.index.get(day)
             if i is None or i < 21 or rsi[sym][i] is None or rsi[sym][i] >= r.buy_below:
+                continue
+            if second is not None and not second[sym][i]:
                 continue
             bar = ser.bars[i]
             if r.universe is not None and sym not in r.universe.get(day, ()):
@@ -2006,6 +2209,151 @@ def download(source: str, start: str, end: str | None, cache_dir: Path) -> None:
             log.info("  %d / %d", n, len(todo))
 
 
+US_SYMBOLS_FILE = Path(__file__).parent / "lists" / "us_sp500.txt"
+# 과거 캔들 이어받기에 쓸 수 있는 파라미터 후보 (공개 스펙 미확인 → 실제로 더 과거가 오는 것을 찾는다)
+_PAGE_KEYS = ("to", "before", "endDateTime", "endDate", "end", "until", "from")
+
+
+def _us_bar_rows(raw: list[dict]) -> list[tuple]:
+    """토스 캔들 → (날짜, 시고저종, 거래량). 미국 일봉은 UTC 날짜로 둔다 (정규장은 UTC 기준 같은 날)."""
+    from datetime import datetime, timezone
+
+    rows = {}
+    for c in raw:
+        d = datetime.fromisoformat(c["timestamp"].replace("Z", "+00:00")).astimezone(timezone.utc).date()
+        rows[d.isoformat()] = (d.isoformat(), float(c["openPrice"]), float(c["highPrice"]), float(c["lowPrice"]),
+                               float(c["closePrice"]), float(c["volume"]))
+    return [rows[k] for k in sorted(rows)]
+
+
+def download_toss_us(start: str, cache_dir: Path, env: str = ".env", symbols_file: Path = US_SYMBOLS_FILE,
+                     request_interval: float = 0.12) -> None:
+    """토스증권 Open API 로 미국 종목 일봉(수정주가)을 받는다. 사용자 PC(.env 에 API 키)에서 실행.
+
+    대상: symbols_file(기본 S&P 500 + SPY/QQQ) + 지금 미국 거래대금·상승률 상위 종목.
+    API 동작(심볼 형식, 한 번에 받을 수 있는 캔들 수, 과거 이어받기 파라미터)을 먼저 확인해 _probe.txt 에 남긴다.
+    끝나면 cache_dir 를 zip 으로 묶는다 (다른 PC/세션으로 옮기기용).
+    """
+    import json
+    import shutil
+    import time
+
+    from .client import TossClient, TossApiError
+
+    load_dotenv(env)
+    cfg = Config.from_env()
+    client = TossClient(cfg.client_id, cfg.client_secret, cfg.base_url)
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    probe_lines: list[str] = []
+
+    def note(msg: str) -> None:
+        log.info(msg)
+        probe_lines.append(msg)
+
+    def save_probe() -> None:
+        (cache_dir / "_probe.txt").write_text("\n".join(probe_lines) + "\n", encoding="utf-8")
+
+    names: dict[str, str] = {}
+    for line in symbols_file.read_text(encoding="utf-8").splitlines():
+        if line.strip() and not line.startswith("#"):
+            sym, _, name = line.strip().partition(" ")
+            names[sym] = name.strip() or sym
+
+    # 1) 지금 미국 랭킹 (심볼 형식 확인 + 대상 종목 보강)
+    for ranking_type, duration in (("MARKET_TRADING_AMOUNT", "1d"), ("TOP_GAINERS", "1d"), ("MARKET_TRADING_VOLUME", "1d")):
+        try:
+            ranks = client.get_rankings(ranking_type, duration, market="US", exclude_investment_caution=False)
+            note(f"랭킹 US {ranking_type}: {len(ranks)}개, 예시 {json.dumps(ranks[:2], ensure_ascii=False)[:600]}")
+            for r in ranks:
+                if r.get("symbol"):
+                    names.setdefault(r["symbol"], r.get("name") or r.get("stockName") or r["symbol"])
+        except Exception as exc:
+            note(f"랭킹 US {ranking_type} 실패: {exc}")
+    try:
+        note(f"종목정보 AAPL: {json.dumps(client.get_stocks(['AAPL', 'NVDA']), ensure_ascii=False)[:1200]}")
+    except Exception as exc:
+        note(f"종목정보 AAPL 실패: {exc}")
+
+    # 2) 한 번에 받을 수 있는 캔들 수
+    def candles(symbol: str, count: int, extra: dict | None = None) -> list[dict]:
+        params = {"symbol": symbol, "interval": "1d", "count": count, "adjusted": "true", **(extra or {})}
+        time.sleep(request_interval)
+        return (client._request("GET", "/api/v1/candles", params=params) or {}).get("candles", [])
+
+    count = 0
+    for n in (2000, 1500, 1000, 500, 300, 200, 100):
+        try:
+            raw = candles("AAPL", n)
+        except TossApiError as exc:
+            note(f"캔들 count={n} 거부: {exc}")
+            continue
+        count = n
+        rows = _us_bar_rows(raw)
+        note(f"캔들 count={n}: {len(rows)}개 {rows[0][0] if rows else '-'} ~ {rows[-1][0] if rows else '-'}, "
+             f"원본 예시 {json.dumps(raw[:1])}")
+        break
+    if not count:
+        save_probe()
+        raise SystemExit("미국 캔들을 받지 못했습니다. data 폴더의 _probe.txt 내용을 확인하세요.")
+
+    # 3) 부족하면 과거 이어받기 파라미터 찾기
+    page_key = None
+    first = _us_bar_rows(candles("AAPL", count))
+    if first and first[0][0] > start:
+        oldest_raw = min(candles("AAPL", count), key=lambda c: c["timestamp"])
+        for key in _PAGE_KEYS:
+            for value in (oldest_raw["timestamp"], first[0][0]):
+                try:
+                    older = _us_bar_rows(candles("AAPL", count, {key: value}))
+                except TossApiError as exc:
+                    note(f"이어받기 {key}={value} 거부: {exc.code}")
+                    continue
+                if older and older[0][0] < first[0][0]:
+                    page_key = (key, value is oldest_raw["timestamp"])
+                    note(f"이어받기 성공: {key}={value} → {older[0][0]} ~ {older[-1][0]}")
+                    break
+            if page_key:
+                break
+        if not page_key:
+            note(f"이어받기 파라미터를 못 찾음 → 최근 {len(first)}거래일만 저장")
+    save_probe()
+
+    def fetch(symbol: str) -> list[tuple]:
+        raw = candles(symbol, count)
+        rows = _us_bar_rows(raw)
+        while page_key and raw and rows and rows[0][0] > start:
+            oldest = min(raw, key=lambda c: c["timestamp"])
+            raw = candles(symbol, count, {page_key[0]: oldest["timestamp"] if page_key[1] else rows[0][0]})
+            older = [r for r in _us_bar_rows(raw) if r[0] < rows[0][0]]
+            if not older:
+                break
+            rows = older + rows
+        return [r for r in rows if r[0] >= start]
+
+    with open(cache_dir / "_names.csv", "w", encoding="utf-8", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["code", "name"])
+        w.writerows(sorted(names.items()))
+    todo = [s for s in sorted(names) if not (cache_dir / f"{s}.csv").exists()]
+    log.info("미국 종목 %d개 중 %d개 다운로드", len(names), len(todo))
+    failed = []
+    for n, symbol in enumerate(todo, 1):
+        try:
+            rows = fetch(symbol)
+        except Exception as exc:
+            failed.append(symbol)
+            log.warning("%s 다운로드 실패: %s", symbol, exc)
+            continue
+        if rows:
+            _write_bars(cache_dir / f"{symbol}.csv", rows)
+        if n % 50 == 0:
+            log.info("  %d / %d", n, len(todo))
+    note(f"완료: {len(todo) - len(failed)}개 저장, 실패 {len(failed)}개 {failed[:30]}")
+    save_probe()
+    archive = shutil.make_archive(str(cache_dir.parent / cache_dir.name), "zip", root_dir=cache_dir)
+    log.info("묶음 파일: %s", archive)
+
+
 def download_index(symbol: str, cache_dir: Path, count: int = 1500) -> Path:
     """네이버 차트에서 지수 일봉(KOSPI / KOSDAQ)을 받아 _index_{symbol}.csv 로 저장."""
     import re
@@ -2115,7 +2463,10 @@ def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(prog="tossbot.backtest", description="눌림목 전략 백테스트")
     sub = parser.add_subparsers(dest="command", required=True)
     d = sub.add_parser("download", help="과거 일봉 다운로드")
-    d.add_argument("--source", choices=["marcap", "pykrx", "fdr"], default="marcap")
+    d.add_argument("--source", choices=["marcap", "pykrx", "fdr", "toss-us"], default="marcap",
+                   help="toss-us: 토스 Open API 로 미국 종목(기본 S&P 500) 일봉, .env 필요")
+    d.add_argument("--symbols-file", type=Path, default=US_SYMBOLS_FILE, help="toss-us 대상 목록")
+    d.add_argument("--env", default=".env")
     d.add_argument("--marcap-dir", type=Path, default=Path("marcap/data"),
                    help="git clone https://github.com/FinanceData/marcap 한 폴더의 data 경로")
     d.add_argument("--start", default="2023-09-01", help="지표 계산을 위해 백테스트 시작 3~4개월 전부터")
@@ -2130,7 +2481,7 @@ def main(argv: list[str] | None = None) -> None:
     r.add_argument("--cache", type=Path, default=DEFAULT_CACHE)
     r.add_argument("--out", type=Path, default=Path("backtest_results"))
     r.add_argument("--env", default=".env")
-    r.add_argument("--strategy", choices=["pullback", "breakout", "limitup", "surgedoji", "retest", "mapullback", "volbreak", "rsi", "combo"], default="pullback",
+    r.add_argument("--strategy", choices=["pullback", "breakout", "limitup", "surgedoji", "retest", "mapullback", "volbreak", "rsi", "combo", "macross"], default="pullback",
                    help="pullback: 급등 후 이평선 터치 / breakout: 종가 N일 신고가 매수·M일 신저가 매도 / "
                         "limitup: 전일 상한가 종목 시초가 매수 / "
                         "surgedoji: 거래대금 상위 +15%% 급등 후 거래량 급감 단봉 음봉 종가 매수 / "
@@ -2167,6 +2518,17 @@ def main(argv: list[str] | None = None) -> None:
     r.add_argument("--bear-min-ma", type=int, default=0,
                    help="mapullback bear: 첫 음봉 종가가 N일선 아래면 매수 안 함 (0 = 조건 없음)")
     r.add_argument("--no-above-ma", action="store_true", help="mapullback: 기준봉 종가 이평선 위 조건 끄기")
+    r.add_argument("--rsi-second", type=int, default=0,
+                   help="rsi: N > 0 이면 직전 N거래일 안에 과매도가 한 번 있었고 다시 과매도로 들어온 날만 매수")
+    r.add_argument("--rsi-second-reset", type=float, default=0.0, help="rsi: 두 과매도 사이 RSI 가 이 값 이상 회복 (0 = --rsi-buy)")
+    r.add_argument("--rsi-diverge", action="store_true", help="rsi: 두 번째 종가 < 첫 최저 종가, RSI > 첫 최저 RSI 일 때만")
+    r.add_argument("--mc-ma", type=int, default=50, help="macross: 이평선 기간")
+    r.add_argument("--mc-slope", type=int, default=5, help="macross: 기울기 비교 거래일 수")
+    r.add_argument("--mc-lookback", type=int, default=120, help="macross: 전고점 = 돌파 전 N거래일 최고 고가")
+    r.add_argument("--mc-upside", type=float, default=5.0, help="macross: 매수가 대비 전고점까지 최소 여유 %%")
+    r.add_argument("--mc-target", choices=["before", "since"], default="before",
+                   help="macross: 전고점 before = 돌파 전 --mc-lookback 일 최고가 / since = 돌파일~매수 전날 최고가")
+    r.add_argument("--mc-ma-exit", type=float, default=0.0, help="macross: 종가가 이평선보다 N%% 아래면 종가 매도 (0 = 없음)")
     r.add_argument("--pullback-ma", type=int, default=200, help="mapullback: 눌림 매수 이평선 기간")
     r.add_argument("--watch-days", type=int, default=10, help="retest: 기준봉 뒤 N거래일 안에 닿아야 매수")
     r.add_argument("--max-break", type=float, default=3.0, help="retest: 시가가 매수가보다 N%% 넘게 낮으면 매수 취소")
@@ -2287,6 +2649,9 @@ def main(argv: list[str] | None = None) -> None:
         write_universe_file(args.marcap_dir, args.top, args.out)
         return
     if args.command == "download":
+        if args.source == "toss-us":
+            download_toss_us(args.start, args.cache, args.env, args.symbols_file)
+            return
         if args.source == "marcap":
             import_marcap(args.marcap_dir, args.start, args.end, args.cache)
         else:
@@ -2384,7 +2749,9 @@ def main(argv: list[str] | None = None) -> None:
     elif args.strategy == "rsi":
         rs = RsiSettings(period=args.rsi_period, buy_below=args.rsi_buy, sell_above=args.rsi_sell,
                          trend_ma=args.rsi_trend_ma, exit_ma=args.rsi_exit_ma, stop_loss_pct=args.stop_loss,
-                         max_hold_days=args.max_hold, min_amount=args.min_day_amount, max_price=args.max_price)
+                         max_hold_days=args.max_hold, min_amount=args.min_day_amount, max_price=args.max_price,
+                         second_within=args.rsi_second, second_reset=args.rsi_second_reset,
+                         second_diverge=args.rsi_diverge)
         if args.top_universe:
             rs.universe, _ = load_top_universe(args.marcap_dir, f"{min(args.years) - 1}-12-01", top_n=args.top_universe)
         elif args.universe_marcap:
@@ -2396,6 +2763,12 @@ def main(argv: list[str] | None = None) -> None:
         if args.vb_top:
             vb.universe, _ = load_top_universe(args.marcap_dir, f"{min(args.years) - 1}-12-01", top_n=args.vb_top)
         runner = lambda y0, y1: run_vol_breakout(data, y0, y1, settings, vb)  # noqa: E731
+    elif args.strategy == "macross":
+        mc = MaCrossSettings(ma_period=args.mc_ma, slope_days=args.mc_slope, min_amount=args.min_day_amount or 1e10,
+                             watch_days=args.watch_days, high_lookback=args.mc_lookback, min_upside_pct=args.mc_upside,
+                             max_break_pct=args.max_break, stop_loss_pct=args.stop_loss, max_hold_days=args.max_hold,
+                             ma_exit_pct=args.mc_ma_exit, target=args.mc_target)
+        runner = lambda y0, y1: run_ma_cross(data, y0, y1, settings, mc)  # noqa: E731
     elif args.strategy == "mapullback":
         mp = MaPullbackSettings(surge_pct=args.surge_pct, min_amount=args.min_day_amount or 2e11,
                                 first_in_days=args.first_in_days, ma_period=args.pullback_ma,

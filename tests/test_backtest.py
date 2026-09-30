@@ -439,3 +439,46 @@ class RsiTest(unittest.TestCase):
         self.assertEqual([(t.entry_date, t.exit_date) for t in alone.trades],
                          [(t.entry_date, t.exit_date) for t in shared.trades])
         self.assertAlmostEqual(alone.final_equity, shared.final_equity)
+
+
+class MaCrossTest(unittest.TestCase):
+    def test_cross_on_falling_ma_then_touch_on_rising_ma(self):
+        from tossbot.backtest import MaCrossSettings, run_ma_cross
+        days, d = [], date(2026, 1, 5)
+        while len(days) < 50:
+            if d.weekday() < 5:
+                days.append(d)
+            d += timedelta(days=1)
+        closes = ([12_000.0] * 10 + [12_000 - 150 * k for k in range(1, 15)] + [10_600.0]  # 하락 이평선 돌파
+                  + [10_600 + 100 * k for k in range(1, 11)] + [11_000.0] * 2 + [12_500.0] * 13)
+        bars = [Bar(dy, c, c * 1.01, c * 0.99, c, 1_000_000) for dy, c in zip(days, closes)]
+        m = MaCrossSettings(ma_period=10, slope_days=2, min_amount=1e9, high_lookback=20, watch_days=20)
+        s = BacktestSettings(initial_cash=10_000_000)
+        s.params.slot_budget = 1_000_000
+        res = run_ma_cross({"A": ("A", bars)}, days[0], days[-1], s, m)
+        self.assertEqual(len(res.trades), 1)
+        t = res.trades[0]
+        self.assertEqual((t.surge_date, t.entry_date), (days[24], days[35]))
+        self.assertEqual((t.reason, t.exit_price), ("TAKE_PROFIT", 12_500))  # 전고점 12,120 위에서 시가 출발
+        m.min_upside_pct = 15  # 전고점까지 여유 부족 → 매수 안 함
+        self.assertEqual(run_ma_cross({"A": ("A", bars)}, days[0], days[-1], s, m).trades, [])
+        m.min_upside_pct, m.target = 7, "since"  # 돌파 뒤 최고가 11,716 → 매수가 대비 7% 미만 → 매수 안 함
+        self.assertEqual(run_ma_cross({"A": ("A", bars)}, days[0], days[-1], s, m).trades, [])
+        m.min_upside_pct = 5
+        t = run_ma_cross({"A": ("A", bars)}, days[0], days[-1], s, m).trades[0]
+        self.assertEqual((t.entry_date, t.exit_price), (days[35], 12_500))
+
+
+class RsiSecondTest(unittest.TestCase):
+    def test_second_oversold_flags(self):
+        from tossbot.backtest import RsiSettings, rsi_second_flags
+        rsi = [None, 40, 25, 20, 35, 45, 28, 26, 50, 29]
+        closes = [100, 100, 90, 85, 90, 95, 84, 83, 99, 98]
+        r = RsiSettings(buy_below=30, second_within=10)
+        self.assertEqual([i for i, f in enumerate(rsi_second_flags(closes, rsi, r)) if f], [6, 9])
+        r.second_reset = 40  # 4일째 35 → 40 미만이라도 5일째 45 로 회복했으니 6일째는 두 번째
+        self.assertEqual([i for i, f in enumerate(rsi_second_flags(closes, rsi, r)) if f], [6, 9])
+        r.second_reset, r.second_within = 0, 2  # 첫 과매도(2~3일)가 직전 2거래일보다 앞 → 6일째 아님
+        self.assertEqual([i for i, f in enumerate(rsi_second_flags(closes, rsi, r)) if f], [9])
+        r.second_within, r.second_diverge = 10, True  # 6일째: 종가 84 < 85, RSI 28 > 20 → 다이버전스
+        self.assertEqual([i for i, f in enumerate(rsi_second_flags(closes, rsi, r)) if f], [6])

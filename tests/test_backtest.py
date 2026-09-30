@@ -467,3 +467,18 @@ class MaCrossTest(unittest.TestCase):
         m.min_upside_pct = 5
         t = run_ma_cross({"A": ("A", bars)}, days[0], days[-1], s, m).trades[0]
         self.assertEqual((t.entry_date, t.exit_price), (days[35], 12_500))
+
+
+class RsiSecondTest(unittest.TestCase):
+    def test_second_oversold_flags(self):
+        from tossbot.backtest import RsiSettings, rsi_second_flags
+        rsi = [None, 40, 25, 20, 35, 45, 28, 26, 50, 29]
+        closes = [100, 100, 90, 85, 90, 95, 84, 83, 99, 98]
+        r = RsiSettings(buy_below=30, second_within=10)
+        self.assertEqual([i for i, f in enumerate(rsi_second_flags(closes, rsi, r)) if f], [6, 9])
+        r.second_reset = 40  # 4일째 35 → 40 미만이라도 5일째 45 로 회복했으니 6일째는 두 번째
+        self.assertEqual([i for i, f in enumerate(rsi_second_flags(closes, rsi, r)) if f], [6, 9])
+        r.second_reset, r.second_within = 0, 2  # 첫 과매도(2~3일)가 직전 2거래일보다 앞 → 6일째 아님
+        self.assertEqual([i for i, f in enumerate(rsi_second_flags(closes, rsi, r)) if f], [9])
+        r.second_within, r.second_diverge = 10, True  # 6일째: 종가 84 < 85, RSI 28 > 20 → 다이버전스
+        self.assertEqual([i for i, f in enumerate(rsi_second_flags(closes, rsi, r)) if f], [6])

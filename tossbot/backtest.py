@@ -1621,6 +1621,41 @@ class RsiSettings:
     min_amount: float = 0.0  # 신호일 거래대금 하한
     universe: dict | None = None  # {날짜: 종목 집합}
     max_price: float = 0.0  # 0 보다 크면 1주 가격 상한 (원)
+    # N > 0 이면 "두 번째 과매도"만 매수: RSI 가 buy_below 아래로 새로 들어온 날(전일 >= buy_below),
+    # 직전 N거래일 안에 이미 과매도 구간이 있었고 그 사이 RSI 가 second_reset 이상으로 회복했을 때
+    second_within: int = 0
+    second_reset: float = 0.0  # 0 이면 buy_below (한 번 30 위로 올라오기만 하면 됨)
+    second_diverge: bool = False  # 두 번째 종가가 첫 과매도 최저 종가보다 낮은데 RSI 는 더 높을 때만 (상승 다이버전스)
+
+
+def rsi_second_flags(closes: list[float], rsi: list[float | None], r: RsiSettings) -> list[bool]:
+    """i 날이 두 번째(이상) 과매도 진입일인지."""
+    out = [False] * len(closes)
+    reset = r.second_reset or r.buy_below
+    for i in range(1, len(closes)):
+        if rsi[i] is None or rsi[i - 1] is None or not (rsi[i] < r.buy_below <= rsi[i - 1]):
+            continue
+        recovered = False
+        for j in range(i - 1, max(i - r.second_within, 0) - 1, -1):
+            v = rsi[j]
+            if v is None:
+                break
+            if v >= reset:
+                recovered = True
+            elif v < r.buy_below:
+                if not recovered:
+                    break  # second_reset 까지 회복 못 하고 다시 빠짐 → 같은 구간의 연장으로 봄
+                if r.second_diverge:
+                    k, lo_c, lo_r = j, closes[j], v  # 첫 과매도 구간 최저 종가·RSI
+                    while k - 1 >= 0 and rsi[k - 1] is not None and rsi[k - 1] < r.buy_below:
+                        k -= 1
+                        lo_c, lo_r = min(lo_c, closes[k]), min(lo_r, rsi[k])
+                    out[i] = closes[i] < lo_c and rsi[i] > lo_r
+                else:
+                    out[i] = True
+                break
+        # N거래일 안에 앞선 과매도가 없으면 첫 번째 과매도 → 매수 안 함
+    return out
 
 
 def run_rsi(
@@ -1636,6 +1671,8 @@ def run_rsi(
     series = _prepare(data)
     calendar = sorted({d for ser in series.values() for d in ser.days if start <= d <= end})
     rsi = {sym: rsi_series([x.close for x in ser.bars], r.period) for sym, ser in series.items()}
+    second = {sym: rsi_second_flags([x.close for x in ser.bars], rsi[sym], r) for sym, ser in series.items()
+              } if r.second_within else None
     csum: dict[str, list[float]] = {}
     for sym, ser in series.items():
         acc, run = [0.0], 0.0
@@ -1689,6 +1726,8 @@ def run_rsi(
                 continue
             i = ser.index.get(day)
             if i is None or i < 21 or rsi[sym][i] is None or rsi[sym][i] >= r.buy_below:
+                continue
+            if second is not None and not second[sym][i]:
                 continue
             bar = ser.bars[i]
             if r.universe is not None and sym not in r.universe.get(day, ()):
@@ -2331,6 +2370,10 @@ def main(argv: list[str] | None = None) -> None:
     r.add_argument("--bear-min-ma", type=int, default=0,
                    help="mapullback bear: 첫 음봉 종가가 N일선 아래면 매수 안 함 (0 = 조건 없음)")
     r.add_argument("--no-above-ma", action="store_true", help="mapullback: 기준봉 종가 이평선 위 조건 끄기")
+    r.add_argument("--rsi-second", type=int, default=0,
+                   help="rsi: N > 0 이면 직전 N거래일 안에 과매도가 한 번 있었고 다시 과매도로 들어온 날만 매수")
+    r.add_argument("--rsi-second-reset", type=float, default=0.0, help="rsi: 두 과매도 사이 RSI 가 이 값 이상 회복 (0 = --rsi-buy)")
+    r.add_argument("--rsi-diverge", action="store_true", help="rsi: 두 번째 종가 < 첫 최저 종가, RSI > 첫 최저 RSI 일 때만")
     r.add_argument("--mc-ma", type=int, default=50, help="macross: 이평선 기간")
     r.add_argument("--mc-slope", type=int, default=5, help="macross: 기울기 비교 거래일 수")
     r.add_argument("--mc-lookback", type=int, default=120, help="macross: 전고점 = 돌파 전 N거래일 최고 고가")
@@ -2555,7 +2598,9 @@ def main(argv: list[str] | None = None) -> None:
     elif args.strategy == "rsi":
         rs = RsiSettings(period=args.rsi_period, buy_below=args.rsi_buy, sell_above=args.rsi_sell,
                          trend_ma=args.rsi_trend_ma, exit_ma=args.rsi_exit_ma, stop_loss_pct=args.stop_loss,
-                         max_hold_days=args.max_hold, min_amount=args.min_day_amount, max_price=args.max_price)
+                         max_hold_days=args.max_hold, min_amount=args.min_day_amount, max_price=args.max_price,
+                         second_within=args.rsi_second, second_reset=args.rsi_second_reset,
+                         second_diverge=args.rsi_diverge)
         if args.top_universe:
             rs.universe, _ = load_top_universe(args.marcap_dir, f"{min(args.years) - 1}-12-01", top_n=args.top_universe)
         elif args.universe_marcap:

@@ -1357,6 +1357,8 @@ class MaCrossSettings:
     stop_loss_pct: float = 5.0  # 0 = 손절 없음
     max_hold_days: int = 0  # 0 = 제한 없음. N거래일째 종가 매도
     ma_exit_pct: float = 0.0  # > 0 이면 종가가 이평선보다 이 % 넘게 아래로 마감한 날 종가 매도
+    # 전고점 기준: before = 돌파 전 high_lookback 거래일 최고 고가 / since = 돌파일부터 매수 전날까지 최고 고가
+    target: str = "before"
 
 
 def run_ma_cross(
@@ -1450,6 +1452,8 @@ def run_ma_cross(
             if bar.low > level:
                 continue
             del watch[sym]  # 조건 맞는 첫 터치에서만 판단
+            if m.target == "since":
+                target = max(x.high for x in ser.bars[k:i])
             if bar.open <= level:
                 if bar.open < level * (1 - m.max_break_pct / 100):
                     continue
@@ -2331,6 +2335,8 @@ def main(argv: list[str] | None = None) -> None:
     r.add_argument("--mc-slope", type=int, default=5, help="macross: 기울기 비교 거래일 수")
     r.add_argument("--mc-lookback", type=int, default=120, help="macross: 전고점 = 돌파 전 N거래일 최고 고가")
     r.add_argument("--mc-upside", type=float, default=5.0, help="macross: 매수가 대비 전고점까지 최소 여유 %%")
+    r.add_argument("--mc-target", choices=["before", "since"], default="before",
+                   help="macross: 전고점 before = 돌파 전 --mc-lookback 일 최고가 / since = 돌파일~매수 전날 최고가")
     r.add_argument("--mc-ma-exit", type=float, default=0.0, help="macross: 종가가 이평선보다 N%% 아래면 종가 매도 (0 = 없음)")
     r.add_argument("--pullback-ma", type=int, default=200, help="mapullback: 눌림 매수 이평선 기간")
     r.add_argument("--watch-days", type=int, default=10, help="retest: 기준봉 뒤 N거래일 안에 닿아야 매수")
@@ -2565,7 +2571,7 @@ def main(argv: list[str] | None = None) -> None:
         mc = MaCrossSettings(ma_period=args.mc_ma, slope_days=args.mc_slope, min_amount=args.min_day_amount or 1e10,
                              watch_days=args.watch_days, high_lookback=args.mc_lookback, min_upside_pct=args.mc_upside,
                              max_break_pct=args.max_break, stop_loss_pct=args.stop_loss, max_hold_days=args.max_hold,
-                             ma_exit_pct=args.mc_ma_exit)
+                             ma_exit_pct=args.mc_ma_exit, target=args.mc_target)
         runner = lambda y0, y1: run_ma_cross(data, y0, y1, settings, mc)  # noqa: E731
     elif args.strategy == "mapullback":
         mp = MaPullbackSettings(surge_pct=args.surge_pct, min_amount=args.min_day_amount or 2e11,

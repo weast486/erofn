@@ -462,3 +462,8 @@ class MaCrossTest(unittest.TestCase):
         self.assertEqual((t.reason, t.exit_price), ("TAKE_PROFIT", 12_500))  # 전고점 12,120 위에서 시가 출발
         m.min_upside_pct = 15  # 전고점까지 여유 부족 → 매수 안 함
         self.assertEqual(run_ma_cross({"A": ("A", bars)}, days[0], days[-1], s, m).trades, [])
+        m.min_upside_pct, m.target = 7, "since"  # 돌파 뒤 최고가 11,716 → 매수가 대비 7% 미만 → 매수 안 함
+        self.assertEqual(run_ma_cross({"A": ("A", bars)}, days[0], days[-1], s, m).trades, [])
+        m.min_upside_pct = 5
+        t = run_ma_cross({"A": ("A", bars)}, days[0], days[-1], s, m).trades[0]
+        self.assertEqual((t.entry_date, t.exit_price), (days[35], 12_500))

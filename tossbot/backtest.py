@@ -1343,6 +1343,166 @@ def run_ma_pullback(
 
 
 @dataclass
+class MaCrossSettings:
+    """ma_period 일선이 하락 기울기일 때 종가가 이평선을 상향 돌파(기준일) → 이후 watch_days 안에 이평선이
+    상승 기울기로 바뀐 상태에서 위에서 내려와 이평선에 닿으면 이평선 가격(전일까지 평균) 지정가 매수.
+    목표가 = 돌파 전 high_lookback 거래일의 최고 고가(전고점) 지정가 매도, 손절 stop_loss_pct %."""
+    ma_period: int = 50
+    slope_days: int = 5  # 기울기 = 오늘 이평선 vs slope_days 거래일 전 이평선
+    min_amount: float = 10_000_000_000  # 돌파일 거래대금 하한
+    watch_days: int = 60  # 돌파 다음 날부터 N거래일 안에 닿아야 매수
+    high_lookback: int = 120  # 전고점 = 돌파일 직전 N거래일 최고 고가
+    min_upside_pct: float = 5.0  # 매수가 대비 전고점까지 이 % 이상 남아야 매수
+    max_break_pct: float = 3.0  # 시가가 이평선보다 이 % 넘게 아래서 시작하면 매수 취소
+    stop_loss_pct: float = 5.0  # 0 = 손절 없음
+    max_hold_days: int = 0  # 0 = 제한 없음. N거래일째 종가 매도
+    ma_exit_pct: float = 0.0  # > 0 이면 종가가 이평선보다 이 % 넘게 아래로 마감한 날 종가 매도
+
+
+def run_ma_cross(
+    data: dict[str, tuple[str, list[Bar]]],
+    start: date,
+    end: date,
+    s: BacktestSettings | None = None,
+    m: MaCrossSettings | None = None,
+) -> Result:
+    s = s or BacktestSettings()
+    m = m or MaCrossSettings()
+    budget = s.params.slot_budget
+    series = _prepare(data)
+    calendar = sorted({d for ser in series.values() for d in ser.days if start <= d <= end})
+    mas: dict[str, list[float | None]] = {}
+    for sym, ser in series.items():
+        acc, run = [0.0], 0.0
+        for x in ser.bars:
+            run += x.close
+            acc.append(run)
+        n = m.ma_period
+        mas[sym] = [(acc[i + 1] - acc[i + 1 - n]) / n if i + 1 >= n else None for i in range(len(ser.bars))]
+
+    def slope(sym: str, i: int) -> int:
+        """1 상승 / -1 하락 / 0 모름·보합."""
+        if i - m.slope_days < 0:
+            return 0
+        a, b = mas[sym][i], mas[sym][i - m.slope_days]
+        if a is None or b is None or a == b:
+            return 0
+        return 1 if a > b else -1
+
+    watch: dict[str, tuple[int, float, float]] = {}  # sym -> (돌파 인덱스, 전고점, 거래대금)
+    cash = s.initial_cash
+    positions: dict[str, Trade] = {}
+    targets: dict[str, float] = {}
+    trades: list[Trade] = []
+    equity_curve: list[tuple[date, float]] = []
+    last_close: dict[str, float] = {}
+
+    def close_position(t: Trade, day: date, price: float, reason: str) -> None:
+        nonlocal cash
+        proceeds = _sell_value(t.qty, price, day.year, s)
+        t.exit_date, t.exit_price, t.reason = day, price, reason
+        t.pnl = proceeds - t.qty * t.entry_price * (1 + s.commission)
+        cash += proceeds
+        del positions[t.symbol]
+
+    def stop_of(price: float) -> float:
+        return round_down_to_tick(price * (1 - m.stop_loss_pct / 100))
+
+    for day in calendar:
+        # 1) 청산: 손절 / 전고점 익절 (같은 날 둘 다면 손절) / 이평선 이탈 / 보유기간
+        for sym, t in list(positions.items()):
+            ser = series[sym]
+            i = ser.index.get(day)
+            t.hold_days += 1
+            if i is None or t.entry_date == day:
+                continue
+            bar = ser.bars[i]
+            stop = stop_of(t.entry_price) if m.stop_loss_pct > 0 else None
+            tp = round_up_to_tick(targets[sym])
+            if stop and bar.open <= stop:
+                close_position(t, day, bar.open * (1 - s.slippage), "STOP_LOSS")
+            elif bar.open >= tp:
+                close_position(t, day, bar.open, "TAKE_PROFIT")
+            elif stop and bar.low <= stop:
+                close_position(t, day, stop * (1 - s.slippage), "STOP_LOSS")
+            elif bar.high >= tp:
+                close_position(t, day, tp, "TAKE_PROFIT")
+            elif m.ma_exit_pct and mas[sym][i] and bar.close < mas[sym][i] * (1 - m.ma_exit_pct / 100):
+                close_position(t, day, bar.close * (1 - s.slippage), "MA_EXIT")
+            elif m.max_hold_days and t.hold_days >= m.max_hold_days:
+                close_position(t, day, bar.close * (1 - s.slippage), "MAX_HOLD")
+
+        # 2) 이평선 상승 기울기에서 위에서 내려와 닿으면 매수
+        signals = []
+        for sym, (k, target, amt) in list(watch.items()):
+            ser = series[sym]
+            i = ser.index.get(day)
+            if i is None or i <= k:
+                continue
+            if i - k > m.watch_days:
+                del watch[sym]
+                continue
+            level_raw = mas[sym][i - 1]
+            if level_raw is None or slope(sym, i - 1) <= 0 or ser.bars[i - 1].close <= level_raw:
+                continue  # 이평선 하락·보합 중이거나 전일 종가가 이평선 아래 (위에서 닿는 것만)
+            level = round_down_to_tick(level_raw)
+            bar = ser.bars[i]
+            if bar.low > level:
+                continue
+            del watch[sym]  # 조건 맞는 첫 터치에서만 판단
+            if bar.open <= level:
+                if bar.open < level * (1 - m.max_break_pct / 100):
+                    continue
+                fill = bar.open
+            else:
+                fill = level
+            if target < fill * (1 + m.min_upside_pct / 100):
+                continue  # 전고점까지 여유 부족 (이미 넘었거나 가까움)
+            if sym not in positions and fill <= budget:
+                signals.append((amt, sym, fill, bar, target, ser.bars[k].day))
+        slots = s.num_slots - len(positions)
+        signals.sort(key=lambda x: x[0], reverse=True)
+        for _, sym, fill, bar, target, cross_day in signals[:max(slots, 0)]:
+            price = fill * (1 + s.slippage)
+            qty = int(budget // round_up_to_tick(fill * (1 + BUY_LIMIT_SLIPPAGE)))
+            cost = qty * price * (1 + s.commission)
+            if qty <= 0 or cost > cash:
+                continue
+            cash -= cost
+            t = Trade(sym, series[sym].name, day, price, qty, surge_date=cross_day)
+            positions[sym] = t
+            targets[sym] = target
+            trades.append(t)
+            if m.stop_loss_pct > 0 and bar.low <= stop_of(price):
+                close_position(t, day, stop_of(price) * (1 - s.slippage), "STOP_LOSS")
+
+        # 3) 오늘 종가로 하락 기울기 이평선 상향 돌파 등록
+        for sym, ser in series.items():
+            i = ser.index.get(day)
+            if i is None or i < max(1, m.high_lookback) or sym in positions:
+                continue
+            a, a0 = mas[sym][i], mas[sym][i - 1]
+            bar, prev = ser.bars[i], ser.bars[i - 1]
+            if a is None or a0 is None or not (prev.close <= a0 and bar.close > a):
+                continue
+            if slope(sym, i) >= 0 or bar.close * bar.volume < m.min_amount:
+                continue
+            target = max(x.high for x in ser.bars[i - m.high_lookback:i])
+            watch[sym] = (i, target, bar.close * bar.volume)
+
+        # 4) 평가
+        for sym in positions:
+            i = series[sym].index.get(day)
+            if i is not None:
+                last_close[sym] = series[sym].bars[i].close
+        equity = cash + sum(t.qty * last_close.get(sym, t.entry_price) for sym, t in positions.items())
+        equity_curve.append((day, equity))
+
+    final = equity_curve[-1][1] if equity_curve else s.initial_cash
+    return Result(start, end, s.initial_cash, final, trades, equity_curve, len(positions))
+
+
+@dataclass
 class VolBreakoutSettings:
     """변동성 돌파 (래리 윌리엄스): 오늘 시가 + 전일 (고가 - 저가) x k 를 장중에 넘으면 그 가격에 매수,
     다음 거래일 시가에 매도. 후보는 전일 거래대금 min_amount 이상, 여러 종목이 닿으면 전일 거래대금 큰 순
@@ -2130,7 +2290,7 @@ def main(argv: list[str] | None = None) -> None:
     r.add_argument("--cache", type=Path, default=DEFAULT_CACHE)
     r.add_argument("--out", type=Path, default=Path("backtest_results"))
     r.add_argument("--env", default=".env")
-    r.add_argument("--strategy", choices=["pullback", "breakout", "limitup", "surgedoji", "retest", "mapullback", "volbreak", "rsi", "combo"], default="pullback",
+    r.add_argument("--strategy", choices=["pullback", "breakout", "limitup", "surgedoji", "retest", "mapullback", "volbreak", "rsi", "combo", "macross"], default="pullback",
                    help="pullback: 급등 후 이평선 터치 / breakout: 종가 N일 신고가 매수·M일 신저가 매도 / "
                         "limitup: 전일 상한가 종목 시초가 매수 / "
                         "surgedoji: 거래대금 상위 +15%% 급등 후 거래량 급감 단봉 음봉 종가 매수 / "
@@ -2167,6 +2327,11 @@ def main(argv: list[str] | None = None) -> None:
     r.add_argument("--bear-min-ma", type=int, default=0,
                    help="mapullback bear: 첫 음봉 종가가 N일선 아래면 매수 안 함 (0 = 조건 없음)")
     r.add_argument("--no-above-ma", action="store_true", help="mapullback: 기준봉 종가 이평선 위 조건 끄기")
+    r.add_argument("--mc-ma", type=int, default=50, help="macross: 이평선 기간")
+    r.add_argument("--mc-slope", type=int, default=5, help="macross: 기울기 비교 거래일 수")
+    r.add_argument("--mc-lookback", type=int, default=120, help="macross: 전고점 = 돌파 전 N거래일 최고 고가")
+    r.add_argument("--mc-upside", type=float, default=5.0, help="macross: 매수가 대비 전고점까지 최소 여유 %%")
+    r.add_argument("--mc-ma-exit", type=float, default=0.0, help="macross: 종가가 이평선보다 N%% 아래면 종가 매도 (0 = 없음)")
     r.add_argument("--pullback-ma", type=int, default=200, help="mapullback: 눌림 매수 이평선 기간")
     r.add_argument("--watch-days", type=int, default=10, help="retest: 기준봉 뒤 N거래일 안에 닿아야 매수")
     r.add_argument("--max-break", type=float, default=3.0, help="retest: 시가가 매수가보다 N%% 넘게 낮으면 매수 취소")
@@ -2396,6 +2561,12 @@ def main(argv: list[str] | None = None) -> None:
         if args.vb_top:
             vb.universe, _ = load_top_universe(args.marcap_dir, f"{min(args.years) - 1}-12-01", top_n=args.vb_top)
         runner = lambda y0, y1: run_vol_breakout(data, y0, y1, settings, vb)  # noqa: E731
+    elif args.strategy == "macross":
+        mc = MaCrossSettings(ma_period=args.mc_ma, slope_days=args.mc_slope, min_amount=args.min_day_amount or 1e10,
+                             watch_days=args.watch_days, high_lookback=args.mc_lookback, min_upside_pct=args.mc_upside,
+                             max_break_pct=args.max_break, stop_loss_pct=args.stop_loss, max_hold_days=args.max_hold,
+                             ma_exit_pct=args.mc_ma_exit)
+        runner = lambda y0, y1: run_ma_cross(data, y0, y1, settings, mc)  # noqa: E731
     elif args.strategy == "mapullback":
         mp = MaPullbackSettings(surge_pct=args.surge_pct, min_amount=args.min_day_amount or 2e11,
                                 first_in_days=args.first_in_days, ma_period=args.pullback_ma,

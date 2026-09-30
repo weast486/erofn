@@ -439,3 +439,26 @@ class RsiTest(unittest.TestCase):
         self.assertEqual([(t.entry_date, t.exit_date) for t in alone.trades],
                          [(t.entry_date, t.exit_date) for t in shared.trades])
         self.assertAlmostEqual(alone.final_equity, shared.final_equity)
+
+
+class MaCrossTest(unittest.TestCase):
+    def test_cross_on_falling_ma_then_touch_on_rising_ma(self):
+        from tossbot.backtest import MaCrossSettings, run_ma_cross
+        days, d = [], date(2026, 1, 5)
+        while len(days) < 50:
+            if d.weekday() < 5:
+                days.append(d)
+            d += timedelta(days=1)
+        closes = ([12_000.0] * 10 + [12_000 - 150 * k for k in range(1, 15)] + [10_600.0]  # 하락 이평선 돌파
+                  + [10_600 + 100 * k for k in range(1, 11)] + [11_000.0] * 2 + [12_500.0] * 13)
+        bars = [Bar(dy, c, c * 1.01, c * 0.99, c, 1_000_000) for dy, c in zip(days, closes)]
+        m = MaCrossSettings(ma_period=10, slope_days=2, min_amount=1e9, high_lookback=20, watch_days=20)
+        s = BacktestSettings(initial_cash=10_000_000)
+        s.params.slot_budget = 1_000_000
+        res = run_ma_cross({"A": ("A", bars)}, days[0], days[-1], s, m)
+        self.assertEqual(len(res.trades), 1)
+        t = res.trades[0]
+        self.assertEqual((t.surge_date, t.entry_date), (days[24], days[35]))
+        self.assertEqual((t.reason, t.exit_price), ("TAKE_PROFIT", 12_500))  # 전고점 12,120 위에서 시가 출발
+        m.min_upside_pct = 15  # 전고점까지 여유 부족 → 매수 안 함
+        self.assertEqual(run_ma_cross({"A": ("A", bars)}, days[0], days[-1], s, m).trades, [])

@@ -2878,7 +2878,9 @@ class SectorGapSettings:
     pick_n: int = 3
     take_profit: float = 5.0  # 평균 매입가 대비
     stop_loss: float = 0.0  # 0 이면 손절 없음
-    first_weight: float = 0.5  # 1차(시가) 비중, 나머지는 2차(전일 종가)
+    first_weight: float = 0.5  # 1차(시가) 비중, 나머지는 2차(전일 종가). 1.0 이면 2차 없음
+    max_gap: float = 0.0  # >0 이면 시가 갭상승이 이 % 이하인 날만
+    stop_prev_close: bool = False  # 전일 종가 아래로 빠지면 손절
     buy_until: str = "15:00"
     exit_time: str = "15:15"
     commission: float = 0.00015
@@ -2932,7 +2934,7 @@ def simulate_sector_gap(sig: dict, day: list[MinuteBar], g: SectorGapSettings) -
     if not day:
         return None
     open_px, prev = day[0].open, sig["prev_close"]
-    if open_px <= prev:
+    if open_px <= prev or (g.max_gap and (open_px / prev - 1) * 100 > g.max_gap):
         return None
     w1, w2 = g.first_weight, 1 - g.first_weight
     fills: list[tuple[str, float, float]] = []  # (시각, 가격, 비중)
@@ -2945,6 +2947,9 @@ def simulate_sector_gap(sig: dict, day: list[MinuteBar], g: SectorGapSettings) -
                 exit_t, exit_px, reason = b.t, b.open * (1 - g.slippage), "TIME_EXIT"
                 break
             stop = avg * (1 - g.stop_loss / 100) if g.stop_loss else None
+            if g.stop_prev_close and b.low < prev:
+                exit_t, exit_px, reason = b.t, min(b.open, prev) * (1 - g.slippage), "STOP_PREV_CLOSE"
+                break
             if stop and b.low <= stop:
                 exit_t, exit_px, reason = b.t, min(b.open, stop) * (1 - g.slippage), "STOP_LOSS"
                 break
@@ -2958,7 +2963,7 @@ def simulate_sector_gap(sig: dict, day: list[MinuteBar], g: SectorGapSettings) -
             if not done1 and j >= 1 and b.low <= open_px:
                 fills.append((b.t, min(b.open, open_px), w1))
                 done1 = True
-            if not done2 and b.low <= prev:
+            if not done2 and w2 > 0 and b.low <= prev:
                 fills.append((b.t, min(b.open, prev), w2))
                 done2 = True
     if not fills:
@@ -3233,7 +3238,9 @@ def main(argv: list[str] | None = None) -> None:
     sg.add_argument("--pick-n", type=int, default=3)
     sg.add_argument("--take-profit", type=float, default=5.0)
     sg.add_argument("--stop-loss", type=float, default=0.0)
-    sg.add_argument("--first-weight", type=float, default=0.5)
+    sg.add_argument("--first-weight", type=float, default=0.5, help="1.0 이면 시가 1차만")
+    sg.add_argument("--max-gap", type=float, default=0.0, help="갭상승 이 %% 이하인 날만")
+    sg.add_argument("--stop-prev-close", action="store_true", help="전일 종가 아래로 빠지면 손절")
     sg.add_argument("--buy-until", default="15:00")
     sg.add_argument("--exit-time", default="15:15")
     sg.add_argument("--trades-out", type=Path, default=None)
@@ -3479,6 +3486,7 @@ def main(argv: list[str] | None = None) -> None:
         g = SectorGapSettings(top_n=args.top, min_sector_up=args.min_sector_up, pick=args.pick,
                               min_up_ratio=args.min_up_ratio, pick_n=args.pick_n, take_profit=args.take_profit,
                               stop_loss=args.stop_loss, first_weight=args.first_weight, buy_until=args.buy_until,
+                              max_gap=args.max_gap, stop_prev_close=args.stop_prev_close,
                               exit_time=args.exit_time)
         sigs, trades, missing = run_sector_gap(data, sectors, start, end, g, args.minute_dir)
         print_sector_gap_report(sigs, trades, missing)

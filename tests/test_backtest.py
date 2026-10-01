@@ -563,3 +563,13 @@ class SectorGapTest(unittest.TestCase):
         self.assertIsNone(simulate_sector_gap(self._sig(), self._day([(99, 101, 98, 100)] * 3), SectorGapSettings()))
         self.assertIsNone(simulate_sector_gap(self._sig(), self._day([(103, 106, 103, 105), (105, 107, 104, 106)]),
                                               SectorGapSettings()))
+
+    def test_gap_cap_and_prev_close_stop(self):
+        from tossbot.backtest import SectorGapSettings, simulate_sector_gap
+        g = SectorGapSettings(first_weight=1.0, max_gap=5, stop_prev_close=True, buy_until="10:00")
+        self.assertIsNone(simulate_sector_gap(self._sig(), self._day([(106, 107, 105, 106)] * 3), g))  # 갭 6%
+        day = self._day([(103, 104, 103, 104), (104, 104, 102.5, 103), (103, 103, 99.5, 100)])
+        t = simulate_sector_gap(self._sig(), day, g)
+        self.assertEqual(t["reason"], "STOP_PREV_CLOSE")
+        self.assertAlmostEqual(t["filled_weight"], 1.0)
+        self.assertAlmostEqual(t["exit_price"], 100 * 0.999, delta=0.01)

@@ -3057,6 +3057,7 @@ class PullBreakSettings:
     band: tuple[int, int] | None = None  # (5, 22): 위 이평선 위에 있다가 저가가 두 이평선 사이로 들어오면 눌림
     band_allow_below: bool = False  # True 면 아래 이평선 밑으로 빠져도 눌림으로 인정
     aligned: tuple[int, ...] = ()  # (5, 10, 20): 눌림 봉에서 5 > 10 > 20 이평 정배열일 때만
+    vwma: int = 0  # >0 이면 '전고점 돌파' 대신 n분봉 VWMA(이 개수) 터치 지정가 매수 (vwma_touch_events)
     bar_minutes: int = 5
     take_profit: float = 5.0
     buy_until: str = "14:59"
@@ -3152,10 +3153,46 @@ def pullback_break_events(warm: list[MinuteBar], day: list[MinuteBar], prev_clos
     return events
 
 
+def vwma_touch_events(warm: list[MinuteBar], day: list[MinuteBar], prev_close: float,
+                      s: "PullBreakSettings") -> list[dict]:
+    """n분봉 거래량가중이동평균(VWMA, s.vwma 개) 위에 있다가 1분봉 저가가 VWMA 에 닿으면 매수 (지정가 = VWMA,
+    시가가 이미 아래면 시가). VWMA 는 직전에 끝난 n분봉까지로 계산(전날 분봉 포함), 개수가 모자라면 신호 없음.
+    매수 순간 상승률 min_change% 이상·1주 max_price 이하만. 한 번 닿으면 VWMA 위로 다시 올라간 뒤에만 다음 신호."""
+    n = s.bar_minutes
+    bars = (to_bars_n(warm, n) if warm else [])
+    pv = [b.close * b.volume for b in bars]
+    vol = [b.volume for b in bars]
+    db = to_bars_n(day, n)
+    events = []
+    j = 0
+    above = False
+    cum = 0.0
+    for b in db:
+        end = _minutes(b.t)
+        vw = sum(pv[-s.vwma:]) / sum(vol[-s.vwma:]) if len(pv) >= s.vwma and sum(vol[-s.vwma:]) > 0 else None
+        while j < len(day) and _minutes(day[j].t) <= end:
+            m = day[j]
+            cum += m.close * m.volume
+            if vw is not None:
+                if above and m.low <= vw and m.t <= s.buy_until:
+                    price = min(m.open, vw)
+                    if (price >= prev_close * (1 + s.min_change / 100) and cum >= s.min_cum_amount
+                            and (not s.max_price or price <= s.max_price)):
+                        events.append({"time": m.t, "idx": j, "price": price, "stop": 0.0, "pivot": round(vw, 1),
+                                       "chg": (price / prev_close - 1) * 100})
+                    above = False
+                elif m.close > vw:
+                    above = True
+            j += 1
+        pv.append(b.close * b.volume)
+        vol.append(b.volume)
+    return events
+
+
 def _exit_trade(day: list[MinuteBar], ev: dict, s: PullBreakSettings) -> tuple[int, str, float, str]:
     """매수 후 청산: (청산 1분봉 위치, 시각, 가격, 사유). 매수 봉에서 손절가 닿으면 손절로 가정."""
     entry = ev["price"]
-    stop = entry * (1 - s.stop_pct / 100) if s.stop_pct else ev["stop"]
+    stop = entry * (1 - s.stop_pct / 100) if s.stop_pct else ev["stop"]  # 0 이면 손절 없음
     target = entry * (1 + s.take_profit / 100)
     i0 = ev["idx"]
     if s.hold_bars >= 0:
@@ -3259,11 +3296,15 @@ def run_pullback_break(days: dict[date, list[dict]], minute_dir: Path, s: PullBr
             day = load_minute(minute_dir, c["code"], d)
             if not day:
                 continue
-            warm = load_minute(minute_dir, c["code"], c["warm_day"]) if c.get("warm_day") else None
-            if warm is None and c.get("warm_day"):
-                warm = load_minute(minute_dir, c["code"], c["warm_day"], tail=True)
+            warm: list[MinuteBar] = []
+            for wd in c.get("warm_days") or ([c["warm_day"]] if c.get("warm_day") else []):
+                w = load_minute(minute_dir, c["code"], wd)
+                if w is None:
+                    w = load_minute(minute_dir, c["code"], wd, tail=True)
+                warm += w or []
             series[c["code"]] = day
-            for ev in pullback_break_events(warm or [], day, c["prev_close"], s):
+            finder = vwma_touch_events if s.vwma else pullback_break_events
+            for ev in finder(warm, day, c["prev_close"], s):
                 if ranks is not None:
                     k = _minutes(ev["time"]) - 540
                     rk = ranks.get(c["code"], [0] * 391)[min(max(k, 1), 390)]
@@ -3320,7 +3361,8 @@ def pullback_break_days(data: dict, start: date, end: date | None, min_change: f
             if top_amount and code not in tops.get(b.day if top_basis == "same" else p.day, ()):
                 continue
             if b.high >= p.close * (1 + min_change / 100) and amounts[i] >= min_day_amount:
-                out[b.day].append({"code": code, "name": name, "prev_close": p.close, "warm_day": p.day})
+                out[b.day].append({"code": code, "name": name, "prev_close": p.close, "warm_day": p.day,
+                                   "warm_days": [x.day for x in bars[max(0, i - 2):i]]})
     return out
 
 
@@ -3576,6 +3618,7 @@ def main(argv: list[str] | None = None) -> None:
                     help="예: 5 22 → 5이평 위에 있다가 저가가 5~22이평 사이에 닿으면 눌림 (--ma 대신)")
     pb.add_argument("--band-allow-below", action="store_true", help="--band 아래 이평선 밑으로 빠져도 눌림 인정")
     pb.add_argument("--aligned", type=int, nargs="+", default=[], help="예: 5 10 20 → 눌림 봉에서 이평선 정배열일 때만")
+    pb.add_argument("--vwma", type=int, default=0, help="N>0: 전고점 돌파 대신 n분봉 거래량가중이동평균 N 터치 시 매수")
     pb.add_argument("--bar-minutes", type=int, default=5)
     pb.add_argument("--take-profit", type=float, default=5.0)
     pb.add_argument("--stop-pct", type=float, default=0.0, help="손절 = 매수가 -N%% (0: 눌림 저점 이탈)")
@@ -3873,7 +3916,12 @@ def main(argv: list[str] | None = None) -> None:
                 for r in rows:
                     need[(r["code"], d.isoformat())] = 4
                     key = (r["code"], r["warm_day"].isoformat())
-                    need[key] = max(need.get(key, 1), 1)
+                    # VWMA 100(5분봉 500분)은 전날 하루치 + 그 전날 끝부분이 필요
+                    need[key] = max(need.get(key, 1), 4 if args.vwma else 1)
+                    if args.vwma:
+                        for wd in r["warm_days"][:-1]:
+                            k2 = (r["code"], wd.isoformat())
+                            need[k2] = max(need.get(k2, 1), 1)
             args.write_days.parent.mkdir(parents=True, exist_ok=True)
             with open(args.write_days, "w", encoding="utf-8", newline="") as f:
                 w = csv.writer(f)
@@ -3885,7 +3933,7 @@ def main(argv: list[str] | None = None) -> None:
         s = PullBreakSettings(min_change=args.min_change, max_price=args.max_price, min_cum_amount=args.min_amount, ma=args.ma,
                               band=tuple(args.band) if args.band else None, band_allow_below=args.band_allow_below,
                               aligned=tuple(args.aligned), rt_top=args.rt_top, stop_pct=args.stop_pct,
-                              entry_bar_stop=args.entry_bar_stop, hold_bars=args.hold_bars,
+                              entry_bar_stop=args.entry_bar_stop, hold_bars=args.hold_bars, vwma=args.vwma,
                               bar_minutes=args.bar_minutes, take_profit=args.take_profit, buy_until=args.buy_until,
                               exit_time=args.exit_time, max_trades=args.max_trades,
                               max_consec_losses=args.max_consec_losses)

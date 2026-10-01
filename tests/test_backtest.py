@@ -658,3 +658,14 @@ class PullBreakTest(unittest.TestCase):
             self.assertEqual(ranks["A"][2], 1)  # 09:02 직전: A 10 > B 1
             self.assertEqual(ranks["B"][3], 1)  # 09:03 직전: B 101 > A 20
             self.assertNotIn("C", ranks)
+
+    def test_vwma_touch_entry(self):
+        from tossbot.backtest import PullBreakSettings, vwma_touch_events
+        s = PullBreakSettings(vwma=3, bar_minutes=1, min_cum_amount=0)
+        warm = self._bars([(100, 100, 100, 100)] * 3, start="15:17")
+        # VWMA(3) ≈ 100 → 106 위로 갔다가 다시 VWMA 근처까지 내려오면 매수
+        day = self._bars([(106, 107, 106, 107), (107, 108, 107, 108), (108, 108, 104, 105)])
+        ev = vwma_touch_events(warm, day, 95, s)
+        self.assertEqual(len(ev), 1)
+        self.assertEqual(ev[0]["time"], "09:03")
+        self.assertAlmostEqual(ev[0]["price"], (100 + 107 + 108) / 3, places=3)

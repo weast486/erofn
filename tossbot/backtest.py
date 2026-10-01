@@ -1681,6 +1681,144 @@ def run_double_bottom(
 
 
 @dataclass
+class EngulfRetestSettings:
+    """하락 추세 상승 장악형 되돌림: 하락 추세(종가가 ma_period 일선 아래, 이평선이 slope_days 전보다 낮음) 중
+    전일 음봉 몸통을 감싸는 양봉(시가 <= 음봉 종가, 종가 >= 음봉 시가)이 나오고 양봉 몸통이 음봉 몸통의 body_mult 배 이상이면,
+    다음 날부터 watch_days 거래일 안에 음봉 시가까지 내려오면 그 가격 지정가 매수.
+    손절 = 음봉 저가 이탈(한 호가 아래), 익절 = 매수가 +take_profit_pct %."""
+    ma_period: int = 20
+    slope_days: int = 5
+    body_mult: float = 2.0
+    min_amount: float = 0.0  # 양봉 날 거래대금 하한
+    watch_days: int = 10
+    take_profit_pct: float = 20.0
+    max_hold_days: int = 0
+
+
+def run_engulf_retest(
+    data: dict[str, tuple[str, list[Bar]]],
+    start: date,
+    end: date,
+    s: BacktestSettings | None = None,
+    m: EngulfRetestSettings | None = None,
+) -> Result:
+    s = s or BacktestSettings()
+    m = m or EngulfRetestSettings()
+    budget = s.params.slot_budget
+    series = _prepare(data)
+    calendar = sorted({d for ser in series.values() for d in ser.days if start <= d <= end})
+    n = m.ma_period
+    mas: dict[str, list[float | None]] = {}
+    for sym, ser in series.items():
+        acc, run = [0.0], 0.0
+        for x in ser.bars:
+            run += x.close
+            acc.append(run)
+        mas[sym] = [(acc[i + 1] - acc[i + 1 - n]) / n if i + 1 >= n else None for i in range(len(ser.bars))]
+
+    watch: dict[str, tuple[int, float, float, float]] = {}  # sym -> (양봉 인덱스, 음봉 시가, 손절가, 거래대금)
+    cash = s.initial_cash
+    positions: dict[str, Trade] = {}
+    exits: dict[str, tuple[float, float]] = {}
+    trades: list[Trade] = []
+    equity_curve: list[tuple[date, float]] = []
+    last_close: dict[str, float] = {}
+
+    def close_position(t: Trade, day: date, price: float, reason: str) -> None:
+        nonlocal cash
+        proceeds = _sell_value(t.qty, price, day.year, s)
+        t.exit_date, t.exit_price, t.reason = day, price, reason
+        t.pnl = proceeds - t.qty * t.entry_price * (1 + s.commission)
+        cash += proceeds
+        del positions[t.symbol]
+
+    for day in calendar:
+        # 1) 청산: 음봉 저가 이탈 손절 / +N% 익절 (같은 날 둘 다면 손절)
+        for sym, t in list(positions.items()):
+            ser = series[sym]
+            i = ser.index.get(day)
+            t.hold_days += 1
+            if i is None or t.entry_date == day:
+                continue
+            bar = ser.bars[i]
+            stop, tp = exits[sym]
+            if bar.open <= stop:
+                close_position(t, day, bar.open * (1 - s.slippage), "STOP_LOSS")
+            elif bar.open >= tp:
+                close_position(t, day, bar.open, "TAKE_PROFIT")
+            elif bar.low <= stop:
+                close_position(t, day, stop * (1 - s.slippage), "STOP_LOSS")
+            elif bar.high >= tp:
+                close_position(t, day, tp, "TAKE_PROFIT")
+            elif m.max_hold_days and t.hold_days >= m.max_hold_days:
+                close_position(t, day, bar.close * (1 - s.slippage), "MAX_HOLD")
+
+        # 2) 음봉 시가 되돌림 지정가 매수
+        signals = []
+        for sym, (k, level_raw, stop, amt) in list(watch.items()):
+            ser = series[sym]
+            i = ser.index.get(day)
+            if i is None or i <= k:
+                continue
+            if i - k > m.watch_days:
+                del watch[sym]
+                continue
+            bar = ser.bars[i]
+            level = round_down_to_tick(level_raw)
+            if bar.low > level:
+                continue
+            del watch[sym]
+            fill = min(bar.open, level)
+            if fill <= stop:
+                continue  # 시가가 이미 손절가 아래
+            if sym not in positions and fill <= budget:
+                signals.append((amt, sym, fill, bar, stop, ser.bars[k].day))
+        slots = s.num_slots - len(positions)
+        signals.sort(key=lambda x: x[0], reverse=True)
+        for _, sym, fill, bar, stop, engulf_day in signals[:max(slots, 0)]:
+            price = fill * (1 + s.slippage)
+            qty = int(budget // round_up_to_tick(fill * (1 + BUY_LIMIT_SLIPPAGE)))
+            cost = qty * price * (1 + s.commission)
+            if qty <= 0 or cost > cash:
+                continue
+            cash -= cost
+            t = Trade(sym, series[sym].name, day, price, qty, surge_date=engulf_day)
+            positions[sym] = t
+            exits[sym] = (stop, round_up_to_tick(fill * (1 + m.take_profit_pct / 100)))
+            trades.append(t)
+            if bar.low <= stop:  # 매수 뒤 같은 날 저가 이탈 (보수적)
+                close_position(t, day, stop * (1 - s.slippage), "STOP_LOSS")
+
+        # 3) 오늘 종가로 하락 추세 상승 장악형 등록
+        for sym, ser in series.items():
+            i = ser.index.get(day)
+            if i is None or i < n + m.slope_days or sym in positions:
+                continue
+            b, p = ser.bars[i], ser.bars[i - 1]
+            ma_p, ma_old = mas[sym][i - 1], mas[sym][i - 1 - m.slope_days]
+            if ma_p is None or ma_old is None or not (p.close < ma_p and ma_p < ma_old):
+                continue  # 음봉 날 기준 하락 추세
+            body_p, body_b = p.open - p.close, b.close - b.open
+            if body_p <= 0 or body_b < body_p * m.body_mult or b.open > p.close or b.close < p.open:
+                continue
+            if b.close * b.volume < m.min_amount:
+                continue
+            stop = round_down_to_tick(p.low)
+            stop = round_down_to_tick(stop - tick_size(stop))
+            watch[sym] = (i, p.open, stop, b.close * b.volume)
+
+        for sym in positions:
+            i = series[sym].index.get(day)
+            if i is not None:
+                last_close[sym] = series[sym].bars[i].close
+        equity = cash + sum(t.qty * last_close.get(sym, t.entry_price) for sym, t in positions.items())
+        equity_curve.append((day, equity))
+
+    final = equity_curve[-1][1] if equity_curve else s.initial_cash
+    return Result(start, end, s.initial_cash, final, trades, equity_curve, len(positions))
+
+
+@dataclass
 class VolBreakoutSettings:
     """변동성 돌파 (래리 윌리엄스): 오늘 시가 + 전일 (고가 - 저가) x k 를 장중에 넘으면 그 가격에 매수,
     다음 거래일 시가에 매도. 후보는 전일 거래대금 min_amount 이상, 여러 종목이 닿으면 전일 거래대금 큰 순
@@ -2655,7 +2793,7 @@ def main(argv: list[str] | None = None) -> None:
     r.add_argument("--cache", type=Path, default=DEFAULT_CACHE)
     r.add_argument("--out", type=Path, default=Path("backtest_results"))
     r.add_argument("--env", default=".env")
-    r.add_argument("--strategy", choices=["pullback", "breakout", "limitup", "surgedoji", "retest", "mapullback", "volbreak", "rsi", "combo", "macross", "dbottom"], default="pullback",
+    r.add_argument("--strategy", choices=["pullback", "breakout", "limitup", "surgedoji", "retest", "mapullback", "volbreak", "rsi", "combo", "macross", "dbottom", "engulfretest"], default="pullback",
                    help="pullback: 급등 후 이평선 터치 / breakout: 종가 N일 신고가 매수·M일 신저가 매도 / "
                         "limitup: 전일 상한가 종목 시초가 매수 / "
                         "surgedoji: 거래대금 상위 +15%% 급등 후 거래량 급감 단봉 음봉 종가 매수 / "
@@ -2696,6 +2834,8 @@ def main(argv: list[str] | None = None) -> None:
                    help="rsi: N > 0 이면 직전 N거래일 안에 과매도가 한 번 있었고 다시 과매도로 들어온 날만 매수")
     r.add_argument("--rsi-second-reset", type=float, default=0.0, help="rsi: 두 과매도 사이 RSI 가 이 값 이상 회복 (0 = --rsi-buy)")
     r.add_argument("--rsi-diverge", action="store_true", help="rsi: 두 번째 종가 < 첫 최저 종가, RSI > 첫 최저 RSI 일 때만")
+    r.add_argument("--er-ma", type=int, default=20, help="engulfretest: 하락 추세 = 음봉 종가가 N일선 아래 + N일선 하락")
+    r.add_argument("--er-body", type=float, default=2.0, help="engulfretest: 양봉 몸통이 음봉 몸통의 N배 이상")
     r.add_argument("--db-days", type=int, default=60, help="dbottom: 하락 추세 = N거래일 최저가 + N일선 하락")
     r.add_argument("--db-drop", type=float, default=0.0, help="dbottom: 250거래일 최고가 대비 N%% 이상 하락한 저점만 (0 = 조건 없음)")
     r.add_argument("--db-amount-mult", type=float, default=0.0,
@@ -2946,6 +3086,11 @@ def main(argv: list[str] | None = None) -> None:
         if args.vb_top:
             vb.universe, _ = load_top_universe(args.marcap_dir, f"{min(args.years) - 1}-12-01", top_n=args.vb_top)
         runner = lambda y0, y1: run_vol_breakout(data, y0, y1, settings, vb)  # noqa: E731
+    elif args.strategy == "engulfretest":
+        ers = EngulfRetestSettings(ma_period=args.er_ma, body_mult=args.er_body, min_amount=args.min_day_amount,
+                                   watch_days=args.watch_days or 10, take_profit_pct=args.take_profit or 20.0,
+                                   max_hold_days=args.max_hold)
+        runner = lambda y0, y1: run_engulf_retest(data, y0, y1, settings, ers)  # noqa: E731
     elif args.strategy == "dbottom":
         dbs = DoubleBottomSettings(downtrend_days=args.db_days, drop_pct=args.db_drop,
                                    min_amount=args.min_day_amount or 1e10, min_change_pct=args.min_change or 0.0,

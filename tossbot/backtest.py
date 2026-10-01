@@ -1517,6 +1517,7 @@ class DoubleBottomSettings:
     drop_lookback: int = 250
     min_amount: float = 10_000_000_000  # 반등일·매수일 거래대금 하한
     min_change_pct: float = 0.0  # 반등일·매수일 전일 대비 상승률 하한
+    amount_mult: float = 0.0  # > 0 이면 반등일·매수일 거래대금이 직전 20거래일 평균의 N배 이상이어야 함
     min_bounce_pct: float = 10.0  # 반등 고점 H 가 L1 대비 이 % 이상이어야 눌림 인정
     near_pct: float = 5.0  # 눌림 저점이 L1 x (1 ± near_pct %) 안
     bounce_wait: int = 20  # L1 뒤 N거래일 안에 반등
@@ -1561,6 +1562,12 @@ def run_double_bottom(
 
     def big_up(bars: list[Bar], i: int) -> bool:
         b, p = bars[i], bars[i - 1]
+        if m.amount_mult > 0:
+            if i < 20:
+                return False
+            avg = sum(x.close * x.volume for x in bars[i - 20:i]) / 20
+            if b.close * b.volume < avg * m.amount_mult:
+                return False
         return (b.close > b.open and b.close * b.volume >= m.min_amount
                 and b.close >= p.close * (1 + m.min_change_pct / 100) and b.close > p.close)
 
@@ -2691,6 +2698,8 @@ def main(argv: list[str] | None = None) -> None:
     r.add_argument("--rsi-diverge", action="store_true", help="rsi: 두 번째 종가 < 첫 최저 종가, RSI > 첫 최저 RSI 일 때만")
     r.add_argument("--db-days", type=int, default=60, help="dbottom: 하락 추세 = N거래일 최저가 + N일선 하락")
     r.add_argument("--db-drop", type=float, default=0.0, help="dbottom: 250거래일 최고가 대비 N%% 이상 하락한 저점만 (0 = 조건 없음)")
+    r.add_argument("--db-amount-mult", type=float, default=0.0,
+                   help="dbottom: 반등일·매수일 거래대금이 직전 20거래일 평균의 N배 이상 (0 = 조건 없음)")
     r.add_argument("--db-bounce", type=float, default=10.0, help="dbottom: 반등 고점이 첫 저점 대비 최소 N%%")
     r.add_argument("--db-near", type=float, default=5.0, help="dbottom: 눌림이 첫 저점 ±N%% 안")
     r.add_argument("--db-pullback-wait", type=int, default=60, help="dbottom: 반등 뒤 N거래일 안에 눌림")
@@ -2940,7 +2949,7 @@ def main(argv: list[str] | None = None) -> None:
     elif args.strategy == "dbottom":
         dbs = DoubleBottomSettings(downtrend_days=args.db_days, drop_pct=args.db_drop,
                                    min_amount=args.min_day_amount or 1e10, min_change_pct=args.min_change or 0.0,
-                                   min_bounce_pct=args.db_bounce, near_pct=args.db_near,
+                                   amount_mult=args.db_amount_mult, min_bounce_pct=args.db_bounce, near_pct=args.db_near,
                                    pullback_wait=args.db_pullback_wait, entry_wait=args.db_entry_wait,
                                    min_upside_pct=args.db_upside, max_hold_days=args.max_hold)
         runner = lambda y0, y1: run_double_bottom(data, y0, y1, settings, dbs)  # noqa: E731

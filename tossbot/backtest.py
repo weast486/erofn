@@ -2548,7 +2548,7 @@ _MINUTE_INTERVALS = ("1m", "3m", "5m", "10m", "15m", "30m", "60m", "1h", "1min",
 
 
 def probe_toss_minute(out: Path, env: str = ".env", symbols: tuple[str, ...] = ("005930", "247540"),
-                      max_pages: int = 400, request_interval: float = 0.12) -> list[str]:
+                      request_interval: float = 0.12) -> list[str]:
     """토스증권 Open API 로 국내 분봉을 어디까지 받을 수 있는지 확인만 한다 (저장·주문 없음).
 
     확인 항목: 지원하는 분봉 간격, 한 번에 받는 최대 개수, 과거 이어받기 파라미터, 이어받기로 닿는 가장 오래된 날짜.
@@ -2632,19 +2632,30 @@ def probe_toss_minute(out: Path, env: str = ".env", symbols: tuple[str, ...] = (
         if not page_key:
             note(f"{interval} 결론: 최근 {span(raw)} 까지만")
             continue
+        # 하루씩 이어받으면 수백 번 요청해야 하므로, 날짜를 건너뛰며 그 시점 직전 데이터가 오는지만 본다
         for sym in symbols:
-            raw = candles(sym, interval, count)
-            total, pages = len(raw), 1
-            oldest = min((c["timestamp"] for c in raw), default=None)
-            while oldest and pages < max_pages:
-                older = [c for c in candles(sym, interval, count, {page_key: oldest}) if c["timestamp"] < oldest]
-                if not older:
-                    break
-                total += len(older)
-                pages += 1
-                oldest = min(c["timestamp"] for c in older)
-            more = " (확인 한도에서 멈춤, 더 있을 수 있음)" if pages >= max_pages else ""
-            note(f"{interval} 결론 {sym}: 가장 오래된 {kst(oldest) if oldest else '-'}, {pages}번 요청 {total}개{more}")
+            found = None
+            misses = 0
+            for days_back in (7, 30, 90, 180, 365, 730, 1095, 1825):
+                target = datetime.now(KST).replace(hour=15, minute=30, second=0, microsecond=0) - timedelta(days=days_back)
+                try:
+                    got = candles(sym, interval, count, {page_key: target.isoformat(timespec="milliseconds")})
+                except TossApiError as exc:
+                    note(f"  {sym} {days_back}일 전: 거부 ({exc.code})")
+                    got = []
+                # 그 시점 직전(5일 이내) 데이터가 와야 '있다'로 본다 (범위 밖이면 최근 것을 돌려줄 수도 있어서)
+                newest = max((c["timestamp"] for c in got), default="")
+                ok = bool(newest) and kst(newest) <= target.strftime("%Y-%m-%d %H:%M") \
+                    and kst(newest) >= (target - timedelta(days=5)).strftime("%Y-%m-%d %H:%M")
+                note(f"  {sym} {days_back}일 전({target:%Y-%m-%d}) 직전 요청 → {span(got)} {'있음' if ok else '없음'}")
+                if ok:
+                    found, misses = days_back, 0
+                else:
+                    misses += 1
+                    if misses >= 2:
+                        break
+            note(f"{interval} 결론 {sym}: " + (f"최소 {found}일 전({(datetime.now(KST) - timedelta(days=found)):%Y-%m-%d})까지 있음"
+                                               if found else "1주 전 데이터도 없음"))
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return lines

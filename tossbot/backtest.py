@@ -3330,7 +3330,7 @@ def download_toss_minute(days_file: Path, out_dir: Path, env: str = ".env", requ
             print(f"  {n} / {len(todo)}", flush=True)
     if failed:
         print(f"실패 {len(failed)}개: {failed[:20]} (다시 실행하면 이어받음)")
-    # 이 목록의 파일만 9MB 이하 zip 여러 개로 (구글 드라이브 연결은 한 파일 10MB 까지만 읽을 수 있음)
+    # 이 목록의 파일만 4MB 이하 zip 여러 개로 (구글 드라이브 연결은 큰 파일을 받다가 끊김, 10MB 한도)
     files = sorted({path_of(c, d, p) for c, d, p in need if path_of(c, d, p).exists()}
                    | {out_dir / f"{c}_{d}.csv" for c, d, _ in need if (out_dir / f"{c}_{d}.csv").exists()})
     parts = split_zip(files, out_dir.parent / f"{out_dir.name}_{days_file.stem}")
@@ -3338,7 +3338,7 @@ def download_toss_minute(days_file: Path, out_dir: Path, env: str = ".env", requ
     print("이 파일들을 모두 구글 드라이브에 올려 주세요.")
 
 
-def split_zip(files: list[Path], prefix: Path, limit: int = 9_000_000) -> list[Path]:
+def split_zip(files: list[Path], prefix: Path, limit: int = 4_000_000) -> list[Path]:
     """files 를 압축 후 크기 limit 이하 zip 여러 개(prefix_1.zip, prefix_2.zip ...)로 묶는다."""
     import zipfile
 

@@ -3051,6 +3051,7 @@ def download_sector_info(codes: list[str], out: Path, env: str = ".env", request
 @dataclass
 class PullBreakSettings:
     min_change: float = 5.0  # 매수 시점 전일 대비 상승률 하한 %
+    max_price: float = 100_000  # 1주 가격 상한 (0 이면 제한 없음)
     min_cum_amount: float = 0  # 매수 시점 장중 누적 거래대금 하한
     ma: int = 20  # 5분봉 이평선
     bar_minutes: int = 5
@@ -3108,7 +3109,8 @@ def pullback_break_events(warm: list[MinuteBar], day: list[MinuteBar], prev_clos
             cum += m.close * m.volume
             if armed and m.high > pivot and m.t <= s.buy_until:
                 price = max(m.open, pivot) * (1 + s.slippage)
-                if price >= prev_close * (1 + s.min_change / 100) and cum >= s.min_cum_amount:
+                if (price >= prev_close * (1 + s.min_change / 100) and cum >= s.min_cum_amount
+                        and (not s.max_price or price <= s.max_price)):
                     events.append({"time": m.t, "idx": j, "price": price, "stop": stop, "pivot": pivot,
                                    "chg": (price / prev_close - 1) * 100})
                 armed = False
@@ -3147,14 +3149,16 @@ def _exit_trade(day: list[MinuteBar], ev: dict, s: PullBreakSettings) -> tuple[i
     return len(day) - 1, last.t, last.close * (1 - s.slippage), "TIME_EXIT"
 
 
-def kelly_equity(trades: list[dict], scale: float, start: float = 1e7, window: int = 50, warmup: int = 20,
+def kelly_equity(trades: list[dict], scale: float, start: float = 1e6, window: int = 50, warmup: int = 20,
                  min_pct: float = 5.0, max_pct: float = 100.0, fixed_pct: float = 0.0) -> dict:
     """한 번에 한 종목씩 차례로 매매한 거래 목록에 비중을 입혀 계좌 곡선을 만든다.
 
     매매 금액 = 평가금액 x 비중. 비중 = 직전 window 건(이미 끝난 거래)의 켈리 비율 x scale (0.5 = 하프 켈리),
     min_pct ~ max_pct 로 제한. 끝난 거래가 warmup 건 미만이면 min_pct. fixed_pct > 0 이면 고정 비중.
+    수량은 정수 주 (매매 금액 // (매수가 x (1+수수료))). 1주도 못 사면 건너뛴다 (켈리 기록에는 신호 결과로 남김).
     """
     equity, peak, mdd = start, start, 0.0
+    n_traded = 0
     past: list[float] = []
     pcts = []
     by_month: dict[str, float] = {}
@@ -3168,7 +3172,11 @@ def kelly_equity(trades: list[dict], scale: float, start: float = 1e7, window: i
         pcts.append(pct)
         mo = t["trade_day"][:7]
         by_month.setdefault(mo, equity)
-        equity += equity * pct / 100 * t["ret_pct"] / 100
+        unit = t["entry_price"] * 1.00015
+        qty = int(equity * pct / 100 // unit)
+        if qty > 0:
+            equity += qty * unit * t["ret_pct"] / 100
+            n_traded += 1
         past.append(t["ret_pct"])
         peak = max(peak, equity)
         mdd = min(mdd, equity / peak - 1)
@@ -3176,7 +3184,7 @@ def kelly_equity(trades: list[dict], scale: float, start: float = 1e7, window: i
     month_ret = {m: ((by_month[months[k + 1]] if k + 1 < len(months) else equity) / by_month[m] - 1) * 100
                  for k, m in enumerate(months)}
     return {"ret_pct": (equity / start - 1) * 100, "mdd_pct": mdd * 100, "avg_pct": sum(pcts) / len(pcts) if pcts else 0,
-            "month_ret": month_ret}
+            "month_ret": month_ret, "traded": n_traded}
 
 
 def run_pullback_break(days: dict[date, list[dict]], minute_dir: Path, s: PullBreakSettings) -> list[dict]:
@@ -3458,6 +3466,8 @@ def main(argv: list[str] | None = None) -> None:
     pb.add_argument("--cache", type=Path, default=Path("data/ohlcv_long"))
     pb.add_argument("--minute-dir", type=Path, default=MINUTE_DIR)
     pb.add_argument("--min-change", type=float, default=5.0)
+    pb.add_argument("--max-price", type=float, default=100_000, help="1주 가격 상한 (0: 제한 없음)")
+    pb.add_argument("--start-capital", type=float, default=1e6, help="시작 금액 (비중·정수 주 계산)")
     pb.add_argument("--min-amount", type=float, default=0, help="장중 누적 거래대금 하한 (일봉 사전 필터도 같은 값)")
     pb.add_argument("--min-avg-amount", type=float, default=3e9, help="직전 20일 평균 거래대금 하한")
     pb.add_argument("--top-amount", type=int, default=50, help="거래대금 상위 N 종목만 (0: 제한 없음)")
@@ -3750,7 +3760,7 @@ def main(argv: list[str] | None = None) -> None:
             print(f"대상 {sum(len(v) for v in days.values())}건 → 받을 종목×날짜 {len(need)}개 "
                   f"(하루 전체 {sum(p == 4 for p in need.values())}, 전날 끝부분 {sum(p == 1 for p in need.values())})")
             return
-        s = PullBreakSettings(min_change=args.min_change, min_cum_amount=args.min_amount, ma=args.ma,
+        s = PullBreakSettings(min_change=args.min_change, max_price=args.max_price, min_cum_amount=args.min_amount, ma=args.ma,
                               bar_minutes=args.bar_minutes, take_profit=args.take_profit, buy_until=args.buy_until,
                               exit_time=args.exit_time, max_trades=args.max_trades,
                               max_consec_losses=args.max_consec_losses)
@@ -3766,9 +3776,10 @@ def main(argv: list[str] | None = None) -> None:
         if trades:
             for label, kw in (("매번 전액", {"fixed_pct": 100}), ("고정 10%", {"fixed_pct": 10}),
                               ("풀 켈리", {"scale": 1.0}), ("하프 켈리", {"scale": 0.5})):
-                e = kelly_equity(trades, kw.get("scale", 1.0), fixed_pct=kw.get("fixed_pct", 0))
+                e = kelly_equity(trades, kw.get("scale", 1.0), start=args.start_capital, fixed_pct=kw.get("fixed_pct", 0))
                 months = " / ".join(f"{m[5:]}월 {r:+.1f}%" for m, r in e["month_ret"].items())
-                print(f"  {label}: 계좌 {e['ret_pct']:+.1f}% (MDD {e['mdd_pct']:.1f}%, 평균 비중 {e['avg_pct']:.0f}%) | {months}")
+                print(f"  {label}: 계좌 {e['ret_pct']:+.1f}% (MDD {e['mdd_pct']:.1f}%, 평균 비중 {e['avg_pct']:.0f}%, "
+                      f"실제 매수 {e['traded']}건) | {months}")
         if args.trades_out and trades:
             args.trades_out.parent.mkdir(parents=True, exist_ok=True)
             with open(args.trades_out, "w", encoding="utf-8", newline="") as f:

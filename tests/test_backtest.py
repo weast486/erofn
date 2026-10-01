@@ -606,7 +606,7 @@ class PullBreakTest(unittest.TestCase):
 
     def test_kelly_equity_sizing(self):
         from tossbot.backtest import kelly_equity
-        trades = [{"trade_day": "2026-07-01", "ret_pct": r} for r in [5, -2] * 15]
+        trades = [{"trade_day": "2026-07-01", "entry_price": 1000, "ret_pct": r} for r in [5, -2] * 15]
         full = kelly_equity(trades, 1.0, warmup=10)
         half = kelly_equity(trades, 0.5, warmup=10)
         fixed = kelly_equity(trades, 1.0, fixed_pct=100)

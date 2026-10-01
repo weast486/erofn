@@ -573,3 +573,33 @@ class SectorGapTest(unittest.TestCase):
         self.assertEqual(t["reason"], "STOP_PREV_CLOSE")
         self.assertAlmostEqual(t["filled_weight"], 1.0)
         self.assertAlmostEqual(t["exit_price"], 100 * 0.999, delta=0.01)
+
+
+class PullBreakTest(unittest.TestCase):
+    def _bars(self, prices, start="09:01"):
+        from tossbot.backtest import MinuteBar
+        m0 = int(start[:2]) * 60 + int(start[3:])
+        return [MinuteBar(f"{(m0 + k) // 60:02d}:{(m0 + k) % 60:02d}", o, h, l, c, 1000)
+                for k, (o, h, l, c) in enumerate(prices)]
+
+    def test_to_5min_bars(self):
+        from tossbot.backtest import to_bars_n
+        b = to_bars_n(self._bars([(1, 2, 0.5, 1.5)] * 10), 5)
+        self.assertEqual([x.t for x in b], ["09:05", "09:10"])
+        self.assertEqual(b[0].volume, 5000)
+
+    def test_pullback_then_break_prior_high(self):
+        from tossbot.backtest import PullBreakSettings, pullback_break_events, _exit_trade
+        s = PullBreakSettings(ma=3, bar_minutes=1, min_cum_amount=0, take_profit=5)
+        warm = self._bars([(100, 100, 100, 100)] * 5, start="15:16")
+        day = self._bars([(104, 105, 104, 105), (105, 107, 105, 107), (107, 107, 104, 104.5),
+                          (104.5, 106, 104.5, 106), (106, 108, 106, 108), (108, 113, 108, 112)])
+        ev = pullback_break_events(warm, day, 100, s)
+        self.assertEqual(len(ev), 1)
+        self.assertEqual(ev[0]["time"], "09:05")
+        self.assertEqual(ev[0]["pivot"], 107)
+        self.assertEqual(ev[0]["stop"], 104)
+        i, t, px, reason = _exit_trade(day, ev[0], s)
+        self.assertEqual(reason, "TAKE_PROFIT")
+        # 상승률 조건 미달이면 신호 없음
+        self.assertEqual(pullback_break_events(warm, day, 105, s), [])

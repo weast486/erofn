@@ -3064,6 +3064,8 @@ class PullBreakSettings:
     max_trades: int = 5  # 하루 최대 매매 횟수
     max_consec_losses: int = 3  # 연속 손실 이 횟수면 그날 종료
     rt_top: int = 0  # >0 이면 매수 순간 장중 누적 거래대금 순위 이내만 (실시간 순위)
+    stop_pct: float = 0.0  # >0 이면 손절 = 매수가 -N% (0 이면 눌림 저점 이탈)
+    entry_bar_stop: str = "low"  # 매수한 1분봉 안 손절 판단: low(저가가 닿으면, 보수적) / close(종가가 손절가 이하일 때만)
     commission: float = 0.00015
     slippage: float = 0.001
 
@@ -3151,11 +3153,12 @@ def pullback_break_events(warm: list[MinuteBar], day: list[MinuteBar], prev_clos
 
 def _exit_trade(day: list[MinuteBar], ev: dict, s: PullBreakSettings) -> tuple[int, str, float, str]:
     """매수 후 청산: (청산 1분봉 위치, 시각, 가격, 사유). 매수 봉에서 손절가 닿으면 손절로 가정."""
-    entry, stop = ev["price"], ev["stop"]
+    entry = ev["price"]
+    stop = entry * (1 - s.stop_pct / 100) if s.stop_pct else ev["stop"]
     target = entry * (1 + s.take_profit / 100)
     i0 = ev["idx"]
-    if day[i0].low <= stop:
-        return i0, day[i0].t, stop * (1 - s.slippage), "STOP_LOSS"
+    if (day[i0].close if s.entry_bar_stop == "close" else day[i0].low) <= stop:
+        return i0, day[i0].t, min(stop, day[i0].close) * (1 - s.slippage), "STOP_LOSS"
     for i in range(i0 + 1, len(day)):
         b = day[i]
         if b.t >= s.exit_time:
@@ -3567,6 +3570,9 @@ def main(argv: list[str] | None = None) -> None:
     pb.add_argument("--aligned", type=int, nargs="+", default=[], help="예: 5 10 20 → 눌림 봉에서 이평선 정배열일 때만")
     pb.add_argument("--bar-minutes", type=int, default=5)
     pb.add_argument("--take-profit", type=float, default=5.0)
+    pb.add_argument("--stop-pct", type=float, default=0.0, help="손절 = 매수가 -N%% (0: 눌림 저점 이탈)")
+    pb.add_argument("--entry-bar-stop", choices=["low", "close"], default="low",
+                    help="매수한 1분봉 안 손절: low(저가가 닿으면, 보수적) / close(그 봉 종가가 손절가 이하일 때만)")
     pb.add_argument("--buy-until", default="14:59")
     pb.add_argument("--exit-time", default="15:00")
     pb.add_argument("--max-trades", type=int, default=5)
@@ -3868,7 +3874,8 @@ def main(argv: list[str] | None = None) -> None:
             return
         s = PullBreakSettings(min_change=args.min_change, max_price=args.max_price, min_cum_amount=args.min_amount, ma=args.ma,
                               band=tuple(args.band) if args.band else None, band_allow_below=args.band_allow_below,
-                              aligned=tuple(args.aligned), rt_top=args.rt_top,
+                              aligned=tuple(args.aligned), rt_top=args.rt_top, stop_pct=args.stop_pct,
+                              entry_bar_stop=args.entry_bar_stop,
                               bar_minutes=args.bar_minutes, take_profit=args.take_profit, buy_until=args.buy_until,
                               exit_time=args.exit_time, max_trades=args.max_trades,
                               max_consec_losses=args.max_consec_losses)

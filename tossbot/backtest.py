@@ -3368,14 +3368,18 @@ def pullback_break_days(data: dict, start: date, end: date | None, min_change: f
 
 # ---------------------------------------------------------------- 전일 급등주 다음 날 전일 종가/고점 돌파 (1분봉)
 def surge_break_days(data: dict, start: date, end: date | None, min_prev_change: float = 15.0,
-                     min_avg_amount: float = 3e9, max_price: float = 100_000) -> dict[date, list[dict]]:
-    """전일(D) 상승률 min_prev_change% 이상 → D+1 이 매매일. 직전 20일 평균 거래대금·1주 가격(D 종가) 조건."""
+                     min_avg_amount: float = 3e9, max_price: float = 100_000,
+                     max_prev_change: float = 0.0) -> dict[date, list[dict]]:
+    """전일(D) 상승률 min_prev_change% 이상(max_prev_change > 0 이면 그 미만까지) → D+1 이 매매일.
+    직전 20일 평균 거래대금·1주 가격(D 종가) 조건."""
     out: dict[date, list[dict]] = defaultdict(list)
     for code, (name, bars) in data.items():
         amounts = [b.close * b.volume for b in bars]
         for i in range(21, len(bars)):
             p, d = bars[i - 1], bars[i]
             if d.close < p.close * (1 + min_prev_change / 100) or d.volume <= 0:
+                continue
+            if max_prev_change and d.close >= p.close * (1 + max_prev_change / 100):
                 continue
             if sum(amounts[i - 20:i]) / 20 < min_avg_amount or (max_price and d.close > max_price):
                 continue
@@ -3726,6 +3730,7 @@ def main(argv: list[str] | None = None) -> None:
     sb.add_argument("--cache", type=Path, default=Path("data/ohlcv_long"))
     sb.add_argument("--minute-dir", type=Path, default=MINUTE_DIR)
     sb.add_argument("--min-prev-change", type=float, default=15.0, help="전일 상승률 하한 %%")
+    sb.add_argument("--max-prev-change", type=float, default=0.0, help="전일 상승률 상한 %% (미만, 0: 없음)")
     sb.add_argument("--min-avg-amount", type=float, default=3e9)
     sb.add_argument("--max-price", type=float, default=100_000)
     sb.add_argument("--stop-pct", type=float, default=2.0, help="손절 = 매수가 -N%% (0: 없음)")
@@ -4068,22 +4073,32 @@ def main(argv: list[str] | None = None) -> None:
         start = date.fromisoformat(args.start)
         end = date.fromisoformat(args.end) if args.end else None
         data = load_cache(args.cache)
-        days = surge_break_days(data, start, end, args.min_prev_change, args.min_avg_amount, args.max_price)
+        days = surge_break_days(data, start, end, args.min_prev_change, args.min_avg_amount, args.max_price,
+                                args.max_prev_change)
         if args.write_days:
             need: dict[tuple[str, str], int] = {}
             if args.write_days.exists():
                 with open(args.write_days, encoding="utf-8") as f:
                     for r in csv.DictReader(f):
                         need[(r["code"], r["date"])] = int(r.get("pages") or 4)
+            # 일봉으로 그날 기준가를 넘을 수 있었던 날만 (시가 < 기준가 < 고가). 일봉이 없는 날(최근)은 포함
+            daily = {(c, b.day): b for c, (_, bars) in data.items() for b in bars}
+            n_add = 0
             for d, rows in days.items():
                 for r in rows:
+                    level = r["prev_close"] if args.mode == "prevclose" else r["prev_high"]
+                    b = daily.get((r["code"], d))
+                    if b is not None and not (b.open < level < b.high):
+                        continue
                     need[(r["code"], d.isoformat())] = 4
+                    n_add += 1
             args.write_days.parent.mkdir(parents=True, exist_ok=True)
             with open(args.write_days, "w", encoding="utf-8", newline="") as f:
                 w = csv.writer(f)
                 w.writerow(["code", "date", "pages"])
                 w.writerows((c, d, p) for (c, d), p in sorted(need.items()))
-            print(f"대상 {sum(len(v) for v in days.values())}건 → 목록 {len(need)}개: {args.write_days}")
+            print(f"대상 {sum(len(v) for v in days.values())}건 중 {args.mode} 가능 {n_add}건 → 목록 {len(need)}개: "
+                  f"{args.write_days}")
             return
         s = PullBreakSettings(take_profit=args.take_profit, stop_pct=args.stop_pct, buy_until=args.buy_until,
                               exit_time=args.exit_time, entry_bar_stop=args.entry_bar_stop)

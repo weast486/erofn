@@ -3388,16 +3388,34 @@ def surge_break_days(data: dict, start: date, end: date | None, min_prev_change:
 
 
 def surge_break_event(day: list[MinuteBar], c: dict, mode: str, s: "PullBreakSettings",
-                      stop_daylow: bool = False) -> dict | None:
+                      stop_daylow: bool = False, retest: bool = False) -> dict | None:
     """mode prevclose: 시가가 전일 종가 아래(갭상승 제외)에서 시작해 전일 종가를 넘는 순간 매수.
     mode prevhigh: 시가가 전일 고가 아래에서 시작해 전일 고가를 넘는 순간 매수.
-    가격 = max(그 1분봉 시가, 기준가) + 슬리피지. stop_daylow 면 손절가 = 매수 전까지 당일 최저가."""
+    가격 = max(그 1분봉 시가, 기준가) + 슬리피지. stop_daylow 면 손절가 = 매수 전까지 당일 최저가.
+    retest: 돌파 순간이 아니라, 돌파 뒤 1분봉 종가가 기준가 위에서 끝난 다음 다시 기준가까지 내려오면
+    기준가 지정가 매수 (시가가 이미 아래면 시가)."""
     if not day:
         return None
     level = c["prev_close"] if mode == "prevclose" else c["prev_high"]
     if day[0].open >= level:
         return None  # 갭상승으로 이미 넘은 날 제외
     low = day[0].low
+    if retest:
+        broke = held = False
+        for j, m in enumerate(day):
+            if m.t > s.buy_until:
+                return None
+            if held and m.low <= level:
+                price = min(m.open, level)
+                return {"time": m.t, "idx": j, "price": price, "stop": low if stop_daylow else 0.0, "pivot": level,
+                        "chg": (price / c["prev_close"] - 1) * 100}
+            if broke and m.close > level:
+                held = True
+            if m.high > level:
+                broke = True
+                held = held or m.close > level
+            low = min(low, m.low)
+        return None
     for j, m in enumerate(day):
         if m.t > s.buy_until:
             return None
@@ -3410,7 +3428,7 @@ def surge_break_event(day: list[MinuteBar], c: dict, mode: str, s: "PullBreakSet
 
 
 def run_surge_break(days: dict[date, list[dict]], minute_dir: Path, mode: str, s: "PullBreakSettings",
-                    stop_daylow: bool = False) -> tuple[list[dict], int]:
+                    stop_daylow: bool = False, retest: bool = False) -> tuple[list[dict], int]:
     """종목·날짜마다 한 번씩 (서로 독립). (거래 목록, 분봉 없는 대상 수)."""
     trades, missing = [], 0
     for d in sorted(days):
@@ -3419,7 +3437,7 @@ def run_surge_break(days: dict[date, list[dict]], minute_dir: Path, mode: str, s
             if day is None:
                 missing += 1
                 continue
-            ev = surge_break_event(day, c, mode, s, stop_daylow)
+            ev = surge_break_event(day, c, mode, s, stop_daylow, retest)
             if not ev:
                 continue
             i, t, px, reason = _exit_trade(day, ev, s)
@@ -3712,6 +3730,7 @@ def main(argv: list[str] | None = None) -> None:
     sb.add_argument("--max-price", type=float, default=100_000)
     sb.add_argument("--stop-pct", type=float, default=2.0, help="손절 = 매수가 -N%% (0: 없음)")
     sb.add_argument("--stop-daylow", action="store_true", help="손절 = 매수 전까지 당일 최저가 (--stop-pct 0 과 함께)")
+    sb.add_argument("--retest", action="store_true", help="돌파 순간 대신, 돌파 뒤 기준가로 되돌아오면 지정가 매수")
     sb.add_argument("--take-profit", type=float, default=5.0)
     sb.add_argument("--entry-bar-stop", choices=["low", "close"], default="low")
     sb.add_argument("--buy-until", default="14:59")
@@ -4068,7 +4087,7 @@ def main(argv: list[str] | None = None) -> None:
             return
         s = PullBreakSettings(take_profit=args.take_profit, stop_pct=args.stop_pct, buy_until=args.buy_until,
                               exit_time=args.exit_time, entry_bar_stop=args.entry_bar_stop)
-        trades, missing = run_surge_break(days, args.minute_dir, args.mode, s, args.stop_daylow)
+        trades, missing = run_surge_break(days, args.minute_dir, args.mode, s, args.stop_daylow, args.retest)
         rets = [t["ret_pct"] for t in trades]
         print(f"대상 {sum(len(v) for v in days.values())}건 (분봉 없음 {missing}) → 매수 {len(trades)}건", end="")
         if rets:

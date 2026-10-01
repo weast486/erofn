@@ -682,3 +682,16 @@ class PullBreakTest(unittest.TestCase):
         self.assertEqual(surge_break_event(day, c, "prevhigh", s)["time"], "09:03")
         gap = self._bars([(102, 103, 101, 102)] * 3)
         self.assertIsNone(surge_break_event(gap, c, "prevclose", s))  # 갭상승으로 이미 위
+
+    def test_surge_break_retest(self):
+        from tossbot.backtest import PullBreakSettings, surge_break_event
+        s = PullBreakSettings()
+        c = {"prev_close": 100, "prev_high": 110}
+        # 98 → 102 돌파(종가 101 위) → 다음 봉에서 100 까지 되돌림 → 100 에 매수
+        day = self._bars([(98, 99, 97, 98), (98, 102, 98, 101), (101, 101.5, 99.5, 100.5), (100.5, 104, 100, 103)])
+        ev = surge_break_event(day, c, "prevclose", s, retest=True)
+        self.assertEqual(ev["time"], "09:03")
+        self.assertEqual(ev["price"], 100)
+        # 돌파만 하고 되돌림이 없으면 매수 없음
+        up = self._bars([(98, 99, 97, 98), (98, 102, 98, 101), (101, 104, 100.5, 103)])
+        self.assertIsNone(surge_break_event(up, c, "prevclose", s, retest=True))

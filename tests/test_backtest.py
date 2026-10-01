@@ -403,6 +403,17 @@ class NPatternTest(unittest.TestCase):
         bars[25] = Bar(days[25], 10_050, 11_300, 10_000, 11_200, 3_000_000)
         c = BreakoutSettings(npattern="C", np_rise_pct=10, np_amount=2e10)
         self.assertTrue(n_pattern_signal(bars, 31, c))
+        c.np_quiet = "any"  # 기준봉 뒤 거래량이 평균(3,000,000)과 같음 → 평균 이하
+        self.assertTrue(n_pattern_signal(bars, 31, c))
+        for j in range(26, 31):
+            x = bars[j]
+            bars[j] = Bar(x.day, x.open, x.high, x.low, x.close, 5_000_000)
+        self.assertFalse(n_pattern_signal(bars, 31, c))  # 거래량이 줄지 않음
+        bars[29] = Bar(days[29], 11_050, 11_150, 10_900, 11_050, 1_000_000)
+        self.assertTrue(n_pattern_signal(bars, 31, c))
+        c.np_quiet = "all"
+        self.assertFalse(n_pattern_signal(bars, 31, c))
+        c.np_quiet = ""
         self.assertFalse(n_pattern_signal(bars, 25, c))  # 기준봉 자체
         bars[28] = Bar(days[28], 11_000, 11_100, 9_900, 11_050, 3_000_000)  # 기준봉 저가 이탈
         self.assertFalse(n_pattern_signal(bars, 31, c))

@@ -397,6 +397,11 @@ class BreakoutSettings:
     np_base_ref: str = "low"
     np_min_gap: int = 2
     np_first_base: bool = True
+    # C: 기준봉 다음 날 ~ 어제 사이 거래량이 평균 이하로 떨어진 날 조건. "" 없음 / any = 하루 이상 / all = 모든 날.
+    # 평균 = 그날까지 np_vol_avg 일 평균 거래량(rolling) 또는 기준봉 전날까지 np_vol_avg 일 평균(base)
+    np_quiet: str = ""
+    np_vol_avg: int = 20
+    np_vol_basis: str = "rolling"
 
 
 def _np_strong(bars: list[Bar], k: int, b: "BreakoutSettings") -> bool:
@@ -417,7 +422,22 @@ def n_pattern_signal(bars: list[Bar], i: int, b: "BreakoutSettings") -> bool:
         if b.np_first_base and any(_np_strong(bars, j, b) for j in range(max(k - L, 1), k)):
             return False
         ref = bars[k].open if b.np_base_ref == "open" else bars[k].low
-        return min(x.low for x in bars[k + 1:i + 1]) >= ref
+        if min(x.low for x in bars[k + 1:i + 1]) < ref:
+            return False
+        if b.np_quiet:
+            n = b.np_vol_avg
+            if k < n:
+                return False
+            base_avg = sum(x.volume for x in bars[k - n:k]) / n
+
+            def quiet(j: int) -> bool:
+                avg = base_avg if b.np_vol_basis == "base" else sum(x.volume for x in bars[j + 1 - n:j + 1]) / n
+                return bars[j].volume <= avg
+
+            q = [quiet(j) for j in range(k + 1, i)]
+            if not q or not (all(q) if b.np_quiet == "all" else any(q)):
+                return False
+        return True
     if i < 2 * L + 1:
         return False
     closes = [x.close for x in bars[i - 2 * L:i + 1]]  # closes[-1] = 오늘
@@ -3964,6 +3984,11 @@ def main(argv: list[str] | None = None) -> None:
                         "C = 기준봉(--np-amount·--np-rise) 뒤 --np-lookback 일 안에 기준봉 저가를 안 깨고 같은 봉 재출현 시 종가 매수)")
     r.add_argument("--np-base-ref", choices=["low", "open"], default="low", help="breakout N자 C: 깨지 말아야 할 기준봉 가격")
     r.add_argument("--np-min-gap", type=int, default=2, help="breakout N자 C: 기준봉과 매수일 최소 간격 (거래일)")
+    r.add_argument("--np-quiet", choices=["", "any", "all"], default="",
+                   help="breakout N자 C: 기준봉 뒤~매수 전날 거래량이 평균 이하인 날이 하루 이상(any)/모든 날(all)")
+    r.add_argument("--np-vol-avg", type=int, default=20, help="breakout N자 C: 거래량 평균 기간 (거래일)")
+    r.add_argument("--np-vol-basis", choices=["rolling", "base"], default="rolling",
+                   help="breakout N자 C: 평균 = 그날까지 이동평균(rolling) / 기준봉 전날까지 평균(base)")
     r.add_argument("--np-any-base", action="store_true",
                    help="breakout N자 C: 기준봉 앞에 같은 조건 봉이 있어도 허용 (기본: 기준봉이 첫 번째여야 함)")
     r.add_argument("--np-lookback", type=int, default=20, help="breakout N자: 1차 고점·상승 탐색 기간 (거래일)")
@@ -4217,6 +4242,7 @@ def main(argv: list[str] | None = None) -> None:
                               npattern=args.npattern, np_lookback=args.np_lookback, np_rise_pct=args.np_rise,
                               np_min_pull=args.np_pull[0], np_max_pull=args.np_pull[1], np_amount=args.np_amount,
                               np_base_ref=args.np_base_ref, np_min_gap=args.np_min_gap, np_first_base=not args.np_any_base,
+                              np_quiet=args.np_quiet, np_vol_avg=args.np_vol_avg, np_vol_basis=args.np_vol_basis,
                               delay_hold_signal_open=args.delay_hold_open, delay_intraday=args.delay_intraday,
                               min_avg_trading_amount=settings.params.min_avg_trading_amount,
                               min_candle_pct=args.min_candle, candle_measure=args.candle_measure,

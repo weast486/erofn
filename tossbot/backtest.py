@@ -2758,8 +2758,9 @@ def load_minute(minute_dir: Path, code: str, d: date) -> list[MinuteBar] | None:
     if not path.exists():
         return None
     with open(path, encoding="utf-8") as f:
+        # 거래량 0 봉(09:00 장 시작 전, 15:21~15:30 동시호가 등 빈 봉)은 뺀다
         return [MinuteBar(r["time"], float(r["open"]), float(r["high"]), float(r["low"]), float(r["close"]),
-                          float(r["volume"])) for r in csv.DictReader(f)]
+                          float(r["volume"])) for r in csv.DictReader(f) if float(r["volume"]) > 0]
 
 
 def simulate_minute(sig: dict, warm: list[MinuteBar], day: list[MinuteBar], m: MinuteSettings) -> dict | None:

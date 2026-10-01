@@ -641,3 +641,20 @@ class PullBreakTest(unittest.TestCase):
         self.assertEqual(len(pullback_break_events(warm, day, 100, PullBreakSettings(aligned=(2, 3, 4), **base))), 1)
         # 역배열 요구 순서면 신호 없음
         self.assertEqual(pullback_break_events(warm, day, 100, PullBreakSettings(aligned=(4, 3, 2), **base)), [])
+
+    def test_realtime_amount_rank_uses_amount_before_minute(self):
+        from tossbot.backtest import realtime_amount_rank
+        with tempfile.TemporaryDirectory() as tmp:
+            d = date(2026, 8, 3)
+            def write(code, vols):
+                with open(Path(tmp) / f"{code}_{d.isoformat()}.csv", "w", encoding="utf-8") as f:
+                    f.write("time,open,high,low,close,volume\n")
+                    for k, v in enumerate(vols):
+                        t = 541 + k
+                        f.write(f"{t // 60:02d}:{t % 60:02d},100,100,100,100,{v}\n")
+            write("A", [10, 10, 10])
+            write("B", [1, 100, 1])
+            ranks = realtime_amount_rank(Path(tmp), d, ["A", "B", "C"])
+            self.assertEqual(ranks["A"][2], 1)  # 09:02 직전: A 10 > B 1
+            self.assertEqual(ranks["B"][3], 1)  # 09:03 직전: B 101 > A 20
+            self.assertNotIn("C", ranks)

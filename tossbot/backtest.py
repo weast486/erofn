@@ -3063,6 +3063,7 @@ class PullBreakSettings:
     exit_time: str = "15:00"
     max_trades: int = 5  # 하루 최대 매매 횟수
     max_consec_losses: int = 3  # 연속 손실 이 횟수면 그날 종료
+    rt_top: int = 0  # >0 이면 매수 순간 장중 누적 거래대금 순위 이내만 (실시간 순위)
     commission: float = 0.00015
     slippage: float = 0.001
 
@@ -3205,13 +3206,44 @@ def kelly_equity(trades: list[dict], scale: float, start: float = 1e6, window: i
             "month_ret": month_ret, "traded": n_traded}
 
 
-def run_pullback_break(days: dict[date, list[dict]], minute_dir: Path, s: PullBreakSettings) -> list[dict]:
+def realtime_amount_rank(minute_dir: Path, d: date, pool: list[str]) -> dict[str, list[int]]:
+    """pool 종목들의 분별 장중 누적 거래대금 순위. {종목: [09:01 ~ 15:30 각 분의 순위(1부터)]}.
+    m 분의 값은 그 분 직전까지(= m-1 분봉까지) 누적 기준 (매수 순간에 알 수 있는 값)."""
+    n_min = 390
+    cums: dict[str, list[float]] = {}
+    for code in pool:
+        bars = load_minute(minute_dir, code, d)
+        if not bars:
+            continue
+        per = [0.0] * (n_min + 1)
+        for b in bars:
+            k = _minutes(b.t) - 540
+            if 1 <= k <= n_min:
+                per[k] += b.close * b.volume
+        cum, acc = [0.0] * (n_min + 1), 0.0
+        for k in range(1, n_min + 1):
+            cum[k] = acc  # k 분봉이 끝나기 전까지
+            acc += per[k]
+        cums[code] = cum
+    ranks: dict[str, list[int]] = {c: [0] * (n_min + 1) for c in cums}
+    codes = list(cums)
+    for k in range(1, n_min + 1):
+        order = sorted(codes, key=lambda c: cums[c][k], reverse=True)
+        for r, c in enumerate(order, 1):
+            ranks[c][k] = r
+    return ranks
+
+
+def run_pullback_break(days: dict[date, list[dict]], minute_dir: Path, s: PullBreakSettings,
+                       rank_pool: dict[date, list[str]] | None = None) -> list[dict]:
     """days: {매매일: [{code, name, prev_close, warm_day}]}. 하루에 한 번에 한 종목만, 최대 max_trades 번,
-    연속 max_consec_losses 번 손실이면 그날 종료. 같은 시각 신호가 여럿이면 상승률 높은 종목."""
+    연속 max_consec_losses 번 손실이면 그날 종료. 같은 시각 신호가 여럿이면 상승률 높은 종목.
+    s.rt_top > 0 이면 매수 순간 장중 누적 거래대금 순위(rank_pool 종목 중)가 rt_top 이내인 신호만."""
     trades = []
     for d in sorted(days):
         events = []
         series = {}
+        ranks = realtime_amount_rank(minute_dir, d, rank_pool.get(d, [])) if s.rt_top and rank_pool else None
         for c in days[d]:
             day = load_minute(minute_dir, c["code"], d)
             if not day:
@@ -3221,6 +3253,12 @@ def run_pullback_break(days: dict[date, list[dict]], minute_dir: Path, s: PullBr
                 warm = load_minute(minute_dir, c["code"], c["warm_day"], tail=True)
             series[c["code"]] = day
             for ev in pullback_break_events(warm or [], day, c["prev_close"], s):
+                if ranks is not None:
+                    k = _minutes(ev["time"]) - 540
+                    rk = ranks.get(c["code"], [0] * 391)[min(max(k, 1), 390)]
+                    if not rk or rk > s.rt_top:
+                        continue
+                    ev["rank"] = rk
                 events.append({**ev, "code": c["code"], "name": c["name"]})
         events.sort(key=lambda e: (_minutes(e["time"]), -e["chg"]))
         free_at = -1
@@ -3237,6 +3275,7 @@ def run_pullback_break(days: dict[date, list[dict]], minute_dir: Path, s: PullBr
             trades.append({"trade_day": d.isoformat(), "code": ev["code"], "name": ev["name"],
                            "entry_time": ev["time"], "entry_price": round(ev["price"], 1),
                            "pivot": ev["pivot"], "stop": ev["stop"], "chg_pct": round(ev["chg"], 2),
+                           "rt_rank": ev.get("rank", ""),
                            "exit_time": t, "exit_price": round(px, 1), "reason": reason,
                            "ret_pct": round(ret * 100, 3)})
             n_trades += 1
@@ -3516,6 +3555,9 @@ def main(argv: list[str] | None = None) -> None:
     pb.add_argument("--min-amount", type=float, default=0, help="장중 누적 거래대금 하한 (일봉 사전 필터도 같은 값)")
     pb.add_argument("--min-avg-amount", type=float, default=3e9, help="직전 20일 평균 거래대금 하한")
     pb.add_argument("--top-amount", type=int, default=50, help="거래대금 상위 N 종목만 (0: 제한 없음)")
+    pb.add_argument("--rt-top", type=int, default=0,
+                    help="매수 순간 장중 누적 거래대금 순위 N 이내만 (순위는 그날 상위 --pool-top 종목 안에서 계산)")
+    pb.add_argument("--pool-top", type=int, default=150, help="--rt-top 순위 계산에 쓰는 종목 수 (그날 거래대금 상위)")
     pb.add_argument("--top-basis", choices=["same", "prev"], default="same",
                     help="same: 매매일 당일 순위(마감 뒤 확정, 미래 정보) / prev: 전날 순위")
     pb.add_argument("--ma", type=int, default=20)
@@ -3788,14 +3830,29 @@ def main(argv: list[str] | None = None) -> None:
         start = date.fromisoformat(args.start)
         end = date.fromisoformat(args.end) if args.end else None
         data = load_cache(args.cache)
-        days = pullback_break_days(data, start, end, args.min_change, args.min_amount, args.min_avg_amount,
-                                   args.top_amount, args.top_basis)
+        rank_pool = None
+        if args.rt_top:
+            # 후보 = 그날 거래대금 상위 pool_top (실시간 상위 rt_top 은 거의 여기에 포함), 순위는 분봉으로 매 분 계산
+            days = pullback_break_days(data, start, end, args.min_change, args.min_amount, args.min_avg_amount,
+                                       args.pool_top, "same")
+            by_day: dict[date, list[tuple[float, str]]] = defaultdict(list)
+            for code, (_, bars) in data.items():
+                for b in bars:
+                    if b.day >= start and (not end or b.day <= end):
+                        by_day[b.day].append((b.close * b.volume, code))
+            rank_pool = {d: [c for _, c in sorted(v, reverse=True)[:args.pool_top]] for d, v in by_day.items()}
+        else:
+            days = pullback_break_days(data, start, end, args.min_change, args.min_amount, args.min_avg_amount,
+                                       args.top_amount, args.top_basis)
         if args.write_days:
             need: dict[tuple[str, str], int] = {}
             if args.write_days.exists():  # 기존 목록에 합침
                 with open(args.write_days, encoding="utf-8") as f:
                     for r in csv.DictReader(f):
                         need[(r["code"], r["date"])] = int(r.get("pages") or 4)
+            for d, codes in (rank_pool or {}).items():
+                for c in codes:
+                    need[(c, d.isoformat())] = 4
             for d, rows in days.items():
                 for r in rows:
                     need[(r["code"], d.isoformat())] = 4
@@ -3811,11 +3868,11 @@ def main(argv: list[str] | None = None) -> None:
             return
         s = PullBreakSettings(min_change=args.min_change, max_price=args.max_price, min_cum_amount=args.min_amount, ma=args.ma,
                               band=tuple(args.band) if args.band else None, band_allow_below=args.band_allow_below,
-                              aligned=tuple(args.aligned),
+                              aligned=tuple(args.aligned), rt_top=args.rt_top,
                               bar_minutes=args.bar_minutes, take_profit=args.take_profit, buy_until=args.buy_until,
                               exit_time=args.exit_time, max_trades=args.max_trades,
                               max_consec_losses=args.max_consec_losses)
-        trades = run_pullback_break(days, args.minute_dir, s)
+        trades = run_pullback_break(days, args.minute_dir, s, rank_pool)
         rets = [t["ret_pct"] for t in trades]
         print(f"매수 {len(trades)}건", end="")
         if rets:

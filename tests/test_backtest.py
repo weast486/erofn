@@ -434,6 +434,26 @@ class NPatternTest(unittest.TestCase):
         self.assertFalse(n_pattern_signal(bars, 31, c))
 
 
+    def test_n_pattern_d_half_dip(self):
+        from tossbot.backtest import BreakoutSettings, n_pattern_signal
+        days = weekdays(32)
+        bars = [Bar(d, 10_000, 10_100, 9_900, 10_000, 3_000_000) for d in days[:25]]
+        bars.append(Bar(days[25], 10_000, 11_300, 9_950, 11_200, 3_000_000))  # 기준봉 +12%, 절반 10,600
+        bars.append(Bar(days[26], 11_100, 11_150, 10_800, 10_900, 2_000_000))
+        bars.append(Bar(days[27], 10_900, 10_950, 10_500, 10_550, 1_500_000))  # 절반 이하 눌림
+        bars.append(Bar(days[28], 10_550, 10_600, 10_400, 10_450, 1_000_000))  # 음봉
+        bars.append(Bar(days[29], 10_450, 10_800, 10_400, 10_750, 1_800_000))  # 양봉 + 거래량 증가 → 매수
+        bars.append(Bar(days[30], 10_750, 10_900, 10_700, 10_850, 2_500_000))  # 두 번째 신호는 아님
+        d = BreakoutSettings(npattern="D", np_rise_pct=10, np_amount=2e10, np_lookback=10)
+        self.assertTrue(n_pattern_signal(bars, 29, d))
+        self.assertFalse(n_pattern_signal(bars, 28, d))
+        self.assertFalse(n_pattern_signal(bars, 30, d))
+        d.np_dip_ref = "close"  # 종가 10,550 <= 10,600 이라 여전히 눌림
+        self.assertTrue(n_pattern_signal(bars, 29, d))
+        bars[28] = Bar(days[28], 10_550, 10_600, 9_990, 10_450, 1_000_000)  # 기준봉 시가 10,000 이탈
+        self.assertFalse(n_pattern_signal(bars, 29, d))
+
+
 class VolBreakoutTest(unittest.TestCase):
     def test_buys_at_target_sells_next_open(self):
         from tossbot.backtest import VolBreakoutSettings, run_vol_breakout

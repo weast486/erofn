@@ -408,6 +408,12 @@ class BreakoutSettings:
     np_base_ma: int = 0
     np_base_ma_pct: float = 5.0
     np_base_ma_mode: str = "open"
+    # D = 기준봉 절반 눌림 뒤 거래량 증가 양봉: 기준봉(C 와 같은 조건, np_lookback 거래일 안의 가장 최근) 뒤
+    # 종가가 기준봉 종가를 넘은 날이 없고, 기준봉 몸통 절반((시가+종가)/2) 이하로 내려간 날(np_dip_ref 저가/종가)이 있은 뒤,
+    # 기준봉 시가를 깨지 않은 채(np_break_ref 저가/종가) 처음 나온 양봉 + 거래량 증가(전날 대비, np_volup_avg > 0 이면 N일 평균 대비) 종가 매수
+    np_dip_ref: str = "low"
+    np_break_ref: str = "low"
+    np_volup_avg: int = 0
 
 
 def _np_strong(bars: list[Bar], k: int, b: "BreakoutSettings") -> bool:
@@ -416,9 +422,45 @@ def _np_strong(bars: list[Bar], k: int, b: "BreakoutSettings") -> bool:
             and (x.close / bars[k - 1].close - 1) * 100 >= b.np_rise_pct - 1e-9)
 
 
+def _np_half_dip_signal(bars: list[Bar], i: int, b: "BreakoutSettings") -> bool:
+    L = b.np_lookback
+    if i < L + 1:
+        return False
+    k = next((k for k in range(i - 1, i - L - 1, -1) if _np_strong(bars, k, b)), None)
+    if k is None or i - k < 2:
+        return False
+    base = bars[k]
+    mid, floor = (base.open + base.close) / 2, base.open
+
+    def broke(x: Bar) -> bool:
+        return (x.close if b.np_break_ref == "close" else x.low) < floor
+
+    def bull_volup(j: int) -> bool:
+        x = bars[j]
+        if not x.close > x.open:
+            return False
+        if b.np_volup_avg:
+            n = b.np_volup_avg
+            return j >= n and x.volume > sum(y.volume for y in bars[j - n:j]) / n
+        return x.volume > bars[j - 1].volume
+
+    dipped = False
+    for j in range(k + 1, i + 1):
+        x = bars[j]
+        if broke(x) or x.close > base.close:
+            return False
+        if dipped and bull_volup(j):
+            return j == i  # 눌림 뒤 첫 신호만
+        if (x.close if b.np_dip_ref == "close" else x.low) <= mid:
+            dipped = True
+    return False
+
+
 def n_pattern_signal(bars: list[Bar], i: int, b: "BreakoutSettings") -> bool:
     """오늘(i) 종가 기준 N자 패턴 매수 신호인지 (BreakoutSettings.npattern 설명 참고)."""
     L = b.np_lookback
+    if b.npattern == "D":
+        return _np_half_dip_signal(bars, i, b)
     if b.npattern == "C":
         if i < L + 1 or not _np_strong(bars, i, b):
             return False
@@ -3998,9 +4040,14 @@ def main(argv: list[str] | None = None) -> None:
                    help="breakout: 코스피 종가가 N거래일 전보다 높은 날에만 매수 (0 = 필터 없음)")
     r.add_argument("--slot-budget", type=float, default=0,
                    help="종목당 매수 금액·1주 가격 상한 (원). 시작 자금 = 이 값 x 최대 종목 수 (0 = .env 설정)")
-    r.add_argument("--npattern", choices=["", "A", "B", "C"], default="",
+    r.add_argument("--npattern", choices=["", "A", "B", "C", "D"], default="",
                    help="breakout: N자 패턴 (A = 눌림 저점 뒤 첫 양봉 매수 / B = 1차 고점 돌파 매수 / "
-                        "C = 기준봉(--np-amount·--np-rise) 뒤 --np-lookback 일 안에 기준봉 저가를 안 깨고 같은 봉 재출현 시 종가 매수)")
+                        "C = 기준봉(--np-amount·--np-rise) 뒤 --np-lookback 일 안에 기준봉 저가를 안 깨고 같은 봉 재출현 시 종가 매수 / "
+                        "D = 기준봉 뒤 종가가 기준봉 종가 아래, 몸통 절반 이하 눌림 뒤 시가 안 깨고 거래량 증가 양봉 종가 매수)")
+    r.add_argument("--np-dip-ref", choices=["low", "close"], default="low", help="breakout N자 D: 절반 눌림 판정 가격")
+    r.add_argument("--np-break-ref", choices=["low", "close"], default="low", help="breakout N자 D: 기준봉 시가 이탈 판정 가격")
+    r.add_argument("--np-volup-avg", type=int, default=0,
+                   help="breakout N자 D: 거래량 증가 기준 (0 = 전날보다 많음, N = N일 평균보다 많음)")
     r.add_argument("--np-base-ref", choices=["low", "open"], default="low", help="breakout N자 C: 깨지 말아야 할 기준봉 가격")
     r.add_argument("--np-min-gap", type=int, default=2, help="breakout N자 C: 기준봉과 매수일 최소 간격 (거래일)")
     r.add_argument("--np-quiet", choices=["", "any", "all", "last"], default="",
@@ -4267,6 +4314,7 @@ def main(argv: list[str] | None = None) -> None:
                               np_base_ref=args.np_base_ref, np_min_gap=args.np_min_gap, np_first_base=not args.np_any_base,
                               np_quiet=args.np_quiet, np_vol_avg=args.np_vol_avg, np_vol_basis=args.np_vol_basis,
                               np_base_ma=args.np_base_ma, np_base_ma_pct=args.np_base_ma_pct, np_base_ma_mode=args.np_base_ma_mode,
+                              np_dip_ref=args.np_dip_ref, np_break_ref=args.np_break_ref, np_volup_avg=args.np_volup_avg,
                               delay_hold_signal_open=args.delay_hold_open, delay_intraday=args.delay_intraday,
                               min_avg_trading_amount=settings.params.min_avg_trading_amount,
                               min_candle_pct=args.min_candle, candle_measure=args.candle_measure,

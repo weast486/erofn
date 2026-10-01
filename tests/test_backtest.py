@@ -614,3 +614,18 @@ class PullBreakTest(unittest.TestCase):
         self.assertGreater(full["avg_pct"], half["avg_pct"])
         self.assertAlmostEqual(fixed["avg_pct"], 100)
         self.assertGreater(full["ret_pct"], 0)
+
+    def test_band_pullback_between_mas(self):
+        from tossbot.backtest import PullBreakSettings, pullback_break_events
+        s = PullBreakSettings(band=(2, 4), bar_minutes=1, min_cum_amount=0)
+        warm = self._bars([(100, 100, 100, 100)] * 5, start="15:16")
+        # 상승 → 2이평(빠른) 아래·4이평(느린) 위로 눌림 → 전고점 돌파
+        day = self._bars([(104, 106, 104, 106), (106, 108, 106, 108), (108, 108, 105.5, 106),
+                          (106, 107, 106, 107), (107, 109, 107, 109)])
+        ev = pullback_break_events(warm, day, 100, s)
+        self.assertEqual(len(ev), 1)
+        self.assertEqual(ev[0]["pivot"], 108)
+        # 느린 이평선 밑으로 빠지면 눌림 아님 (허용 옵션 없을 때)
+        deep = self._bars([(104, 106, 104, 106), (106, 108, 106, 108), (108, 108, 100, 101),
+                           (101, 107, 101, 107), (107, 109, 107, 109)])
+        self.assertEqual(pullback_break_events(warm, deep, 95, s), [])

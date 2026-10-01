@@ -3054,6 +3054,8 @@ class PullBreakSettings:
     max_price: float = 100_000  # 1주 가격 상한 (0 이면 제한 없음)
     min_cum_amount: float = 0  # 매수 시점 장중 누적 거래대금 하한
     ma: int = 20  # 5분봉 이평선
+    band: tuple[int, int] | None = None  # (5, 22): 위 이평선 위에 있다가 저가가 두 이평선 사이로 들어오면 눌림
+    band_allow_below: bool = False  # True 면 아래 이평선 밑으로 빠져도 눌림으로 인정
     bar_minutes: int = 5
     take_profit: float = 5.0
     buy_until: str = "14:59"
@@ -3120,12 +3122,21 @@ def pullback_break_events(warm: list[MinuteBar], day: list[MinuteBar], prev_clos
             leg_high = max(leg_high, m.high)
             j += 1
         closes.append(b.close)
-        if len(closes) < s.ma + 1:
-            continue
-        ma_now = sum(closes[-s.ma:]) / s.ma
-        ma_prev = sum(closes[-s.ma - 1:-1]) / s.ma
-        prev_c = closes[-2]
-        if not armed and prev_c > ma_prev and b.low <= ma_now and leg_high > b.close:
+        if s.band:
+            fast, slow = s.band
+            if len(closes) < slow + 1:
+                continue
+            up_now, lo_now = sum(closes[-fast:]) / fast, sum(closes[-slow:]) / slow
+            up_prev = sum(closes[-fast - 1:-1]) / fast
+            touched = (closes[-2] > up_prev and up_now >= lo_now and b.low <= up_now
+                       and (s.band_allow_below or b.low >= lo_now))
+        else:
+            if len(closes) < s.ma + 1:
+                continue
+            ma_now = sum(closes[-s.ma:]) / s.ma
+            ma_prev = sum(closes[-s.ma - 1:-1]) / s.ma
+            touched = closes[-2] > ma_prev and b.low <= ma_now
+        if not armed and touched and leg_high > b.close:
             armed, pivot, stop = True, leg_high, b.low
     return events
 
@@ -3258,7 +3269,6 @@ def pullback_break_days(data: dict, start: date, end: date | None, min_change: f
 
 def download_toss_minute(days_file: Path, out_dir: Path, env: str = ".env", request_interval: float = 0.12) -> None:
     """days_file(code,date) 의 정규장(09:00~15:30) 1분봉을 토스 API 로 받는다. 이미 받은 날은 건너뜀. 주문 없음."""
-    import shutil
     import time
     from datetime import datetime
 
@@ -3313,8 +3323,36 @@ def download_toss_minute(days_file: Path, out_dir: Path, env: str = ".env", requ
             print(f"  {n} / {len(todo)}", flush=True)
     if failed:
         print(f"실패 {len(failed)}개: {failed[:20]} (다시 실행하면 이어받음)")
-    archive = shutil.make_archive(str(out_dir.parent / out_dir.name), "zip", root_dir=out_dir)
-    print(f"완료. 묶음 파일: {archive}")
+    # 이 목록의 파일만 9MB 이하 zip 여러 개로 (구글 드라이브 연결은 한 파일 10MB 까지만 읽을 수 있음)
+    files = sorted({path_of(c, d, p) for c, d, p in need if path_of(c, d, p).exists()}
+                   | {out_dir / f"{c}_{d}.csv" for c, d, _ in need if (out_dir / f"{c}_{d}.csv").exists()})
+    parts = split_zip(files, out_dir.parent / f"{out_dir.name}_{days_file.stem}")
+    print(f"완료. 묶음 파일 {len(parts)}개: " + ", ".join(str(p) for p in parts))
+    print("이 파일들을 모두 구글 드라이브에 올려 주세요.")
+
+
+def split_zip(files: list[Path], prefix: Path, limit: int = 9_000_000) -> list[Path]:
+    """files 를 압축 후 크기 limit 이하 zip 여러 개(prefix_1.zip, prefix_2.zip ...)로 묶는다."""
+    import zipfile
+
+    for old in prefix.parent.glob(prefix.name + "_*.zip"):
+        old.unlink()
+    parts: list[Path] = []
+    zf = None
+    size = 0
+    for f in files:
+        data = f.read_bytes()
+        if zf is None or size > limit - 200_000:
+            if zf:
+                zf.close()
+            parts.append(prefix.parent / f"{prefix.name}_{len(parts) + 1}.zip")
+            zf = zipfile.ZipFile(parts[-1], "w", zipfile.ZIP_DEFLATED)
+            size = 0
+        zf.writestr(f.name, data)
+        size += zf.getinfo(f.name).compress_size + 100
+    if zf:
+        zf.close()
+    return parts
 
 
 def download_index(symbol: str, cache_dir: Path, count: int = 1500) -> Path:
@@ -3474,6 +3512,9 @@ def main(argv: list[str] | None = None) -> None:
     pb.add_argument("--top-basis", choices=["same", "prev"], default="same",
                     help="same: 매매일 당일 순위(마감 뒤 확정, 미래 정보) / prev: 전날 순위")
     pb.add_argument("--ma", type=int, default=20)
+    pb.add_argument("--band", type=int, nargs=2, default=None, metavar=("FAST", "SLOW"),
+                    help="예: 5 22 → 5이평 위에 있다가 저가가 5~22이평 사이에 닿으면 눌림 (--ma 대신)")
+    pb.add_argument("--band-allow-below", action="store_true", help="--band 아래 이평선 밑으로 빠져도 눌림 인정")
     pb.add_argument("--bar-minutes", type=int, default=5)
     pb.add_argument("--take-profit", type=float, default=5.0)
     pb.add_argument("--buy-until", default="14:59")
@@ -3761,6 +3802,7 @@ def main(argv: list[str] | None = None) -> None:
                   f"(하루 전체 {sum(p == 4 for p in need.values())}, 전날 끝부분 {sum(p == 1 for p in need.values())})")
             return
         s = PullBreakSettings(min_change=args.min_change, max_price=args.max_price, min_cum_amount=args.min_amount, ma=args.ma,
+                              band=tuple(args.band) if args.band else None, band_allow_below=args.band_allow_below,
                               bar_minutes=args.bar_minutes, take_profit=args.take_profit, buy_until=args.buy_until,
                               exit_time=args.exit_time, max_trades=args.max_trades,
                               max_consec_losses=args.max_consec_losses)

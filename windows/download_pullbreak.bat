@@ -10,6 +10,6 @@ echo.
 git pull
 "%PY%" -m tossbot.backtest download-minute --days reports\pullbreak\minute_days.csv
 echo.
-echo 끝나면 data 폴더의 "minute.zip" 파일을 구글 드라이브에 올려 주세요.
+echo 끝나면 data 폴더의 "minute_..._1.zip", "_2.zip" ... 파일을 모두 구글 드라이브에 올려 주세요.
 explorer data
 pause

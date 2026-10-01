@@ -1693,6 +1693,9 @@ class EngulfRetestSettings:
     watch_days: int = 10
     take_profit_pct: float = 20.0
     max_hold_days: int = 0
+    # True 면 음봉 시가까지 내려온 날 종가가 음봉 몸통(음봉 종가~시가) 안에 있을 때만 그날 종가 매수.
+    # 아니면 대기 기간 동안 계속 지켜봄
+    close_in_body: bool = False
 
 
 def run_engulf_retest(
@@ -1716,7 +1719,7 @@ def run_engulf_retest(
             acc.append(run)
         mas[sym] = [(acc[i + 1] - acc[i + 1 - n]) / n if i + 1 >= n else None for i in range(len(ser.bars))]
 
-    watch: dict[str, tuple[int, float, float, float]] = {}  # sym -> (양봉 인덱스, 음봉 시가, 손절가, 거래대금)
+    watch: dict[str, tuple[int, float, float, float, float]] = {}  # sym -> (양봉 인덱스, 음봉 시가, 손절가, 거래대금, 음봉 종가)
     cash = s.initial_cash
     positions: dict[str, Trade] = {}
     exits: dict[str, tuple[float, float]] = {}
@@ -1755,7 +1758,7 @@ def run_engulf_retest(
 
         # 2) 음봉 시가 되돌림 지정가 매수
         signals = []
-        for sym, (k, level_raw, stop, amt) in list(watch.items()):
+        for sym, (k, level_raw, stop, amt, body_low) in list(watch.items()):
             ser = series[sym]
             i = ser.index.get(day)
             if i is None or i <= k:
@@ -1766,6 +1769,15 @@ def run_engulf_retest(
             bar = ser.bars[i]
             level = round_down_to_tick(level_raw)
             if bar.low > level:
+                continue
+            if m.close_in_body:
+                if not (body_low <= bar.close <= level_raw):
+                    continue
+                del watch[sym]
+                if bar.close <= stop:
+                    continue
+                if sym not in positions and bar.close <= budget:
+                    signals.append((amt, sym, bar.close, None, stop, ser.bars[k].day))
                 continue
             del watch[sym]
             fill = min(bar.open, level)
@@ -1786,7 +1798,7 @@ def run_engulf_retest(
             positions[sym] = t
             exits[sym] = (stop, round_up_to_tick(fill * (1 + m.take_profit_pct / 100)))
             trades.append(t)
-            if bar.low <= stop:  # 매수 뒤 같은 날 저가 이탈 (보수적)
+            if bar is not None and bar.low <= stop:  # 매수 뒤 같은 날 저가 이탈 (보수적)
                 close_position(t, day, stop * (1 - s.slippage), "STOP_LOSS")
 
         # 3) 오늘 종가로 하락 추세 상승 장악형 등록
@@ -1805,7 +1817,7 @@ def run_engulf_retest(
                 continue
             stop = round_down_to_tick(p.low)
             stop = round_down_to_tick(stop - tick_size(stop))
-            watch[sym] = (i, p.open, stop, b.close * b.volume)
+            watch[sym] = (i, p.open, stop, b.close * b.volume, p.close)
 
         for sym in positions:
             i = series[sym].index.get(day)
@@ -2835,6 +2847,8 @@ def main(argv: list[str] | None = None) -> None:
     r.add_argument("--rsi-second-reset", type=float, default=0.0, help="rsi: 두 과매도 사이 RSI 가 이 값 이상 회복 (0 = --rsi-buy)")
     r.add_argument("--rsi-diverge", action="store_true", help="rsi: 두 번째 종가 < 첫 최저 종가, RSI > 첫 최저 RSI 일 때만")
     r.add_argument("--er-ma", type=int, default=20, help="engulfretest: 하락 추세 = 음봉 종가가 N일선 아래 + N일선 하락")
+    r.add_argument("--er-close-in-body", action="store_true",
+                   help="engulfretest: 음봉 시가까지 내려온 날 종가가 음봉 몸통 안일 때만 그날 종가 매수")
     r.add_argument("--er-body", type=float, default=2.0, help="engulfretest: 양봉 몸통이 음봉 몸통의 N배 이상")
     r.add_argument("--db-days", type=int, default=60, help="dbottom: 하락 추세 = N거래일 최저가 + N일선 하락")
     r.add_argument("--db-drop", type=float, default=0.0, help="dbottom: 250거래일 최고가 대비 N%% 이상 하락한 저점만 (0 = 조건 없음)")
@@ -3089,7 +3103,7 @@ def main(argv: list[str] | None = None) -> None:
     elif args.strategy == "engulfretest":
         ers = EngulfRetestSettings(ma_period=args.er_ma, body_mult=args.er_body, min_amount=args.min_day_amount,
                                    watch_days=args.watch_days or 10, take_profit_pct=args.take_profit or 20.0,
-                                   max_hold_days=args.max_hold)
+                                   max_hold_days=args.max_hold, close_in_body=args.er_close_in_body)
         runner = lambda y0, y1: run_engulf_retest(data, y0, y1, settings, ers)  # noqa: E731
     elif args.strategy == "dbottom":
         dbs = DoubleBottomSettings(downtrend_days=args.db_days, drop_pct=args.db_drop,

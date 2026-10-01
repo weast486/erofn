@@ -3557,7 +3557,7 @@ def main(argv: list[str] | None = None) -> None:
     pb.add_argument("--top-amount", type=int, default=50, help="거래대금 상위 N 종목만 (0: 제한 없음)")
     pb.add_argument("--rt-top", type=int, default=0,
                     help="매수 순간 장중 누적 거래대금 순위 N 이내만 (순위는 그날 상위 --pool-top 종목 안에서 계산)")
-    pb.add_argument("--pool-top", type=int, default=150, help="--rt-top 순위 계산에 쓰는 종목 수 (그날 거래대금 상위)")
+    pb.add_argument("--pool-top", type=int, default=50, help="--rt-top 순위 계산에 쓰는 종목 수 (그날 거래대금 상위)")
     pb.add_argument("--top-basis", choices=["same", "prev"], default="same",
                     help="same: 매매일 당일 순위(마감 뒤 확정, 미래 정보) / prev: 전날 순위")
     pb.add_argument("--ma", type=int, default=20)

@@ -3188,10 +3188,19 @@ def run_pullback_break(days: dict[date, list[dict]], minute_dir: Path, s: PullBr
 
 
 def pullback_break_days(data: dict, start: date, end: date | None, min_change: float,
-                        min_day_amount: float, min_avg_amount: float = 0) -> dict[date, list[dict]]:
+                        min_day_amount: float, min_avg_amount: float = 0, top_amount: int = 0,
+                        top_basis: str = "same") -> dict[date, list[dict]]:
     """일봉으로 대상 (종목, 날짜) 고르기: 그날 고가가 전일 대비 min_change% 이상, 거래대금 min_day_amount 이상,
     직전 20일 평균 거래대금 min_avg_amount 이상 (장중 조건의 상위 집합. 실제 매수 조건은 분봉에서 다시 확인)."""
     out: dict[date, list[dict]] = defaultdict(list)
+    tops: dict[date, set[str]] = {}
+    if top_amount:
+        # 날짜별 거래대금 상위 top_amount. same: 매매일 당일(장 마감 뒤에야 확정 → 미래 정보 포함), prev: 전날
+        by_day: dict[date, list[tuple[float, str]]] = defaultdict(list)
+        for code, (_, bars) in data.items():
+            for b in bars:
+                by_day[b.day].append((b.close * b.volume, code))
+        tops = {d: {c for _, c in sorted(v, reverse=True)[:top_amount]} for d, v in by_day.items()}
     for code, (name, bars) in data.items():
         amounts = [b.close * b.volume for b in bars]
         for i in range(1, len(bars)):
@@ -3199,6 +3208,8 @@ def pullback_break_days(data: dict, start: date, end: date | None, min_change: f
             if b.day < start or (end and b.day > end) or b.volume <= 0:
                 continue
             if min_avg_amount and (i < 20 or sum(amounts[i - 20:i]) / 20 < min_avg_amount):
+                continue
+            if top_amount and code not in tops.get(b.day if top_basis == "same" else p.day, ()):
                 continue
             if b.high >= p.close * (1 + min_change / 100) and amounts[i] >= min_day_amount:
                 out[b.day].append({"code": code, "name": name, "prev_close": p.close, "warm_day": p.day})
@@ -3417,6 +3428,9 @@ def main(argv: list[str] | None = None) -> None:
     pb.add_argument("--min-change", type=float, default=5.0)
     pb.add_argument("--min-amount", type=float, default=0, help="장중 누적 거래대금 하한 (일봉 사전 필터도 같은 값)")
     pb.add_argument("--min-avg-amount", type=float, default=3e9, help="직전 20일 평균 거래대금 하한")
+    pb.add_argument("--top-amount", type=int, default=50, help="거래대금 상위 N 종목만 (0: 제한 없음)")
+    pb.add_argument("--top-basis", choices=["same", "prev"], default="same",
+                    help="same: 매매일 당일 순위(마감 뒤 확정, 미래 정보) / prev: 전날 순위")
     pb.add_argument("--ma", type=int, default=20)
     pb.add_argument("--bar-minutes", type=int, default=5)
     pb.add_argument("--take-profit", type=float, default=5.0)
@@ -3683,7 +3697,8 @@ def main(argv: list[str] | None = None) -> None:
         start = date.fromisoformat(args.start)
         end = date.fromisoformat(args.end) if args.end else None
         data = load_cache(args.cache)
-        days = pullback_break_days(data, start, end, args.min_change, args.min_amount, args.min_avg_amount)
+        days = pullback_break_days(data, start, end, args.min_change, args.min_amount, args.min_avg_amount,
+                                   args.top_amount, args.top_basis)
         if args.write_days:
             need: dict[tuple[str, str], int] = {}
             if args.write_days.exists():  # 기존 목록에 합침

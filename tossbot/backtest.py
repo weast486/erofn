@@ -2542,149 +2542,112 @@ def download(source: str, start: str, end: str | None, cache_dir: Path) -> None:
             log.info("  %d / %d", n, len(todo))
 
 
-US_SYMBOLS_FILE = Path(__file__).parent / "lists" / "us_sp500.txt"
 # 과거 캔들 이어받기에 쓸 수 있는 파라미터 후보 (공개 스펙 미확인 → 실제로 더 과거가 오는 것을 찾는다)
 _PAGE_KEYS = ("to", "before", "endDateTime", "endDate", "end", "until", "from")
+_MINUTE_INTERVALS = ("1m", "3m", "5m", "10m", "15m", "30m", "60m", "1h", "1min", "minute")
 
 
-def _us_bar_rows(raw: list[dict]) -> list[tuple]:
-    """토스 캔들 → (날짜, 시고저종, 거래량). 미국 일봉은 UTC 날짜로 둔다 (정규장은 UTC 기준 같은 날)."""
-    from datetime import datetime, timezone
+def probe_toss_minute(out: Path, env: str = ".env", symbols: tuple[str, ...] = ("005930", "247540"),
+                      max_pages: int = 400, request_interval: float = 0.12) -> list[str]:
+    """토스증권 Open API 로 국내 분봉을 어디까지 받을 수 있는지 확인만 한다 (저장·주문 없음).
 
-    rows = {}
-    for c in raw:
-        d = datetime.fromisoformat(c["timestamp"].replace("Z", "+00:00")).astimezone(timezone.utc).date()
-        rows[d.isoformat()] = (d.isoformat(), float(c["openPrice"]), float(c["highPrice"]), float(c["lowPrice"]),
-                               float(c["closePrice"]), float(c["volume"]))
-    return [rows[k] for k in sorted(rows)]
-
-
-def download_toss_us(start: str, cache_dir: Path, env: str = ".env", symbols_file: Path = US_SYMBOLS_FILE,
-                     request_interval: float = 0.12) -> None:
-    """토스증권 Open API 로 미국 종목 일봉(수정주가)을 받는다. 사용자 PC(.env 에 API 키)에서 실행.
-
-    대상: symbols_file(기본 S&P 500 + SPY/QQQ) + 지금 미국 거래대금·상승률 상위 종목.
-    API 동작(심볼 형식, 한 번에 받을 수 있는 캔들 수, 과거 이어받기 파라미터)을 먼저 확인해 _probe.txt 에 남긴다.
-    끝나면 cache_dir 를 zip 으로 묶는다 (다른 PC/세션으로 옮기기용).
+    확인 항목: 지원하는 분봉 간격, 한 번에 받는 최대 개수, 과거 이어받기 파라미터, 이어받기로 닿는 가장 오래된 날짜.
+    결과는 화면과 out 파일에 남긴다 (API 키·계좌 정보는 쓰지 않음).
     """
     import json
-    import shutil
     import time
+    from datetime import datetime
 
-    from .client import TossClient, TossApiError
+    from .client import TossApiError, TossClient
+    from .config import KST
 
     load_dotenv(env)
     cfg = Config.from_env()
     client = TossClient(cfg.client_id, cfg.client_secret, cfg.base_url)
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    probe_lines: list[str] = []
+    lines: list[str] = []
 
     def note(msg: str) -> None:
-        log.info(msg)
-        probe_lines.append(msg)
+        print(msg, flush=True)
+        lines.append(msg)
 
-    def save_probe() -> None:
-        (cache_dir / "_probe.txt").write_text("\n".join(probe_lines) + "\n", encoding="utf-8")
-
-    names: dict[str, str] = {}
-    for line in symbols_file.read_text(encoding="utf-8").splitlines():
-        if line.strip() and not line.startswith("#"):
-            sym, _, name = line.strip().partition(" ")
-            names[sym] = name.strip() or sym
-
-    # 1) 지금 미국 랭킹 (심볼 형식 확인 + 대상 종목 보강)
-    for ranking_type, duration in (("MARKET_TRADING_AMOUNT", "1d"), ("TOP_GAINERS", "1d"), ("MARKET_TRADING_VOLUME", "1d")):
-        try:
-            ranks = client.get_rankings(ranking_type, duration, market="US", exclude_investment_caution=False)
-            note(f"랭킹 US {ranking_type}: {len(ranks)}개, 예시 {json.dumps(ranks[:2], ensure_ascii=False)[:600]}")
-            for r in ranks:
-                if r.get("symbol"):
-                    names.setdefault(r["symbol"], r.get("name") or r.get("stockName") or r["symbol"])
-        except Exception as exc:
-            note(f"랭킹 US {ranking_type} 실패: {exc}")
-    try:
-        note(f"종목정보 AAPL: {json.dumps(client.get_stocks(['AAPL', 'NVDA']), ensure_ascii=False)[:1200]}")
-    except Exception as exc:
-        note(f"종목정보 AAPL 실패: {exc}")
-
-    # 2) 한 번에 받을 수 있는 캔들 수
-    def candles(symbol: str, count: int, extra: dict | None = None) -> list[dict]:
-        params = {"symbol": symbol, "interval": "1d", "count": count, "adjusted": "true", **(extra or {})}
+    def candles(symbol: str, interval: str, count: int, extra: dict | None = None) -> list[dict]:
+        params = {"symbol": symbol, "interval": interval, "count": count, "adjusted": "true", **(extra or {})}
         time.sleep(request_interval)
         return (client._request("GET", "/api/v1/candles", params=params) or {}).get("candles", [])
 
-    count = 0
-    for n in (2000, 1500, 1000, 500, 300, 200, 100):
+    def kst(ts: str) -> str:
+        return datetime.fromisoformat(ts.replace("Z", "+00:00")).astimezone(KST).strftime("%Y-%m-%d %H:%M")
+
+    def span(raw: list[dict]) -> str:
+        if not raw:
+            return "0개"
+        ts = sorted(c["timestamp"] for c in raw)
+        return f"{len(raw)}개 {kst(ts[0])} ~ {kst(ts[-1])}"
+
+    note(f"[토스 분봉 확인] {datetime.now(KST):%Y-%m-%d %H:%M}")
+    symbol = symbols[0]
+    ok_intervals = []
+    for interval in _MINUTE_INTERVALS:
         try:
-            raw = candles("AAPL", n)
+            raw = candles(symbol, interval, 10)
         except TossApiError as exc:
-            note(f"캔들 count={n} 거부: {exc}")
+            note(f"간격 {interval}: 안 됨 ({exc.status} {exc.code})")
             continue
-        count = n
-        rows = _us_bar_rows(raw)
-        note(f"캔들 count={n}: {len(rows)}개 {rows[0][0] if rows else '-'} ~ {rows[-1][0] if rows else '-'}, "
-             f"원본 예시 {json.dumps(raw[:1])}")
-        break
-    if not count:
-        save_probe()
-        raise SystemExit("미국 캔들을 받지 못했습니다. data 폴더의 _probe.txt 내용을 확인하세요.")
+        note(f"간격 {interval}: {span(raw)}")
+        if raw:
+            ok_intervals.append(interval)
+    if not ok_intervals:
+        note("결론: 분봉을 받을 수 없음")
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        return lines
+    note(f"원본 예시: {json.dumps(candles(symbol, ok_intervals[0], 1))[:400]}")
 
-    # 3) 부족하면 과거 이어받기 파라미터 찾기
-    page_key = None
-    first = _us_bar_rows(candles("AAPL", count))
-    if first and first[0][0] > start:
-        oldest_raw = min(candles("AAPL", count), key=lambda c: c["timestamp"])
+    targets = [i for i in ("1m", "5m") if i in ok_intervals] or ok_intervals[:1]
+    for interval in targets:
+        count = 0
+        for n in (5000, 2000, 1000, 500, 300, 200, 100, 50):
+            try:
+                raw = candles(symbol, interval, n)
+            except TossApiError:
+                continue
+            count = n
+            note(f"{interval} 한 번에 count={n} 요청 → {span(raw)}")
+            break
+        if not count or not raw:
+            continue
+        oldest = min(raw, key=lambda c: c["timestamp"])["timestamp"]
+        page_key = None
         for key in _PAGE_KEYS:
-            for value in (oldest_raw["timestamp"], first[0][0]):
-                try:
-                    older = _us_bar_rows(candles("AAPL", count, {key: value}))
-                except TossApiError as exc:
-                    note(f"이어받기 {key}={value} 거부: {exc.code}")
-                    continue
-                if older and older[0][0] < first[0][0]:
-                    page_key = (key, value is oldest_raw["timestamp"])
-                    note(f"이어받기 성공: {key}={value} → {older[0][0]} ~ {older[-1][0]}")
-                    break
-            if page_key:
+            try:
+                older = candles(symbol, interval, count, {key: oldest})
+            except TossApiError as exc:
+                note(f"  이어받기 {key}: 거부 ({exc.code})")
+                continue
+            if older and min(c["timestamp"] for c in older) < oldest:
+                page_key = key
+                note(f"  이어받기 {key}: 됨 → {span(older)}")
                 break
+            note(f"  이어받기 {key}: 효과 없음")
         if not page_key:
-            note(f"이어받기 파라미터를 못 찾음 → 최근 {len(first)}거래일만 저장")
-    save_probe()
-
-    def fetch(symbol: str) -> list[tuple]:
-        raw = candles(symbol, count)
-        rows = _us_bar_rows(raw)
-        while page_key and raw and rows and rows[0][0] > start:
-            oldest = min(raw, key=lambda c: c["timestamp"])
-            raw = candles(symbol, count, {page_key[0]: oldest["timestamp"] if page_key[1] else rows[0][0]})
-            older = [r for r in _us_bar_rows(raw) if r[0] < rows[0][0]]
-            if not older:
-                break
-            rows = older + rows
-        return [r for r in rows if r[0] >= start]
-
-    with open(cache_dir / "_names.csv", "w", encoding="utf-8", newline="") as f:
-        w = csv.writer(f)
-        w.writerow(["code", "name"])
-        w.writerows(sorted(names.items()))
-    todo = [s for s in sorted(names) if not (cache_dir / f"{s}.csv").exists()]
-    log.info("미국 종목 %d개 중 %d개 다운로드", len(names), len(todo))
-    failed = []
-    for n, symbol in enumerate(todo, 1):
-        try:
-            rows = fetch(symbol)
-        except Exception as exc:
-            failed.append(symbol)
-            log.warning("%s 다운로드 실패: %s", symbol, exc)
+            note(f"{interval} 결론: 최근 {span(raw)} 까지만")
             continue
-        if rows:
-            _write_bars(cache_dir / f"{symbol}.csv", rows)
-        if n % 50 == 0:
-            log.info("  %d / %d", n, len(todo))
-    note(f"완료: {len(todo) - len(failed)}개 저장, 실패 {len(failed)}개 {failed[:30]}")
-    save_probe()
-    archive = shutil.make_archive(str(cache_dir.parent / cache_dir.name), "zip", root_dir=cache_dir)
-    log.info("묶음 파일: %s", archive)
+        for sym in symbols:
+            raw = candles(sym, interval, count)
+            total, pages = len(raw), 1
+            oldest = min((c["timestamp"] for c in raw), default=None)
+            while oldest and pages < max_pages:
+                older = [c for c in candles(sym, interval, count, {page_key: oldest}) if c["timestamp"] < oldest]
+                if not older:
+                    break
+                total += len(older)
+                pages += 1
+                oldest = min(c["timestamp"] for c in older)
+            more = " (확인 한도에서 멈춤, 더 있을 수 있음)" if pages >= max_pages else ""
+            note(f"{interval} 결론 {sym}: 가장 오래된 {kst(oldest) if oldest else '-'}, {pages}번 요청 {total}개{more}")
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return lines
 
 
 def download_index(symbol: str, cache_dir: Path, count: int = 1500) -> Path:
@@ -2796,15 +2759,15 @@ def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(prog="tossbot.backtest", description="눌림목 전략 백테스트")
     sub = parser.add_subparsers(dest="command", required=True)
     d = sub.add_parser("download", help="과거 일봉 다운로드")
-    d.add_argument("--source", choices=["marcap", "pykrx", "fdr", "toss-us"], default="marcap",
-                   help="toss-us: 토스 Open API 로 미국 종목(기본 S&P 500) 일봉, .env 필요")
-    d.add_argument("--symbols-file", type=Path, default=US_SYMBOLS_FILE, help="toss-us 대상 목록")
-    d.add_argument("--env", default=".env")
+    d.add_argument("--source", choices=["marcap", "pykrx", "fdr"], default="marcap")
     d.add_argument("--marcap-dir", type=Path, default=Path("marcap/data"),
                    help="git clone https://github.com/FinanceData/marcap 한 폴더의 data 경로")
     d.add_argument("--start", default="2023-09-01", help="지표 계산을 위해 백테스트 시작 3~4개월 전부터")
     d.add_argument("--end", default=None)
     d.add_argument("--cache", type=Path, default=DEFAULT_CACHE)
+    pm = sub.add_parser("probe-minute", help="토스 API 로 국내 분봉을 어디까지 받을 수 있는지 확인 (.env 필요, 저장·주문 없음)")
+    pm.add_argument("--out", type=Path, default=Path("data/_minute_probe.txt"))
+    pm.add_argument("--env", default=".env")
     u = sub.add_parser("universe", help="실전 RSI 전략 대상 목록 (코스피 시가총액 상위 N) 파일 만들기")
     u.add_argument("--marcap-dir", type=Path, default=Path("data/marcap/data"))
     u.add_argument("--top", type=int, default=100)
@@ -2998,10 +2961,10 @@ def main(argv: list[str] | None = None) -> None:
     if args.command == "universe":
         write_universe_file(args.marcap_dir, args.top, args.out)
         return
+    if args.command == "probe-minute":
+        probe_toss_minute(args.out, args.env)
+        return
     if args.command == "download":
-        if args.source == "toss-us":
-            download_toss_us(args.start, args.cache, args.env, args.symbols_file)
-            return
         if args.source == "marcap":
             import_marcap(args.marcap_dir, args.start, args.end, args.cache)
         else:

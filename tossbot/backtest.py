@@ -2873,6 +2873,9 @@ def write_minute_days(sig_lists: list[list[dict]], out: Path) -> int:
 class SectorGapSettings:
     top_n: int = 50  # 전일 거래대금 상위 N
     min_sector_up: int = 3  # 같은 업종에서 상승 마감한 종목 수 하한
+    pick: str = "sector"  # sector: 업종 동반 상승 / breadth: 상위 N 절반 이상 상승한 날 상승률·거래대금 상위 pick_n
+    min_up_ratio: float = 0.5
+    pick_n: int = 3
     take_profit: float = 5.0  # 평균 매입가 대비
     stop_loss: float = 0.0  # 0 이면 손절 없음
     first_weight: float = 0.5  # 1차(시가) 비중, 나머지는 2차(전일 종가)
@@ -2888,7 +2891,8 @@ def load_sector_map(path: Path) -> dict[str, str]:
 
 
 def sector_gap_candidates(data: dict, start: date, end: date | None, top_n: int,
-                          sectors: dict[str, str] | None = None, min_sector_up: int = 3) -> list[dict]:
+                          sectors: dict[str, str] | None = None, min_sector_up: int = 3, breadth: bool = False,
+                          min_up_ratio: float = 0.5, pick_n: int = 3) -> list[dict]:
     """D 일 거래대금 상위 top_n 중 상승 마감 종목 → D+1 이 매매일. sectors 를 주면 같은 업종 상승 종목이
     min_sector_up 개 이상인 업종만. 다음 날 갭상승 여부는 일봉 시가로 판단(데이터 없으면 분봉에서)."""
     by_day: dict[date, list[tuple]] = defaultdict(list)
@@ -2903,7 +2907,14 @@ def sector_gap_candidates(data: dict, start: date, end: date | None, top_n: int,
     for d, rows in by_day.items():
         top = sorted(rows, key=lambda r: r[0], reverse=True)[:top_n]
         up = [r for r in top if r[3].close > r[4]]
-        if sectors is not None:
+        if breadth:
+            # 상위 N 중 절반(min_up_ratio) 이상 상승 마감한 날만, 상승 종목 중 상승률 상위 pick_n + 거래대금 상위 pick_n
+            if len(up) < min_up_ratio * len(top):
+                continue
+            by_chg = sorted(up, key=lambda r: r[3].close / r[4], reverse=True)[:pick_n]
+            by_amt = sorted(up, key=lambda r: r[0], reverse=True)[:pick_n]
+            up = list({r[1]: r for r in by_chg + by_amt}.values())
+        elif sectors is not None:
             cnt = Counter(sectors.get(r[1]) for r in up if sectors.get(r[1]))
             up = [r for r in up if sectors.get(r[1]) and cnt[sectors[r[1]]] >= min_sector_up]
         for _, code, name, b, _, nxt in up:
@@ -2967,7 +2978,8 @@ def simulate_sector_gap(sig: dict, day: list[MinuteBar], g: SectorGapSettings) -
 
 def run_sector_gap(data: dict, sectors: dict, start: date, end: date | None, g: SectorGapSettings,
                    minute_dir: Path) -> tuple[list[dict], list[dict], int]:
-    sigs = sector_gap_candidates(data, start, end, g.top_n, sectors, g.min_sector_up)
+    sigs = sector_gap_candidates(data, start, end, g.top_n, sectors, g.min_sector_up, g.pick == "breadth",
+                                 g.min_up_ratio, g.pick_n)
     trades, missing = [], 0
     for s in sigs:
         day = load_minute(minute_dir, s["code"], s["trade_day"])
@@ -3215,6 +3227,10 @@ def main(argv: list[str] | None = None) -> None:
     sg.add_argument("--no-sector", action="store_true", help="업종 조건 없이 (상위 N 상승 마감 전체)")
     sg.add_argument("--top", type=int, default=50)
     sg.add_argument("--min-sector-up", type=int, default=3)
+    sg.add_argument("--pick", choices=["sector", "breadth"], default="sector",
+                    help="breadth: 상위 N 중 절반 이상 상승 마감한 날, 상승 종목의 상승률 상위·거래대금 상위 --pick-n 개씩")
+    sg.add_argument("--min-up-ratio", type=float, default=0.5)
+    sg.add_argument("--pick-n", type=int, default=3)
     sg.add_argument("--take-profit", type=float, default=5.0)
     sg.add_argument("--stop-loss", type=float, default=0.0)
     sg.add_argument("--first-weight", type=float, default=0.5)
@@ -3456,10 +3472,12 @@ def main(argv: list[str] | None = None) -> None:
                                     for s in sigs]], args.write_days)
             print(f"후보 {len(sigs)}건 → 받을 종목×날짜 {n}개: {args.write_days}")
             return
-        sectors = None if args.no_sector or not args.sector_file.exists() else load_sector_map(args.sector_file)
-        if sectors is None:
+        sectors = None if args.no_sector or args.pick == "breadth" or not args.sector_file.exists() \
+            else load_sector_map(args.sector_file)
+        if sectors is None and args.pick == "sector":
             print("업종 조건 없음")
-        g = SectorGapSettings(top_n=args.top, min_sector_up=args.min_sector_up, take_profit=args.take_profit,
+        g = SectorGapSettings(top_n=args.top, min_sector_up=args.min_sector_up, pick=args.pick,
+                              min_up_ratio=args.min_up_ratio, pick_n=args.pick_n, take_profit=args.take_profit,
                               stop_loss=args.stop_loss, first_weight=args.first_weight, buy_until=args.buy_until,
                               exit_time=args.exit_time)
         sigs, trades, missing = run_sector_gap(data, sectors, start, end, g, args.minute_dir)

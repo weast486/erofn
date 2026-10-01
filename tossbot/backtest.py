@@ -3051,7 +3051,7 @@ def download_sector_info(codes: list[str], out: Path, env: str = ".env", request
 @dataclass
 class PullBreakSettings:
     min_change: float = 5.0  # 매수 시점 전일 대비 상승률 하한 %
-    min_cum_amount: float = 2e10  # 매수 시점 장중 누적 거래대금 하한
+    min_cum_amount: float = 0  # 매수 시점 장중 누적 거래대금 하한
     ma: int = 20  # 5분봉 이평선
     bar_minutes: int = 5
     take_profit: float = 5.0
@@ -3188,16 +3188,19 @@ def run_pullback_break(days: dict[date, list[dict]], minute_dir: Path, s: PullBr
 
 
 def pullback_break_days(data: dict, start: date, end: date | None, min_change: float,
-                        min_day_amount: float) -> dict[date, list[dict]]:
-    """일봉으로 대상 (종목, 날짜) 고르기: 그날 고가가 전일 대비 min_change% 이상, 거래대금 min_day_amount 이상
-    (장중 조건의 상위 집합. 실제 매수 조건은 분봉에서 다시 확인)."""
+                        min_day_amount: float, min_avg_amount: float = 0) -> dict[date, list[dict]]:
+    """일봉으로 대상 (종목, 날짜) 고르기: 그날 고가가 전일 대비 min_change% 이상, 거래대금 min_day_amount 이상,
+    직전 20일 평균 거래대금 min_avg_amount 이상 (장중 조건의 상위 집합. 실제 매수 조건은 분봉에서 다시 확인)."""
     out: dict[date, list[dict]] = defaultdict(list)
     for code, (name, bars) in data.items():
+        amounts = [b.close * b.volume for b in bars]
         for i in range(1, len(bars)):
             b, p = bars[i], bars[i - 1]
             if b.day < start or (end and b.day > end) or b.volume <= 0:
                 continue
-            if b.high >= p.close * (1 + min_change / 100) and b.close * b.volume >= min_day_amount:
+            if min_avg_amount and (i < 20 or sum(amounts[i - 20:i]) / 20 < min_avg_amount):
+                continue
+            if b.high >= p.close * (1 + min_change / 100) and amounts[i] >= min_day_amount:
                 out[b.day].append({"code": code, "name": name, "prev_close": p.close, "warm_day": p.day})
     return out
 
@@ -3412,7 +3415,8 @@ def main(argv: list[str] | None = None) -> None:
     pb.add_argument("--cache", type=Path, default=Path("data/ohlcv_long"))
     pb.add_argument("--minute-dir", type=Path, default=MINUTE_DIR)
     pb.add_argument("--min-change", type=float, default=5.0)
-    pb.add_argument("--min-amount", type=float, default=2e10, help="장중 누적 거래대금 하한 (일봉 사전 필터도 같은 값)")
+    pb.add_argument("--min-amount", type=float, default=0, help="장중 누적 거래대금 하한 (일봉 사전 필터도 같은 값)")
+    pb.add_argument("--min-avg-amount", type=float, default=3e9, help="직전 20일 평균 거래대금 하한")
     pb.add_argument("--ma", type=int, default=20)
     pb.add_argument("--bar-minutes", type=int, default=5)
     pb.add_argument("--take-profit", type=float, default=5.0)
@@ -3679,9 +3683,13 @@ def main(argv: list[str] | None = None) -> None:
         start = date.fromisoformat(args.start)
         end = date.fromisoformat(args.end) if args.end else None
         data = load_cache(args.cache)
-        days = pullback_break_days(data, start, end, args.min_change, args.min_amount)
+        days = pullback_break_days(data, start, end, args.min_change, args.min_amount, args.min_avg_amount)
         if args.write_days:
             need: dict[tuple[str, str], int] = {}
+            if args.write_days.exists():  # 기존 목록에 합침
+                with open(args.write_days, encoding="utf-8") as f:
+                    for r in csv.DictReader(f):
+                        need[(r["code"], r["date"])] = int(r.get("pages") or 4)
             for d, rows in days.items():
                 for r in rows:
                     need[(r["code"], d.isoformat())] = 4

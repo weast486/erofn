@@ -3366,6 +3366,74 @@ def pullback_break_days(data: dict, start: date, end: date | None, min_change: f
     return out
 
 
+# ---------------------------------------------------------------- 전일 급등주 다음 날 전일 종가/고점 돌파 (1분봉)
+def surge_break_days(data: dict, start: date, end: date | None, min_prev_change: float = 15.0,
+                     min_avg_amount: float = 3e9, max_price: float = 100_000) -> dict[date, list[dict]]:
+    """전일(D) 상승률 min_prev_change% 이상 → D+1 이 매매일. 직전 20일 평균 거래대금·1주 가격(D 종가) 조건."""
+    out: dict[date, list[dict]] = defaultdict(list)
+    for code, (name, bars) in data.items():
+        amounts = [b.close * b.volume for b in bars]
+        for i in range(21, len(bars)):
+            p, d = bars[i - 1], bars[i]
+            if d.close < p.close * (1 + min_prev_change / 100) or d.volume <= 0:
+                continue
+            if sum(amounts[i - 20:i]) / 20 < min_avg_amount or (max_price and d.close > max_price):
+                continue
+            trade_day = bars[i + 1].day if i + 1 < len(bars) else _next_weekday(d.day)
+            if trade_day < start or (end and trade_day > end):
+                continue
+            out[trade_day].append({"code": code, "name": name, "prev_close": d.close, "prev_high": d.high,
+                                   "prev_change": (d.close / p.close - 1) * 100})
+    return out
+
+
+def surge_break_event(day: list[MinuteBar], c: dict, mode: str, s: "PullBreakSettings",
+                      stop_daylow: bool = False) -> dict | None:
+    """mode prevclose: 시가가 전일 종가 아래(갭상승 제외)에서 시작해 전일 종가를 넘는 순간 매수.
+    mode prevhigh: 시가가 전일 고가 아래에서 시작해 전일 고가를 넘는 순간 매수.
+    가격 = max(그 1분봉 시가, 기준가) + 슬리피지. stop_daylow 면 손절가 = 매수 전까지 당일 최저가."""
+    if not day:
+        return None
+    level = c["prev_close"] if mode == "prevclose" else c["prev_high"]
+    if day[0].open >= level:
+        return None  # 갭상승으로 이미 넘은 날 제외
+    low = day[0].low
+    for j, m in enumerate(day):
+        if m.t > s.buy_until:
+            return None
+        if m.high > level and (j > 0 or m.open < level):
+            price = max(m.open, level) * (1 + s.slippage)
+            return {"time": m.t, "idx": j, "price": price, "stop": low if stop_daylow else 0.0, "pivot": level,
+                    "chg": (price / c["prev_close"] - 1) * 100}
+        low = min(low, m.low)
+    return None
+
+
+def run_surge_break(days: dict[date, list[dict]], minute_dir: Path, mode: str, s: "PullBreakSettings",
+                    stop_daylow: bool = False) -> tuple[list[dict], int]:
+    """종목·날짜마다 한 번씩 (서로 독립). (거래 목록, 분봉 없는 대상 수)."""
+    trades, missing = [], 0
+    for d in sorted(days):
+        for c in days[d]:
+            day = load_minute(minute_dir, c["code"], d)
+            if day is None:
+                missing += 1
+                continue
+            ev = surge_break_event(day, c, mode, s, stop_daylow)
+            if not ev:
+                continue
+            i, t, px, reason = _exit_trade(day, ev, s)
+            tax = SELL_TAX_BY_YEAR.get(d.year, 0.0020)
+            ret = px * (1 - s.commission - tax) / (ev["price"] * (1 + s.commission)) - 1
+            trades.append({"trade_day": d.isoformat(), "code": c["code"], "name": c["name"],
+                           "prev_change": round(c["prev_change"], 1), "level": round(ev["pivot"], 1),
+                           "entry_time": ev["time"], "entry_price": round(ev["price"], 1),
+                           "exit_time": t, "exit_price": round(px, 1), "reason": reason,
+                           "ret_pct": round(ret * 100, 3)})
+    trades.sort(key=lambda t: (t["trade_day"], t["entry_time"]))
+    return trades, missing
+
+
 def download_toss_minute(days_file: Path, out_dir: Path, env: str = ".env", request_interval: float = 0.12) -> None:
     """days_file(code,date) 의 정규장(09:00~15:30) 1분봉을 토스 API 로 받는다. 이미 받은 날은 건너뜀. 주문 없음."""
     import time
@@ -3633,6 +3701,23 @@ def main(argv: list[str] | None = None) -> None:
     pb.add_argument("--trades-out", type=Path, default=None)
     pb.add_argument("--write-days", type=Path, default=None,
                     help="받아야 할 목록만 쓰고 끝냄 (매매일은 하루 전체, 전날은 끝 200분)")
+    sb = sub.add_parser("surgebreak", help="1분봉: 전일 급등주가 다음 날 전일 종가(아래에서)·전일 고가를 넘을 때 매수")
+    sb.add_argument("--mode", choices=["prevclose", "prevhigh"], default="prevclose")
+    sb.add_argument("--start", default="2026-07-01")
+    sb.add_argument("--end", default=None)
+    sb.add_argument("--cache", type=Path, default=Path("data/ohlcv_long"))
+    sb.add_argument("--minute-dir", type=Path, default=MINUTE_DIR)
+    sb.add_argument("--min-prev-change", type=float, default=15.0, help="전일 상승률 하한 %%")
+    sb.add_argument("--min-avg-amount", type=float, default=3e9)
+    sb.add_argument("--max-price", type=float, default=100_000)
+    sb.add_argument("--stop-pct", type=float, default=2.0, help="손절 = 매수가 -N%% (0: 없음)")
+    sb.add_argument("--stop-daylow", action="store_true", help="손절 = 매수 전까지 당일 최저가 (--stop-pct 0 과 함께)")
+    sb.add_argument("--take-profit", type=float, default=5.0)
+    sb.add_argument("--entry-bar-stop", choices=["low", "close"], default="low")
+    sb.add_argument("--buy-until", default="14:59")
+    sb.add_argument("--exit-time", default="15:15")
+    sb.add_argument("--trades-out", type=Path, default=None)
+    sb.add_argument("--write-days", type=Path, default=None, help="받아야 할 (종목, 날짜) 목록만 추가하고 끝냄")
     dm = sub.add_parser("download-minute", help="토스 API 로 목록(code,date)의 1분봉 받기 (.env 필요, 주문 없음)")
     dm.add_argument("--days", type=Path, default=Path("reports/minute_pullback/minute_days.csv"))
     dm.add_argument("--out", type=Path, default=MINUTE_DIR)
@@ -3953,6 +4038,45 @@ def main(argv: list[str] | None = None) -> None:
                 months = " / ".join(f"{m[5:]}월 {r:+.1f}%" for m, r in e["month_ret"].items())
                 print(f"  {label}: 계좌 {e['ret_pct']:+.1f}% (MDD {e['mdd_pct']:.1f}%, 평균 비중 {e['avg_pct']:.0f}%, "
                       f"실제 매수 {e['traded']}건) | {months}")
+        if args.trades_out and trades:
+            args.trades_out.parent.mkdir(parents=True, exist_ok=True)
+            with open(args.trades_out, "w", encoding="utf-8", newline="") as f:
+                w = csv.DictWriter(f, fieldnames=list(trades[0]))
+                w.writeheader()
+                w.writerows(trades)
+        return
+    if args.command == "surgebreak":
+        start = date.fromisoformat(args.start)
+        end = date.fromisoformat(args.end) if args.end else None
+        data = load_cache(args.cache)
+        days = surge_break_days(data, start, end, args.min_prev_change, args.min_avg_amount, args.max_price)
+        if args.write_days:
+            need: dict[tuple[str, str], int] = {}
+            if args.write_days.exists():
+                with open(args.write_days, encoding="utf-8") as f:
+                    for r in csv.DictReader(f):
+                        need[(r["code"], r["date"])] = int(r.get("pages") or 4)
+            for d, rows in days.items():
+                for r in rows:
+                    need[(r["code"], d.isoformat())] = 4
+            args.write_days.parent.mkdir(parents=True, exist_ok=True)
+            with open(args.write_days, "w", encoding="utf-8", newline="") as f:
+                w = csv.writer(f)
+                w.writerow(["code", "date", "pages"])
+                w.writerows((c, d, p) for (c, d), p in sorted(need.items()))
+            print(f"대상 {sum(len(v) for v in days.values())}건 → 목록 {len(need)}개: {args.write_days}")
+            return
+        s = PullBreakSettings(take_profit=args.take_profit, stop_pct=args.stop_pct, buy_until=args.buy_until,
+                              exit_time=args.exit_time, entry_bar_stop=args.entry_bar_stop)
+        trades, missing = run_surge_break(days, args.minute_dir, args.mode, s, args.stop_daylow)
+        rets = [t["ret_pct"] for t in trades]
+        print(f"대상 {sum(len(v) for v in days.values())}건 (분봉 없음 {missing}) → 매수 {len(trades)}건", end="")
+        if rets:
+            reasons = Counter(t["reason"] for t in trades)
+            print(f"  승률 {sum(r > 0 for r in rets) / len(rets) * 100:.1f}%  거래당 평균 {sum(rets) / len(rets):+.2f}%  "
+                  f"({', '.join(f'{k} {v}' for k, v in reasons.most_common())})")
+        else:
+            print()
         if args.trades_out and trades:
             args.trades_out.parent.mkdir(parents=True, exist_ok=True)
             with open(args.trades_out, "w", encoding="utf-8", newline="") as f:

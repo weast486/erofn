@@ -669,3 +669,16 @@ class PullBreakTest(unittest.TestCase):
         self.assertEqual(len(ev), 1)
         self.assertEqual(ev[0]["time"], "09:03")
         self.assertAlmostEqual(ev[0]["price"], (100 + 107 + 108) / 3, places=3)
+
+    def test_surge_break_prev_close_and_gap_excluded(self):
+        from tossbot.backtest import PullBreakSettings, surge_break_event
+        s = PullBreakSettings()
+        c = {"prev_close": 100, "prev_high": 110}
+        day = self._bars([(98, 99, 97, 98), (98, 101, 98, 100.5), (100.5, 112, 100, 111)])
+        ev = surge_break_event(day, c, "prevclose", s, stop_daylow=True)
+        self.assertEqual(ev["time"], "09:02")
+        self.assertAlmostEqual(ev["price"], 100 * (1 + s.slippage))
+        self.assertEqual(ev["stop"], 97)
+        self.assertEqual(surge_break_event(day, c, "prevhigh", s)["time"], "09:03")
+        gap = self._bars([(102, 103, 101, 102)] * 3)
+        self.assertIsNone(surge_break_event(gap, c, "prevclose", s))  # 갭상승으로 이미 위

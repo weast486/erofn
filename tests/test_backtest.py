@@ -482,3 +482,50 @@ class RsiSecondTest(unittest.TestCase):
         self.assertEqual([i for i, f in enumerate(rsi_second_flags(closes, rsi, r)) if f], [9])
         r.second_within, r.second_diverge = 10, True  # 6일째: 종가 84 < 85, RSI 28 > 20 → 다이버전스
         self.assertEqual([i for i, f in enumerate(rsi_second_flags(closes, rsi, r)) if f], [6])
+
+
+class MinutePullbackTest(unittest.TestCase):
+    def _bars(self, prices, start_min=9 * 60):
+        from tossbot.backtest import MinuteBar
+        out = []
+        for k, (o, h, l, c) in enumerate(prices):
+            t = start_min + k
+            out.append(MinuteBar(f"{t // 60:02d}:{t % 60:02d}", o, h, l, c, 1000))
+        return out
+
+    def _run(self, day_prices, m=None):
+        from tossbot.backtest import MinuteSettings, simulate_minute
+        m = m or MinuteSettings(ma=5, mode="next")
+        warm = self._bars([(100, 100, 100, 100)] * 5, start_min=14 * 60)
+        sig = {"code": "000000", "name": "x", "trade_day": date(2026, 8, 3), "prev_high": 90}
+        return simulate_minute(sig, warm, self._bars(day_prices), m)
+
+    def test_pullback_to_ma_then_take_profit(self):
+        # 101 로 올라 이평선(≈100) 위에 있다가 내려와 닿으면 매수, 이후 +3% 도달
+        t = self._run([(101, 101, 101, 101), (101, 101, 101, 101), (101, 101, 100, 100.5), (101, 104, 101, 104)])
+        self.assertEqual(t["reason"], "TAKE_PROFIT")
+        self.assertEqual(t["entry_time"], "09:02")
+        self.assertAlmostEqual(t["exit_price"], t["entry_price"] * 1.03, delta=0.2)
+
+    def test_stop_on_entry_bar_is_conservative(self):
+        t = self._run([(101, 101, 101, 101), (101, 101, 98, 99)])
+        self.assertEqual(t["reason"], "STOP_LOSS")
+        self.assertLess(t["ret_pct"], -1)
+
+    def test_no_touch_no_trade_and_time_exit(self):
+        self.assertIsNone(self._run([(102, 102, 102, 102)] * 3))
+        prices = [(101, 101, 101, 101), (101, 101, 100, 100.5)] + [(100.6, 100.7, 100.5, 100.6)] * 400
+        t = self._run(prices)
+        self.assertEqual(t["reason"], "TIME_EXIT")
+        self.assertEqual(t["exit_time"], "15:10")
+
+    def test_same_mode_needs_breakout_and_amount_first(self):
+        from tossbot.backtest import MinuteSettings
+        prices = [(101, 101, 101, 101), (101, 101, 100, 100.5), (101, 104, 101, 104)]
+        m = MinuteSettings(ma=5, mode="same", min_day_amount=0)
+        from tossbot.backtest import simulate_minute
+        warm = self._bars([(100, 100, 100, 100)] * 5, start_min=14 * 60)
+        sig = {"code": "000000", "name": "x", "trade_day": date(2026, 8, 3), "prev_high": 102}
+        self.assertIsNone(simulate_minute(sig, warm, self._bars(prices), m))  # 눌림 전에 102 돌파 없음
+        sig["prev_high"] = 100.8
+        self.assertIsNotNone(simulate_minute(sig, warm, self._bars(prices), m))

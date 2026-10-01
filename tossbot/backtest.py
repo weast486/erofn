@@ -2661,6 +2661,267 @@ def probe_toss_minute(out: Path, env: str = ".env", symbols: tuple[str, ...] = (
     return lines
 
 
+# ---------------------------------------------------------------- 분봉 (1분봉) 단타
+MINUTE_DIR = Path("data/minute")
+
+
+@dataclass
+class MinuteBar:
+    t: str  # "HH:MM" (KST)
+    open: float
+    high: float
+    low: float
+    close: float
+    volume: float
+
+
+@dataclass
+class MinuteSettings:
+    mode: str = "next"  # next: 일봉 첫 신고가 다음 날 / same: 장중 신고가 돌파한 당일
+    entry_days: int = 20
+    first_in_days: int = 20
+    top_universe: int = 100  # 0 이면 시총 조건 없음 (전날 기준 코스피+코스닥 상위 N)
+    max_price: float = 99_999
+    min_day_amount: float = 2e11  # same 모드는 장중 누적 거래대금이 이 값을 넘은 뒤에만 매수
+    min_avg_amount: float = 0  # 직전 20일 평균 거래대금 하한
+    ma: int = 200  # 1분봉 이평선
+    stop_loss: float = 1.0
+    take_profit: float = 3.0
+    entry_start: str = "09:00"
+    exit_time: str = "15:10"  # 이 시각 봉의 시가(= 직전 분 종가 부근)에 시장가 정리
+    commission: float = 0.00015
+    slippage: float = 0.001
+
+
+def load_top_universe_all(data_dir: Path, start: str, top_n: int) -> dict[date, set[str]]:
+    """날짜별 코스피+코스닥 시가총액 상위 top_n 보통주."""
+    import pandas as pd
+
+    y0 = date.fromisoformat(start).year
+    files = [data_dir / f"marcap-{y}.parquet" for y in range(y0, date.today().year + 1)]
+    df = pd.concat([pd.read_parquet(f, columns=["Code", "Name", "Market", "Date", "Marcap"]) for f in files if f.exists()])
+    df = df[df["Market"].isin(["KOSPI", "KOSDAQ", "KOSDAQ GLOBAL"])]
+    df = df[[_is_common_stock(c, n) for c, n in zip(df["Code"], df["Name"])]]
+    return {d.date(): set(g.nlargest(top_n, "Marcap")["Code"]) for d, g in df.groupby("Date")}
+
+
+def _next_weekday(d: date) -> date:
+    d += timedelta(days=1)
+    while d.weekday() >= 5:
+        d += timedelta(days=1)
+    return d
+
+
+def minute_signals(data: dict, top_uni: dict | None, start: date, end: date | None, m: MinuteSettings) -> list[dict]:
+    """일봉으로 분봉 매매 대상 (종목, 매매일) 을 고른다.
+
+    next: D 일 종가가 20일 첫 신고가 + 시총·가격·거래대금 조건 → D+1 일 매매 (warm-up 은 D 일 분봉)
+    same: D 일 고가가 직전 20일 최고 종가 돌파(직전 20일 신고가 없음) + 일 거래대금 조건(장중 누적은 분봉에서 다시 확인)
+          → D 일 매매 (warm-up 은 D-1 일 분봉). 시총·가격은 전날 기준.
+    """
+    out = []
+    for code, (name, bars) in data.items():
+        closes = [b.close for b in bars]
+        flags = new_high_flags(closes, m.entry_days)
+        amounts = [b.close * b.volume for b in bars]
+        for i in range(m.entry_days + m.first_in_days, len(bars)):
+            d = bars[i].day
+            if d < start or (end and d > end):
+                continue
+            if any(flags[i - m.first_in_days:i]):
+                continue
+            prev_high = max(closes[i - m.entry_days:i])
+            avg = sum(amounts[i - 20:i]) / 20
+            if avg < m.min_avg_amount or amounts[i] < m.min_day_amount:
+                continue
+            if m.mode == "next":
+                if not flags[i] or closes[i] > m.max_price:
+                    continue
+                if top_uni is not None and code not in top_uni.get(d, ()):
+                    continue
+                trade_day = bars[i + 1].day if i + 1 < len(bars) else _next_weekday(d)
+                warm_day = d
+            else:
+                ref = bars[i - 1]
+                if bars[i].high <= prev_high or ref.close > m.max_price:
+                    continue
+                if top_uni is not None and code not in top_uni.get(ref.day, ()):
+                    continue
+                trade_day, warm_day = d, ref.day
+            out.append({"code": code, "name": name, "signal_day": d, "trade_day": trade_day, "warm_day": warm_day,
+                        "prev_high": prev_high, "day_amount": amounts[i]})
+    return sorted(out, key=lambda s: (s["trade_day"], s["code"]))
+
+
+def load_minute(minute_dir: Path, code: str, d: date) -> list[MinuteBar] | None:
+    path = minute_dir / f"{code}_{d.isoformat()}.csv"
+    if not path.exists():
+        return None
+    with open(path, encoding="utf-8") as f:
+        return [MinuteBar(r["time"], float(r["open"]), float(r["high"]), float(r["low"]), float(r["close"]),
+                          float(r["volume"])) for r in csv.DictReader(f)]
+
+
+def simulate_minute(sig: dict, warm: list[MinuteBar], day: list[MinuteBar], m: MinuteSettings) -> dict | None:
+    """1분봉 이평선 눌림 지정가 매수 → 손절/익절/시각 정리. 하루 한 번만 매수.
+
+    - 눌림: 직전 봉 종가가 이평선 위였고 이번 봉 저가가 이평선 이하 → 이평선 가격(시가가 이미 아래면 시가)에 매수
+    - same 모드: 그 전에 장중 고가가 직전 20일 최고 종가를 넘었고, 누적 거래대금이 min_day_amount 이상이어야 함
+    - 매수한 봉에서 저가가 손절가 이하면 손절로 가정 (봉 안의 순서를 모르므로 보수적), 익절은 다음 봉부터
+    - 같은 봉에서 손절·익절 둘 다 닿으면 손절
+    """
+    closes = [b.close for b in warm] + [b.close for b in day]
+    off = len(warm)
+    broke = m.mode == "next"
+    cum = 0.0
+    entry = None
+    for j, b in enumerate(day):
+        k = off + j
+        cum += b.close * b.volume
+        if entry is None:
+            if b.t >= m.exit_time:
+                break
+            if k < m.ma or b.t < m.entry_start:
+                broke = broke or b.high > sig["prev_high"]
+                continue
+            ma_prev = sum(closes[k - m.ma:k]) / m.ma
+            ma_now = (sum(closes[k - m.ma + 1:k]) + b.open) / m.ma  # 봉 진행 중 이평선 ≈ 이번 봉 시가 반영
+            prev_close = closes[k - 1]
+            ready = broke and (m.mode == "next" or cum - b.close * b.volume >= m.min_day_amount)
+            if ready and j > 0 and prev_close > ma_prev and b.low <= ma_now:
+                price = min(b.open, ma_now)
+                entry = {"time": b.t, "price": price}
+                stop = price * (1 - m.stop_loss / 100)
+                target = price * (1 + m.take_profit / 100)
+                if b.low <= stop:
+                    return _minute_trade(sig, entry, b.t, stop * (1 - m.slippage), "STOP_LOSS", m)
+            broke = broke or b.high > sig["prev_high"]
+            continue
+        if b.t >= m.exit_time:
+            return _minute_trade(sig, entry, b.t, b.open * (1 - m.slippage), "TIME_EXIT", m)
+        if b.open <= stop:
+            return _minute_trade(sig, entry, b.t, b.open * (1 - m.slippage), "STOP_LOSS", m)
+        if b.low <= stop:
+            return _minute_trade(sig, entry, b.t, stop * (1 - m.slippage), "STOP_LOSS", m)
+        if b.high >= target:
+            return _minute_trade(sig, entry, b.t, max(b.open, target), "TAKE_PROFIT", m)
+    if entry is not None:
+        last = day[-1]
+        return _minute_trade(sig, entry, last.t, last.close * (1 - m.slippage), "TIME_EXIT", m)
+    return None
+
+
+def _minute_trade(sig: dict, entry: dict, t: str, exit_price: float, reason: str, m: MinuteSettings) -> dict:
+    tax = SELL_TAX_BY_YEAR.get(sig["trade_day"].year, 0.0020)
+    ret = exit_price * (1 - m.commission - tax) / (entry["price"] * (1 + m.commission)) - 1
+    return {"trade_day": sig["trade_day"].isoformat(), "code": sig["code"], "name": sig["name"],
+            "entry_time": entry["time"], "entry_price": round(entry["price"], 1), "exit_time": t,
+            "exit_price": round(exit_price, 1), "reason": reason, "ret_pct": round(ret * 100, 3)}
+
+
+def run_minute(data: dict, top_uni: dict | None, start: date, end: date | None, m: MinuteSettings,
+               minute_dir: Path) -> tuple[list[dict], list[dict], int]:
+    """(신호 목록, 거래 목록, 분봉 없는 신호 수)."""
+    sigs = minute_signals(data, top_uni, start, end, m)
+    trades, missing = [], 0
+    for s in sigs:
+        warm = load_minute(minute_dir, s["code"], s["warm_day"])
+        day = load_minute(minute_dir, s["code"], s["trade_day"])
+        if warm is None or not day:
+            missing += 1
+            continue
+        t = simulate_minute(s, warm, day, m)
+        if t:
+            trades.append(t)
+    return sigs, trades, missing
+
+
+def print_minute_report(sigs: list[dict], trades: list[dict], missing: int, m: MinuteSettings) -> None:
+    rets = [t["ret_pct"] for t in trades]
+    print(f"신호 {len(sigs)}건 (분봉 없음 {missing}) → 매수 {len(trades)}건")
+    if not rets:
+        return
+    wins = sum(r > 0 for r in rets)
+    reasons = Counter(t["reason"] for t in trades)
+    print(f"승률 {wins / len(rets) * 100:.1f}%  거래당 평균 {sum(rets) / len(rets):+.2f}%  합계 {sum(rets):+.1f}%p  "
+          f"({', '.join(f'{k} {v}' for k, v in reasons.most_common())})")
+    by_month: dict[str, list[float]] = defaultdict(list)
+    for t in trades:
+        by_month[t["trade_day"][:7]].append(t["ret_pct"])
+    for mo, rs in sorted(by_month.items()):
+        print(f"  {mo}: {len(rs)}건 평균 {sum(rs) / len(rs):+.2f}%")
+
+
+def write_minute_days(sig_lists: list[list[dict]], out: Path) -> int:
+    """분봉을 받아야 할 (종목, 날짜) 목록 CSV."""
+    need = set()
+    for sigs in sig_lists:
+        for s in sigs:
+            need.add((s["code"], s["warm_day"].isoformat()))
+            need.add((s["code"], s["trade_day"].isoformat()))
+    out.parent.mkdir(parents=True, exist_ok=True)
+    with open(out, "w", encoding="utf-8", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["code", "date"])
+        w.writerows(sorted(need))
+    return len(need)
+
+
+def download_toss_minute(days_file: Path, out_dir: Path, env: str = ".env", request_interval: float = 0.12) -> None:
+    """days_file(code,date) 의 정규장(09:00~15:30) 1분봉을 토스 API 로 받는다. 이미 받은 날은 건너뜀. 주문 없음."""
+    import shutil
+    import time
+    from datetime import datetime
+
+    from .client import TossClient
+    from .config import KST
+
+    load_dotenv(env)
+    cfg = Config.from_env()
+    client = TossClient(cfg.client_id, cfg.client_secret, cfg.base_url)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    with open(days_file, encoding="utf-8") as f:
+        need = [(r["code"], r["date"]) for r in csv.DictReader(f)]
+    today = datetime.now(KST).date().isoformat()
+    todo = [(c, d) for c, d in need if d < today and not (out_dir / f"{c}_{d}.csv").exists()]
+    print(f"분봉 받기: {len(need)}개 중 {len(todo)}개 (종목×날짜)", flush=True)
+
+    def candles(symbol: str, before: str) -> list[dict]:
+        time.sleep(request_interval)
+        params = {"symbol": symbol, "interval": "1m", "count": 200, "adjusted": "true", "before": before}
+        return (client._request("GET", "/api/v1/candles", params=params) or {}).get("candles", [])
+
+    failed = []
+    for n, (code, d) in enumerate(todo, 1):
+        rows: dict[str, tuple] = {}
+        before = f"{d}T15:30:00.000+09:00"
+        try:
+            for _ in range(4):  # 200분씩 최대 4번 (정규장 390분)
+                raw = candles(code, before)
+                for c in raw:
+                    ts = datetime.fromisoformat(c["timestamp"].replace("Z", "+00:00")).astimezone(KST)
+                    if ts.date().isoformat() == d and "09:00" <= ts.strftime("%H:%M") <= "15:30":
+                        rows[ts.strftime("%H:%M")] = (ts.strftime("%H:%M"), c["openPrice"], c["highPrice"],
+                                                       c["lowPrice"], c["closePrice"], c["volume"])
+                if not raw or "09:00" in rows:
+                    break
+                before = min(c["timestamp"] for c in raw)
+        except Exception as exc:
+            failed.append(f"{code}_{d}")
+            log.warning("%s %s 실패: %s", code, d, exc)
+            continue
+        with open(out_dir / f"{code}_{d}.csv", "w", encoding="utf-8", newline="") as f:
+            w = csv.writer(f)
+            w.writerow(["time", "open", "high", "low", "close", "volume"])
+            w.writerows(rows[k] for k in sorted(rows))
+        if n % 20 == 0 or n == len(todo):
+            print(f"  {n} / {len(todo)}", flush=True)
+    if failed:
+        print(f"실패 {len(failed)}개: {failed[:20]} (다시 실행하면 이어받음)")
+    archive = shutil.make_archive(str(out_dir.parent / out_dir.name), "zip", root_dir=out_dir)
+    print(f"완료. 묶음 파일: {archive}")
+
+
 def download_index(symbol: str, cache_dir: Path, count: int = 1500) -> Path:
     """네이버 차트에서 지수 일봉(KOSPI / KOSDAQ)을 받아 _index_{symbol}.csv 로 저장."""
     import re
@@ -2776,6 +3037,29 @@ def main(argv: list[str] | None = None) -> None:
     d.add_argument("--start", default="2023-09-01", help="지표 계산을 위해 백테스트 시작 3~4개월 전부터")
     d.add_argument("--end", default=None)
     d.add_argument("--cache", type=Path, default=DEFAULT_CACHE)
+    dm = sub.add_parser("download-minute", help="토스 API 로 목록(code,date)의 1분봉 받기 (.env 필요, 주문 없음)")
+    dm.add_argument("--days", type=Path, default=Path("reports/minute_pullback/minute_days.csv"))
+    dm.add_argument("--out", type=Path, default=MINUTE_DIR)
+    dm.add_argument("--env", default=".env")
+    mn = sub.add_parser("minute", help="1분봉 단타 백테스트: 일봉 20일 첫 신고가 → 1분봉 이평선 눌림 매수")
+    mn.add_argument("--mode", choices=["next", "same"], default="next",
+                    help="next: 신고가 다음 날 매매 / same: 장중 신고가 돌파 당일 매매")
+    mn.add_argument("--start", default="2026-07-01")
+    mn.add_argument("--end", default=None)
+    mn.add_argument("--cache", type=Path, default=Path("data/ohlcv_long"))
+    mn.add_argument("--marcap-dir", type=Path, default=Path("data/marcap/data"))
+    mn.add_argument("--minute-dir", type=Path, default=MINUTE_DIR)
+    mn.add_argument("--top-universe", type=int, default=100, help="0: 시총 조건 없음")
+    mn.add_argument("--max-price", type=float, default=99_999)
+    mn.add_argument("--min-day-amount", type=float, default=2e11)
+    mn.add_argument("--min-avg-amount", type=float, default=0)
+    mn.add_argument("--ma", type=int, default=200)
+    mn.add_argument("--stop-loss", type=float, default=1.0)
+    mn.add_argument("--take-profit", type=float, default=3.0)
+    mn.add_argument("--exit-time", default="15:10")
+    mn.add_argument("--trades-out", type=Path, default=None, help="거래 내역 CSV")
+    mn.add_argument("--write-days", type=Path, default=None,
+                    help="분봉을 받아야 할 (종목, 날짜) 목록만 이 파일에 추가하고 끝냄 (next·same 둘 다)")
     pm = sub.add_parser("probe-minute", help="토스 API 로 국내 분봉을 어디까지 받을 수 있는지 확인 (.env 필요, 저장·주문 없음)")
     pm.add_argument("--out", type=Path, default=Path("data/_minute_probe.txt"))
     pm.add_argument("--env", default=".env")
@@ -2971,6 +3255,37 @@ def main(argv: list[str] | None = None) -> None:
 
     if args.command == "universe":
         write_universe_file(args.marcap_dir, args.top, args.out)
+        return
+    if args.command == "download-minute":
+        download_toss_minute(args.days, args.out, args.env)
+        return
+    if args.command == "minute":
+        start = date.fromisoformat(args.start)
+        end = date.fromisoformat(args.end) if args.end else None
+        data = load_cache(args.cache)
+        top_uni = load_top_universe_all(args.marcap_dir, args.start, args.top_universe) if args.top_universe else None
+        m = MinuteSettings(mode=args.mode, top_universe=args.top_universe, max_price=args.max_price,
+                           min_day_amount=args.min_day_amount, min_avg_amount=args.min_avg_amount, ma=args.ma,
+                           stop_loss=args.stop_loss, take_profit=args.take_profit, exit_time=args.exit_time)
+        if args.write_days:
+            lists = [minute_signals(data, top_uni, start, end, dataclasses.replace(m, mode=mode))
+                     for mode in ("next", "same")]
+            if args.write_days.exists():
+                with open(args.write_days, encoding="utf-8") as f:
+                    old = [{"code": r["code"], "warm_day": date.fromisoformat(r["date"]),
+                            "trade_day": date.fromisoformat(r["date"])} for r in csv.DictReader(f)]
+                lists.append(old)
+            n = write_minute_days(lists, args.write_days)
+            print(f"신호 next {len(lists[0])} / same {len(lists[1])}건 → 받을 종목×날짜 누적 {n}개: {args.write_days}")
+            return
+        sigs, trades, missing = run_minute(data, top_uni, start, end, m, args.minute_dir)
+        print_minute_report(sigs, trades, missing, m)
+        if args.trades_out:
+            args.trades_out.parent.mkdir(parents=True, exist_ok=True)
+            with open(args.trades_out, "w", encoding="utf-8", newline="") as f:
+                w = csv.DictWriter(f, fieldnames=list(trades[0]) if trades else ["trade_day"])
+                w.writeheader()
+                w.writerows(trades)
         return
     if args.command == "probe-minute":
         probe_toss_minute(args.out, args.env)

@@ -413,6 +413,15 @@ class NPatternTest(unittest.TestCase):
         self.assertTrue(n_pattern_signal(bars, 31, c))
         c.np_quiet = "all"
         self.assertFalse(n_pattern_signal(bars, 31, c))
+        c.np_quiet, c.np_base_ma = "", 20  # 20일선 ≈ 10,000, 기준봉 시가 10,050
+        self.assertTrue(n_pattern_signal(bars, 31, c))
+        c.np_base_ma_pct = 0.1
+        self.assertFalse(n_pattern_signal(bars, 31, c))
+        c.np_base_ma_mode = "cross"  # 시가 10,050 > 20일선 10,000 x 1.001
+        self.assertFalse(n_pattern_signal(bars, 31, c))
+        c.np_base_ma_pct = 1
+        self.assertTrue(n_pattern_signal(bars, 31, c))
+        c.np_base_ma = 0
         c.np_quiet = "last"  # 매수 전날(30일)은 거래량이 많음
         self.assertFalse(n_pattern_signal(bars, 31, c))
         bars[30] = Bar(days[30], 11_150, 11_250, 11_000, 11_150, 1_000_000)

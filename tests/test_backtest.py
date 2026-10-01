@@ -394,6 +394,21 @@ class NPatternTest(unittest.TestCase):
         a.np_min_pull = 10  # 눌림 8.3% < 10%
         self.assertFalse(n_pattern_signal(bars, i_a, a))
 
+    def test_n_pattern_c_repeat_strong_candle(self):
+        from tossbot.backtest import BreakoutSettings, n_pattern_signal
+        days = weekdays(40)
+        # 기준봉(25일, +12%) → 눌림 (저가 10,900 > 기준봉 저가 10,000) → 31일 다시 +12%
+        closes = [10_000] * 25 + [11_200, 11_100, 11_000, 11_050, 11_100, 11_150, 12_488] + [12_500] * 8
+        bars = [Bar(d, c, c * 1.01, c * 0.99, c, 3_000_000) for d, c in zip(days, closes)]
+        bars[25] = Bar(days[25], 10_050, 11_300, 10_000, 11_200, 3_000_000)
+        c = BreakoutSettings(npattern="C", np_rise_pct=10, np_amount=2e10)
+        self.assertTrue(n_pattern_signal(bars, 31, c))
+        self.assertFalse(n_pattern_signal(bars, 25, c))  # 기준봉 자체
+        bars[28] = Bar(days[28], 11_000, 11_100, 9_900, 11_050, 3_000_000)  # 기준봉 저가 이탈
+        self.assertFalse(n_pattern_signal(bars, 31, c))
+        c.np_base_ref = "open"  # 기준봉 시가 10,050 도 이탈
+        self.assertFalse(n_pattern_signal(bars, 31, c))
+
 
 class VolBreakoutTest(unittest.TestCase):
     def test_buys_at_target_sells_next_open(self):

@@ -390,11 +390,34 @@ class BreakoutSettings:
     np_min_pull: float = 5.0
     np_max_pull: float = 15.0
     np_amount: float = 20_000_000_000
+    # C = 기준봉 재출현: 기준봉(거래대금 np_amount 이상·전일 대비 np_rise_pct % 이상 상승) 뒤 np_lookback 거래일 안에
+    # 기준봉 저가(np_base_ref="open" 이면 시가)를 한 번도 깨지 않고 같은 조건의 봉이 다시 나온 날 종가 매수.
+    # 기준봉 = 오늘 전 가장 최근의 같은 조건 봉, 기준봉과 오늘 사이 최소 np_min_gap 거래일.
+    # np_first_base 면 기준봉 앞 np_lookback 거래일 안에 같은 조건 봉이 없어야 함 (오늘이 정확히 두 번째)
+    np_base_ref: str = "low"
+    np_min_gap: int = 2
+    np_first_base: bool = True
+
+
+def _np_strong(bars: list[Bar], k: int, b: "BreakoutSettings") -> bool:
+    x = bars[k]
+    return (k >= 1 and x.close * x.volume >= b.np_amount
+            and (x.close / bars[k - 1].close - 1) * 100 >= b.np_rise_pct - 1e-9)
 
 
 def n_pattern_signal(bars: list[Bar], i: int, b: "BreakoutSettings") -> bool:
     """오늘(i) 종가 기준 N자 패턴 매수 신호인지 (BreakoutSettings.npattern 설명 참고)."""
     L = b.np_lookback
+    if b.npattern == "C":
+        if i < L + 1 or not _np_strong(bars, i, b):
+            return False
+        k = next((k for k in range(i - 1, i - L - 1, -1) if _np_strong(bars, k, b)), None)
+        if k is None or i - k < b.np_min_gap:
+            return False
+        if b.np_first_base and any(_np_strong(bars, j, b) for j in range(max(k - L, 1), k)):
+            return False
+        ref = bars[k].open if b.np_base_ref == "open" else bars[k].low
+        return min(x.low for x in bars[k + 1:i + 1]) >= ref
     if i < 2 * L + 1:
         return False
     closes = [x.close for x in bars[i - 2 * L:i + 1]]  # closes[-1] = 오늘
@@ -3936,8 +3959,13 @@ def main(argv: list[str] | None = None) -> None:
                    help="breakout: 코스피 종가가 N거래일 전보다 높은 날에만 매수 (0 = 필터 없음)")
     r.add_argument("--slot-budget", type=float, default=0,
                    help="종목당 매수 금액·1주 가격 상한 (원). 시작 자금 = 이 값 x 최대 종목 수 (0 = .env 설정)")
-    r.add_argument("--npattern", choices=["", "A", "B"], default="",
-                   help="breakout: N자 패턴 (A = 눌림 저점 뒤 첫 양봉 매수 / B = 1차 고점 돌파 매수)")
+    r.add_argument("--npattern", choices=["", "A", "B", "C"], default="",
+                   help="breakout: N자 패턴 (A = 눌림 저점 뒤 첫 양봉 매수 / B = 1차 고점 돌파 매수 / "
+                        "C = 기준봉(--np-amount·--np-rise) 뒤 --np-lookback 일 안에 기준봉 저가를 안 깨고 같은 봉 재출현 시 종가 매수)")
+    r.add_argument("--np-base-ref", choices=["low", "open"], default="low", help="breakout N자 C: 깨지 말아야 할 기준봉 가격")
+    r.add_argument("--np-min-gap", type=int, default=2, help="breakout N자 C: 기준봉과 매수일 최소 간격 (거래일)")
+    r.add_argument("--np-any-base", action="store_true",
+                   help="breakout N자 C: 기준봉 앞에 같은 조건 봉이 있어도 허용 (기본: 기준봉이 첫 번째여야 함)")
     r.add_argument("--np-lookback", type=int, default=20, help="breakout N자: 1차 고점·상승 탐색 기간 (거래일)")
     r.add_argument("--np-rise", type=float, default=15.0, help="breakout N자: 1차 상승폭 하한 %%")
     r.add_argument("--np-pull", type=float, nargs=2, default=[5.0, 15.0], metavar=("MIN", "MAX"),
@@ -4188,6 +4216,7 @@ def main(argv: list[str] | None = None) -> None:
                               entry_delay=args.entry_delay, delay_max_rise_pct=args.delay_max_rise, rank_by=args.rank_by, max_amount_rank=args.max_amount_rank, cross_ma=args.cross_ma, engulf=args.engulf, below_ma=args.below_ma,
                               npattern=args.npattern, np_lookback=args.np_lookback, np_rise_pct=args.np_rise,
                               np_min_pull=args.np_pull[0], np_max_pull=args.np_pull[1], np_amount=args.np_amount,
+                              np_base_ref=args.np_base_ref, np_min_gap=args.np_min_gap, np_first_base=not args.np_any_base,
                               delay_hold_signal_open=args.delay_hold_open, delay_intraday=args.delay_intraday,
                               min_avg_trading_amount=settings.params.min_avg_trading_amount,
                               min_candle_pct=args.min_candle, candle_measure=args.candle_measure,

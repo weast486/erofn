@@ -3056,6 +3056,7 @@ class PullBreakSettings:
     ma: int = 20  # 5분봉 이평선
     band: tuple[int, int] | None = None  # (5, 22): 위 이평선 위에 있다가 저가가 두 이평선 사이로 들어오면 눌림
     band_allow_below: bool = False  # True 면 아래 이평선 밑으로 빠져도 눌림으로 인정
+    aligned: tuple[int, ...] = ()  # (5, 10, 20): 눌림 봉에서 5 > 10 > 20 이평 정배열일 때만
     bar_minutes: int = 5
     take_profit: float = 5.0
     buy_until: str = "14:59"
@@ -3136,6 +3137,12 @@ def pullback_break_events(warm: list[MinuteBar], day: list[MinuteBar], prev_clos
             ma_now = sum(closes[-s.ma:]) / s.ma
             ma_prev = sum(closes[-s.ma - 1:-1]) / s.ma
             touched = closes[-2] > ma_prev and b.low <= ma_now
+        if touched and s.aligned:
+            if len(closes) < max(s.aligned):
+                touched = False
+            else:
+                mas = [sum(closes[-n:]) / n for n in s.aligned]
+                touched = all(a > b2 for a, b2 in zip(mas, mas[1:]))
         if not armed and touched and leg_high > b.close:
             armed, pivot, stop = True, leg_high, b.low
     return events
@@ -3515,6 +3522,7 @@ def main(argv: list[str] | None = None) -> None:
     pb.add_argument("--band", type=int, nargs=2, default=None, metavar=("FAST", "SLOW"),
                     help="예: 5 22 → 5이평 위에 있다가 저가가 5~22이평 사이에 닿으면 눌림 (--ma 대신)")
     pb.add_argument("--band-allow-below", action="store_true", help="--band 아래 이평선 밑으로 빠져도 눌림 인정")
+    pb.add_argument("--aligned", type=int, nargs="+", default=[], help="예: 5 10 20 → 눌림 봉에서 이평선 정배열일 때만")
     pb.add_argument("--bar-minutes", type=int, default=5)
     pb.add_argument("--take-profit", type=float, default=5.0)
     pb.add_argument("--buy-until", default="14:59")
@@ -3803,6 +3811,7 @@ def main(argv: list[str] | None = None) -> None:
             return
         s = PullBreakSettings(min_change=args.min_change, max_price=args.max_price, min_cum_amount=args.min_amount, ma=args.ma,
                               band=tuple(args.band) if args.band else None, band_allow_below=args.band_allow_below,
+                              aligned=tuple(args.aligned),
                               bar_minutes=args.bar_minutes, take_profit=args.take_profit, buy_until=args.buy_until,
                               exit_time=args.exit_time, max_trades=args.max_trades,
                               max_consec_losses=args.max_consec_losses)

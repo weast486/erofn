@@ -629,3 +629,15 @@ class PullBreakTest(unittest.TestCase):
         deep = self._bars([(104, 106, 104, 106), (106, 108, 106, 108), (108, 108, 100, 101),
                            (101, 107, 101, 107), (107, 109, 107, 109)])
         self.assertEqual(pullback_break_events(warm, deep, 95, s), [])
+
+    def test_aligned_mas_required(self):
+        from tossbot.backtest import PullBreakSettings, pullback_break_events
+        warm = self._bars([(100, 100, 100, 100)] * 5, start="15:16")
+        day = self._bars([(104, 105, 104, 105), (105, 107, 105, 107), (107, 107, 104, 104.5),
+                          (104.5, 106, 104.5, 106), (106, 108, 106, 108)])
+        base = dict(ma=3, bar_minutes=1, min_cum_amount=0)
+        self.assertEqual(len(pullback_break_events(warm, day, 100, PullBreakSettings(**base))), 1)
+        # 눌림 봉 종가들: 2이평 105.75 < 3이평 105.5? → (107+104.5)/2=105.75 > (105+107+104.5)/3=105.5 > 4이평 104.1 정배열
+        self.assertEqual(len(pullback_break_events(warm, day, 100, PullBreakSettings(aligned=(2, 3, 4), **base))), 1)
+        # 역배열 요구 순서면 신호 없음
+        self.assertEqual(pullback_break_events(warm, day, 100, PullBreakSettings(aligned=(4, 3, 2), **base)), [])

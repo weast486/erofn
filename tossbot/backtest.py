@@ -2868,6 +2868,168 @@ def write_minute_days(sig_lists: list[list[dict]], out: Path) -> int:
     return len(need)
 
 
+# ---------------------------------------------------------------- 업종 동반 상승 → 다음 날 갭상승 눌림 (1분봉)
+@dataclass
+class SectorGapSettings:
+    top_n: int = 50  # 전일 거래대금 상위 N
+    min_sector_up: int = 3  # 같은 업종에서 상승 마감한 종목 수 하한
+    take_profit: float = 5.0  # 평균 매입가 대비
+    stop_loss: float = 0.0  # 0 이면 손절 없음
+    first_weight: float = 0.5  # 1차(시가) 비중, 나머지는 2차(전일 종가)
+    buy_until: str = "15:00"
+    exit_time: str = "15:15"
+    commission: float = 0.00015
+    slippage: float = 0.001
+
+
+def load_sector_map(path: Path) -> dict[str, str]:
+    with open(path, encoding="utf-8") as f:
+        return {r["code"]: r["sector"] for r in csv.DictReader(f) if r.get("sector")}
+
+
+def sector_gap_candidates(data: dict, start: date, end: date | None, top_n: int,
+                          sectors: dict[str, str] | None = None, min_sector_up: int = 3) -> list[dict]:
+    """D 일 거래대금 상위 top_n 중 상승 마감 종목 → D+1 이 매매일. sectors 를 주면 같은 업종 상승 종목이
+    min_sector_up 개 이상인 업종만. 다음 날 갭상승 여부는 일봉 시가로 판단(데이터 없으면 분봉에서)."""
+    by_day: dict[date, list[tuple]] = defaultdict(list)
+    for code, (name, bars) in data.items():
+        for i in range(1, len(bars)):
+            b = bars[i]
+            if b.day < start or (end and b.day > end) or b.volume <= 0:
+                continue
+            nxt = bars[i + 1] if i + 1 < len(bars) else None
+            by_day[b.day].append((b.close * b.volume, code, name, b, bars[i - 1].close, nxt))
+    out = []
+    for d, rows in by_day.items():
+        top = sorted(rows, key=lambda r: r[0], reverse=True)[:top_n]
+        up = [r for r in top if r[3].close > r[4]]
+        if sectors is not None:
+            cnt = Counter(sectors.get(r[1]) for r in up if sectors.get(r[1]))
+            up = [r for r in up if sectors.get(r[1]) and cnt[sectors[r[1]]] >= min_sector_up]
+        for _, code, name, b, _, nxt in up:
+            if nxt is not None and nxt.open <= b.close:
+                continue  # 다음 날 갭상승 아님
+            out.append({"code": code, "name": name, "signal_day": d, "trade_day": nxt.day if nxt else _next_weekday(d),
+                        "prev_close": b.close, "sector": (sectors or {}).get(code, "")})
+    return sorted(out, key=lambda s: (s["trade_day"], s["code"]))
+
+
+def simulate_sector_gap(sig: dict, day: list[MinuteBar], g: SectorGapSettings) -> dict | None:
+    """갭상승한 날: 1차 = 시가에 지정가(시가 이후 다시 시가까지 내려오면), 2차 = 전일 종가에 지정가.
+    익절 = 평균 매입가 +take_profit% 지정가, buy_until 까지만 매수, exit_time 에 시장가 정리.
+    봉 안의 순서는 모르므로: 기존 보유분의 익절·손절을 먼저 보고, 그다음 이 봉의 신규 체결. 신규 체결한 봉에서는 익절 안 함."""
+    if not day:
+        return None
+    open_px, prev = day[0].open, sig["prev_close"]
+    if open_px <= prev:
+        return None
+    w1, w2 = g.first_weight, 1 - g.first_weight
+    fills: list[tuple[str, float, float]] = []  # (시각, 가격, 비중)
+    done1 = done2 = False
+    exit_t = exit_px = reason = None
+    for j, b in enumerate(day):
+        if fills:
+            avg = sum(w for _, _, w in fills) / sum(w / p for _, p, w in fills)  # 금액 가중 평균 매입가
+            if b.t >= g.exit_time:
+                exit_t, exit_px, reason = b.t, b.open * (1 - g.slippage), "TIME_EXIT"
+                break
+            stop = avg * (1 - g.stop_loss / 100) if g.stop_loss else None
+            if stop and b.low <= stop:
+                exit_t, exit_px, reason = b.t, min(b.open, stop) * (1 - g.slippage), "STOP_LOSS"
+                break
+            target = avg * (1 + g.take_profit / 100)
+            if b.high >= target:
+                exit_t, exit_px, reason = b.t, max(b.open, target), "TAKE_PROFIT"
+                break
+        elif b.t >= g.buy_until:
+            break
+        if b.t < g.buy_until:
+            if not done1 and j >= 1 and b.low <= open_px:
+                fills.append((b.t, min(b.open, open_px), w1))
+                done1 = True
+            if not done2 and b.low <= prev:
+                fills.append((b.t, min(b.open, prev), w2))
+                done2 = True
+    if not fills:
+        return None
+    if exit_t is None:
+        exit_t, exit_px, reason = day[-1].t, day[-1].close * (1 - g.slippage), "TIME_EXIT"
+    tax = SELL_TAX_BY_YEAR.get(sig["trade_day"].year, 0.0020)
+    wsum = sum(w for _, _, w in fills)  # 비중 = 종목당 예산 중 쓴 돈의 비율
+    shares = sum(w / (p * (1 + g.commission)) for _, p, w in fills)
+    pnl = shares * exit_px * (1 - g.commission - tax) - wsum  # 종목당 예산 1 기준 손익
+    return {"trade_day": sig["trade_day"].isoformat(), "code": sig["code"], "name": sig["name"], "sector": sig["sector"],
+            "prev_close": prev, "open": open_px, "gap_pct": round((open_px / prev - 1) * 100, 2),
+            "fills": "+".join(f"{t}@{p:.0f}" for t, p, _ in fills), "filled_weight": wsum,
+            "exit_time": exit_t, "exit_price": round(exit_px, 1), "reason": reason,
+            "ret_pct": round(pnl / wsum * 100, 3), "slot_ret_pct": round(pnl * 100, 3)}
+
+
+def run_sector_gap(data: dict, sectors: dict, start: date, end: date | None, g: SectorGapSettings,
+                   minute_dir: Path) -> tuple[list[dict], list[dict], int]:
+    sigs = sector_gap_candidates(data, start, end, g.top_n, sectors, g.min_sector_up)
+    trades, missing = [], 0
+    for s in sigs:
+        day = load_minute(minute_dir, s["code"], s["trade_day"])
+        if day is None:
+            missing += 1
+            continue
+        t = simulate_sector_gap(s, day, g)
+        if t:
+            trades.append(t)
+    return sigs, trades, missing
+
+
+def print_sector_gap_report(sigs: list[dict], trades: list[dict], missing: int) -> None:
+    print(f"후보 {len(sigs)}건 (분봉 없음 {missing}) → 매수 {len(trades)}건")
+    if not trades:
+        return
+    rets = [t["ret_pct"] for t in trades]
+    slot = [t["slot_ret_pct"] for t in trades]
+    both = sum(t["filled_weight"] >= 0.999 for t in trades)
+    reasons = Counter(t["reason"] for t in trades)
+    print(f"승률 {sum(r > 0 for r in rets) / len(rets) * 100:.1f}%  산 금액 대비 평균 {sum(rets) / len(rets):+.2f}%  "
+          f"종목당 예산 대비 평균 {sum(slot) / len(slot):+.2f}%  합계 {sum(slot):+.1f}%p  2차까지 체결 {both}건  "
+          f"({', '.join(f'{k} {v}' for k, v in reasons.most_common())})")
+    by_month: dict[str, list[float]] = defaultdict(list)
+    for t in trades:
+        by_month[t["trade_day"][:7]].append(t["slot_ret_pct"])
+    for mo, rs in sorted(by_month.items()):
+        print(f"  {mo}: {len(rs)}건 예산 대비 평균 {sum(rs) / len(rs):+.2f}%")
+
+
+def download_sector_info(codes: list[str], out: Path, env: str = ".env", request_interval: float = 0.15) -> None:
+    """업종 확인용 원본 저장: 토스 종목 정보 + 네이버 모바일 종목 정보 (사용자 PC 에서 실행, 주문 없음)."""
+    import json
+    import time
+    import urllib.request
+
+    from .client import TossClient
+
+    load_dotenv(env)
+    cfg = Config.from_env()
+    client = TossClient(cfg.client_id, cfg.client_secret, cfg.base_url)
+    raw: dict = {"toss": [], "naver": {}}
+    try:
+        raw["toss"] = client.get_stocks(codes)
+    except Exception as exc:
+        raw["toss_error"] = str(exc)
+    for n, code in enumerate(codes, 1):
+        for key, url in (("integration", f"https://m.stock.naver.com/api/stock/{code}/integration"),
+                         ("basic", f"https://m.stock.naver.com/api/stock/{code}/basic")):
+            try:
+                req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+                raw["naver"].setdefault(code, {})[key] = json.loads(urllib.request.urlopen(req, timeout=10).read())
+            except Exception as exc:
+                raw["naver"].setdefault(code, {})[key] = {"error": str(exc)}
+            time.sleep(request_interval)
+        if n % 50 == 0:
+            print(f"  업종 정보 {n} / {len(codes)}", flush=True)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(raw, ensure_ascii=False), encoding="utf-8")
+    print(f"업종 정보 저장: {out}")
+
+
 def download_toss_minute(days_file: Path, out_dir: Path, env: str = ".env", request_interval: float = 0.12) -> None:
     """days_file(code,date) 의 정규장(09:00~15:30) 1분봉을 토스 API 로 받는다. 이미 받은 날은 건너뜀. 주문 없음."""
     import shutil
@@ -3038,6 +3200,28 @@ def main(argv: list[str] | None = None) -> None:
     d.add_argument("--start", default="2023-09-01", help="지표 계산을 위해 백테스트 시작 3~4개월 전부터")
     d.add_argument("--end", default=None)
     d.add_argument("--cache", type=Path, default=DEFAULT_CACHE)
+    ds = sub.add_parser("download-sector", help="업종 확인용 종목 정보 받기 (토스 + 네이버, .env 필요, 주문 없음)")
+    ds.add_argument("--days", type=Path, default=Path("reports/sector_gap/minute_days.csv"),
+                    help="이 목록(code,date)에 나오는 종목")
+    ds.add_argument("--out", type=Path, default=MINUTE_DIR / "_sector_raw.json")
+    ds.add_argument("--env", default=".env")
+    sg = sub.add_parser("sectorgap", help="1분봉: 전일 거래대금 상위·업종 동반 상승 → 다음 날 갭상승 시가/전일 종가 눌림 매수")
+    sg.add_argument("--start", default="2026-06-30")
+    sg.add_argument("--end", default=None)
+    sg.add_argument("--cache", type=Path, default=Path("data/ohlcv_long"))
+    sg.add_argument("--minute-dir", type=Path, default=MINUTE_DIR)
+    sg.add_argument("--sector-file", type=Path, default=Path("reports/sector_gap/sectors.csv"),
+                    help="code,sector CSV. 없으면 업종 조건 없이")
+    sg.add_argument("--no-sector", action="store_true", help="업종 조건 없이 (상위 N 상승 마감 전체)")
+    sg.add_argument("--top", type=int, default=50)
+    sg.add_argument("--min-sector-up", type=int, default=3)
+    sg.add_argument("--take-profit", type=float, default=5.0)
+    sg.add_argument("--stop-loss", type=float, default=0.0)
+    sg.add_argument("--first-weight", type=float, default=0.5)
+    sg.add_argument("--buy-until", default="15:00")
+    sg.add_argument("--exit-time", default="15:15")
+    sg.add_argument("--trades-out", type=Path, default=None)
+    sg.add_argument("--write-days", type=Path, default=None, help="받아야 할 (종목, 날짜) 목록만 쓰고 끝냄 (업종 조건 없이)")
     dm = sub.add_parser("download-minute", help="토스 API 로 목록(code,date)의 1분봉 받기 (.env 필요, 주문 없음)")
     dm.add_argument("--days", type=Path, default=Path("reports/minute_pullback/minute_days.csv"))
     dm.add_argument("--out", type=Path, default=MINUTE_DIR)
@@ -3256,6 +3440,36 @@ def main(argv: list[str] | None = None) -> None:
 
     if args.command == "universe":
         write_universe_file(args.marcap_dir, args.top, args.out)
+        return
+    if args.command == "download-sector":
+        with open(args.days, encoding="utf-8") as f:
+            codes = sorted({r["code"] for r in csv.DictReader(f)})
+        download_sector_info(codes, args.out, args.env)
+        return
+    if args.command == "sectorgap":
+        start = date.fromisoformat(args.start)
+        end = date.fromisoformat(args.end) if args.end else None
+        data = load_cache(args.cache)
+        if args.write_days:
+            sigs = sector_gap_candidates(data, start, end, args.top)
+            n = write_minute_days([[{"code": s["code"], "warm_day": s["trade_day"], "trade_day": s["trade_day"]}
+                                    for s in sigs]], args.write_days)
+            print(f"후보 {len(sigs)}건 → 받을 종목×날짜 {n}개: {args.write_days}")
+            return
+        sectors = None if args.no_sector or not args.sector_file.exists() else load_sector_map(args.sector_file)
+        if sectors is None:
+            print("업종 조건 없음")
+        g = SectorGapSettings(top_n=args.top, min_sector_up=args.min_sector_up, take_profit=args.take_profit,
+                              stop_loss=args.stop_loss, first_weight=args.first_weight, buy_until=args.buy_until,
+                              exit_time=args.exit_time)
+        sigs, trades, missing = run_sector_gap(data, sectors, start, end, g, args.minute_dir)
+        print_sector_gap_report(sigs, trades, missing)
+        if args.trades_out and trades:
+            args.trades_out.parent.mkdir(parents=True, exist_ok=True)
+            with open(args.trades_out, "w", encoding="utf-8", newline="") as f:
+                w = csv.DictWriter(f, fieldnames=list(trades[0]))
+                w.writeheader()
+                w.writerows(trades)
         return
     if args.command == "download-minute":
         download_toss_minute(args.days, args.out, args.env)

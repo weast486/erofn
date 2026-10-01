@@ -529,3 +529,37 @@ class MinutePullbackTest(unittest.TestCase):
         self.assertIsNone(simulate_minute(sig, warm, self._bars(prices), m))  # 눌림 전에 102 돌파 없음
         sig["prev_high"] = 100.8
         self.assertIsNotNone(simulate_minute(sig, warm, self._bars(prices), m))
+
+
+class SectorGapTest(unittest.TestCase):
+    def _day(self, prices):
+        from tossbot.backtest import MinuteBar
+        return [MinuteBar(f"{(9 * 60 + 1 + k) // 60:02d}:{(9 * 60 + 1 + k) % 60:02d}", o, h, l, c, 100)
+                for k, (o, h, l, c) in enumerate(prices)]
+
+    def _sig(self):
+        return {"code": "000000", "name": "x", "sector": "s", "trade_day": date(2026, 8, 3), "prev_close": 100}
+
+    def test_first_fill_at_open_then_take_profit(self):
+        from tossbot.backtest import SectorGapSettings, simulate_sector_gap
+        day = self._day([(103, 104, 103, 104), (104, 104, 102.5, 103), (103, 108.5, 103, 108)])
+        t = simulate_sector_gap(self._sig(), day, SectorGapSettings(take_profit=5))
+        self.assertEqual(t["reason"], "TAKE_PROFIT")
+        self.assertAlmostEqual(t["filled_weight"], 0.5)
+        self.assertAlmostEqual(t["exit_price"], 103 * 1.05, delta=0.1)
+        self.assertGreater(t["ret_pct"], 4.5)
+        self.assertAlmostEqual(t["slot_ret_pct"], t["ret_pct"] / 2, delta=0.01)
+
+    def test_second_fill_lowers_average_and_time_exit(self):
+        from tossbot.backtest import SectorGapSettings, simulate_sector_gap
+        day = self._day([(103, 103, 103, 103), (103, 103, 99, 100)] + [(101, 101, 101, 101)] * 400)
+        t = simulate_sector_gap(self._sig(), day, SectorGapSettings(take_profit=5))
+        self.assertEqual(t["reason"], "TIME_EXIT")
+        self.assertEqual(t["exit_time"], "15:15")
+        self.assertAlmostEqual(t["filled_weight"], 1.0)
+
+    def test_no_gap_or_no_pullback_no_trade(self):
+        from tossbot.backtest import SectorGapSettings, simulate_sector_gap
+        self.assertIsNone(simulate_sector_gap(self._sig(), self._day([(99, 101, 98, 100)] * 3), SectorGapSettings()))
+        self.assertIsNone(simulate_sector_gap(self._sig(), self._day([(103, 106, 103, 105), (105, 107, 104, 106)]),
+                                              SectorGapSettings()))

@@ -1698,6 +1698,8 @@ class EngulfRetestSettings:
     close_in_body: bool = False
     # True 면 음봉 시가까지 내려온 날 저가가 음봉 몸통 안(음봉 종가 이상)일 때만 그날 종가 매수. 아니면 계속 지켜봄
     low_in_body: bool = False
+    # True 면 양봉 다음 날부터 저가가 음봉 몸통 아래(음봉 종가 미만)로 한 번이라도 빠지면 그 종목은 대기 목록에서 제외
+    drop_below_body: bool = False
 
 
 def run_engulf_retest(
@@ -1770,6 +1772,9 @@ def run_engulf_retest(
                 continue
             bar = ser.bars[i]
             level = round_down_to_tick(level_raw)
+            if m.drop_below_body and bar.low < body_low:
+                del watch[sym]
+                continue
             if bar.low > level:
                 continue
             if m.close_in_body or m.low_in_body:
@@ -2855,6 +2860,8 @@ def main(argv: list[str] | None = None) -> None:
                    help="engulfretest: 음봉 시가까지 내려온 날 종가가 음봉 몸통 안일 때만 그날 종가 매수")
     r.add_argument("--er-low-in-body", action="store_true",
                    help="engulfretest: 음봉 시가까지 내려온 날 저가가 음봉 몸통 안(음봉 종가 이상)일 때만 그날 종가 매수")
+    r.add_argument("--er-drop-below-body", action="store_true",
+                   help="engulfretest: 대기 중 저가가 음봉 몸통 아래로 빠지면 그 종목 제외")
     r.add_argument("--er-body", type=float, default=2.0, help="engulfretest: 양봉 몸통이 음봉 몸통의 N배 이상")
     r.add_argument("--db-days", type=int, default=60, help="dbottom: 하락 추세 = N거래일 최저가 + N일선 하락")
     r.add_argument("--db-drop", type=float, default=0.0, help="dbottom: 250거래일 최고가 대비 N%% 이상 하락한 저점만 (0 = 조건 없음)")
@@ -3110,7 +3117,7 @@ def main(argv: list[str] | None = None) -> None:
         ers = EngulfRetestSettings(ma_period=args.er_ma, body_mult=args.er_body, min_amount=args.min_day_amount,
                                    watch_days=args.watch_days or 10, take_profit_pct=args.take_profit or 20.0,
                                    max_hold_days=args.max_hold, close_in_body=args.er_close_in_body,
-                                   low_in_body=args.er_low_in_body)
+                                   low_in_body=args.er_low_in_body, drop_below_body=args.er_drop_below_body)
         runner = lambda y0, y1: run_engulf_retest(data, y0, y1, settings, ers)  # noqa: E731
     elif args.strategy == "dbottom":
         dbs = DoubleBottomSettings(downtrend_days=args.db_days, drop_pct=args.db_drop,

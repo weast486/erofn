@@ -3460,7 +3460,7 @@ def main(argv: list[str] | None = None) -> None:
     sg.add_argument("--exit-time", default="15:15")
     sg.add_argument("--trades-out", type=Path, default=None)
     sg.add_argument("--write-days", type=Path, default=None, help="받아야 할 (종목, 날짜) 목록만 쓰고 끝냄 (업종 조건 없이)")
-    pb = sub.add_parser("pullbreak", help="1분봉: 5%↑ 종목 n분봉 이평선 눌림 뒤 전고점 돌파 매수")
+    pb = sub.add_parser("pullbreak", help="1분봉: 5%%↑ 종목 n분봉 이평선 눌림 뒤 전고점 돌파 매수")
     pb.add_argument("--start", default="2026-07-01")
     pb.add_argument("--end", default=None)
     pb.add_argument("--cache", type=Path, default=Path("data/ohlcv_long"))

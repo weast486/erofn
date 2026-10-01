@@ -603,3 +603,14 @@ class PullBreakTest(unittest.TestCase):
         self.assertEqual(reason, "TAKE_PROFIT")
         # 상승률 조건 미달이면 신호 없음
         self.assertEqual(pullback_break_events(warm, day, 105, s), [])
+
+    def test_kelly_equity_sizing(self):
+        from tossbot.backtest import kelly_equity
+        trades = [{"trade_day": "2026-07-01", "ret_pct": r} for r in [5, -2] * 15]
+        full = kelly_equity(trades, 1.0, warmup=10)
+        half = kelly_equity(trades, 0.5, warmup=10)
+        fixed = kelly_equity(trades, 1.0, fixed_pct=100)
+        # 승률 50%, 손익비 2.5 → 켈리 0.3. 하프는 비중이 더 작다
+        self.assertGreater(full["avg_pct"], half["avg_pct"])
+        self.assertAlmostEqual(fixed["avg_pct"], 100)
+        self.assertGreater(full["ret_pct"], 0)

@@ -3147,6 +3147,38 @@ def _exit_trade(day: list[MinuteBar], ev: dict, s: PullBreakSettings) -> tuple[i
     return len(day) - 1, last.t, last.close * (1 - s.slippage), "TIME_EXIT"
 
 
+def kelly_equity(trades: list[dict], scale: float, start: float = 1e7, window: int = 50, warmup: int = 20,
+                 min_pct: float = 5.0, max_pct: float = 100.0, fixed_pct: float = 0.0) -> dict:
+    """한 번에 한 종목씩 차례로 매매한 거래 목록에 비중을 입혀 계좌 곡선을 만든다.
+
+    매매 금액 = 평가금액 x 비중. 비중 = 직전 window 건(이미 끝난 거래)의 켈리 비율 x scale (0.5 = 하프 켈리),
+    min_pct ~ max_pct 로 제한. 끝난 거래가 warmup 건 미만이면 min_pct. fixed_pct > 0 이면 고정 비중.
+    """
+    equity, peak, mdd = start, start, 0.0
+    past: list[float] = []
+    pcts = []
+    by_month: dict[str, float] = {}
+    for t in trades:
+        if fixed_pct:
+            pct = fixed_pct
+        elif len(past) < warmup:
+            pct = min_pct
+        else:
+            pct = min(max(kelly_fraction(past[-window:]) * scale * 100, min_pct), max_pct)
+        pcts.append(pct)
+        mo = t["trade_day"][:7]
+        by_month.setdefault(mo, equity)
+        equity += equity * pct / 100 * t["ret_pct"] / 100
+        past.append(t["ret_pct"])
+        peak = max(peak, equity)
+        mdd = min(mdd, equity / peak - 1)
+    months = sorted(by_month)
+    month_ret = {m: ((by_month[months[k + 1]] if k + 1 < len(months) else equity) / by_month[m] - 1) * 100
+                 for k, m in enumerate(months)}
+    return {"ret_pct": (equity / start - 1) * 100, "mdd_pct": mdd * 100, "avg_pct": sum(pcts) / len(pcts) if pcts else 0,
+            "month_ret": month_ret}
+
+
 def run_pullback_break(days: dict[date, list[dict]], minute_dir: Path, s: PullBreakSettings) -> list[dict]:
     """days: {매매일: [{code, name, prev_close, warm_day}]}. 하루에 한 번에 한 종목만, 최대 max_trades 번,
     연속 max_consec_losses 번 손실이면 그날 종료. 같은 시각 신호가 여럿이면 상승률 높은 종목."""
@@ -3731,6 +3763,12 @@ def main(argv: list[str] | None = None) -> None:
                   f"합계 {sum(rets):+.1f}%p  ({', '.join(f'{k} {v}' for k, v in reasons.most_common())})")
         else:
             print()
+        if trades:
+            for label, kw in (("매번 전액", {"fixed_pct": 100}), ("고정 10%", {"fixed_pct": 10}),
+                              ("풀 켈리", {"scale": 1.0}), ("하프 켈리", {"scale": 0.5})):
+                e = kelly_equity(trades, kw.get("scale", 1.0), fixed_pct=kw.get("fixed_pct", 0))
+                months = " / ".join(f"{m[5:]}월 {r:+.1f}%" for m, r in e["month_ret"].items())
+                print(f"  {label}: 계좌 {e['ret_pct']:+.1f}% (MDD {e['mdd_pct']:.1f}%, 평균 비중 {e['avg_pct']:.0f}%) | {months}")
         if args.trades_out and trades:
             args.trades_out.parent.mkdir(parents=True, exist_ok=True)
             with open(args.trades_out, "w", encoding="utf-8", newline="") as f:

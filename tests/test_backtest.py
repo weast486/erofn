@@ -413,6 +413,10 @@ class NPatternTest(unittest.TestCase):
         self.assertTrue(n_pattern_signal(bars, 31, c))
         c.np_quiet = "all"
         self.assertFalse(n_pattern_signal(bars, 31, c))
+        c.np_quiet = "last"  # 매수 전날(30일)은 거래량이 많음
+        self.assertFalse(n_pattern_signal(bars, 31, c))
+        bars[30] = Bar(days[30], 11_150, 11_250, 11_000, 11_150, 1_000_000)
+        self.assertTrue(n_pattern_signal(bars, 31, c))
         c.np_quiet = ""
         self.assertFalse(n_pattern_signal(bars, 25, c))  # 기준봉 자체
         bars[28] = Bar(days[28], 11_000, 11_100, 9_900, 11_050, 3_000_000)  # 기준봉 저가 이탈

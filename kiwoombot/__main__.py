@@ -109,6 +109,10 @@ def main(argv: list[str] | None = None) -> None:
     load_dotenv(args.env)
     cfg = KiwoomConfig.from_env()
     setup_logging(cfg.state_dir)
+    if not cfg.app_key or not cfg.secret_key:
+        print(f"키움 API 키가 비어 있어요. 메모장으로 {args.env} 를 열어 KIWOOM_APP_KEY=, KIWOOM_SECRET_KEY= 뒤에 "
+              f"키움에서 받은 {'모의투자' if cfg.mock else '실전'} 키를 붙여 넣고 저장한 뒤 다시 실행하세요.")
+        return
     client = KiwoomClient(cfg.app_key, cfg.secret_key, mock=cfg.mock)
     if args.command == "check":
         c = cfg

@@ -3473,7 +3473,8 @@ def pullback_break_days(data: dict, start: date, end: date | None, min_change: f
 # ---------------------------------------------------------------- 전일 급등주 다음 날 전일 종가/고점 돌파 (1분봉)
 def surge_break_days(data: dict, start: date, end: date | None, min_prev_change: float = 15.0,
                      min_avg_amount: float = 3e9, max_price: float = 100_000,
-                     max_prev_change: float = 0.0, min_prev_amount: float = 0.0) -> dict[date, list[dict]]:
+                     max_prev_change: float = 0.0, min_prev_amount: float = 0.0,
+                     cap_universe: dict | None = None) -> dict[date, list[dict]]:
     """전일(D) 상승률 min_prev_change% 이상(max_prev_change > 0 이면 그 미만까지) → D+1 이 매매일.
     직전 20일 평균 거래대금·1주 가격(D 종가)·D 거래대금(min_prev_amount) 조건."""
     out: dict[date, list[dict]] = defaultdict(list)
@@ -3489,6 +3490,8 @@ def surge_break_days(data: dict, start: date, end: date | None, min_prev_change:
                 continue
             if amounts[i] < min_prev_amount:
                 continue
+            if cap_universe is not None and code not in cap_universe.get(d.day, ()):
+                continue  # 기준봉 날 시가총액 조건 (--min-marcap)
             trade_day = bars[i + 1].day if i + 1 < len(bars) else _next_weekday(d.day)
             if trade_day < start or (end and trade_day > end):
                 continue
@@ -3921,6 +3924,8 @@ def main(argv: list[str] | None = None) -> None:
     sb.add_argument("--minute-dir", type=Path, default=MINUTE_DIR)
     sb.add_argument("--min-prev-change", type=float, default=15.0, help="전일 상승률 하한 %%")
     sb.add_argument("--max-prev-change", type=float, default=0.0, help="전일 상승률 상한 %% (미만, 0: 없음)")
+    sb.add_argument("--min-marcap", type=float, default=0.0, help="기준봉 날 시가총액 하한 (예: 1e12, 0: 없음)")
+    sb.add_argument("--marcap-dir", type=Path, default=Path("data/marcap/data"))
     sb.add_argument("--min-avg-amount", type=float, default=3e9)
     sb.add_argument("--max-price", type=float, default=100_000)
     sb.add_argument("--stop-pct", type=float, default=2.0, help="손절 = 매수가 -N%% (0: 없음)")
@@ -4282,8 +4287,10 @@ def main(argv: list[str] | None = None) -> None:
         start = date.fromisoformat(args.start)
         end = date.fromisoformat(args.end) if args.end else None
         data = load_cache(args.cache)
+        caps = (load_marcap_universe(args.marcap_dir, (start - timedelta(days=10)).isoformat(), args.min_marcap)
+                if args.min_marcap else None)
         days = surge_break_days(data, start, end, args.min_prev_change, args.min_avg_amount, args.max_price,
-                                args.max_prev_change, args.min_prev_amount)
+                                args.max_prev_change, args.min_prev_amount, caps)
         q = {"entry_frac": args.q_entry, "stop_frac": args.q_stop, "basis": args.q_basis, "skip_gap": args.q_skip_gap,
              "tp_frac": args.q_tp}
         if args.write_days:

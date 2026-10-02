@@ -3741,6 +3741,28 @@ def download_index(symbol: str, cache_dir: Path, count: int = 1500) -> Path:
     return path
 
 
+def etf_overnight(bars: list[Bar], max_prev_change: float = 0.0, ref: str = "prev", slippage: float = 0.0,
+                  commission: float = 0.00015, start: date | None = None,
+                  end: date | None = None) -> list[dict]:
+    """ETF 종가 매수 → 다음 날 시가 매도 (장 마감·장 시작 동시호가 체결 가정, ETF 는 매도세 없음).
+    오늘 등락률(ref prev = 전일 종가 대비, open = 오늘 시가 대비)이 max_prev_change% 미만인 날만 매수.
+    max_prev_change 를 아주 크게 주면 매일."""
+    out = []
+    for i in range(1, len(bars) - 1):
+        p, b, n = bars[i - 1], bars[i], bars[i + 1]
+        if (start and n.day < start) or (end and n.day > end):
+            continue
+        base = p.close if ref == "prev" else b.open
+        chg = (b.close / base - 1) * 100
+        if chg >= max_prev_change:
+            continue
+        buy = b.close * (1 + slippage + commission)
+        sell = n.open * (1 - slippage - commission)
+        out.append({"buy_day": b.day.isoformat(), "sell_day": n.day.isoformat(), "chg": round(chg, 2),
+                    "buy": b.close, "sell": n.open, "ret_pct": round((sell / buy - 1) * 100, 3)})
+    return out
+
+
 def load_index(cache_dir: Path, symbol: str = "KOSPI") -> list[Bar]:
     path = cache_dir / f"_index_{symbol}.csv"
     with open(path, encoding="utf-8") as f:
@@ -3937,6 +3959,18 @@ def main(argv: list[str] | None = None) -> None:
     sb.add_argument("--exit-time", default="15:15")
     sb.add_argument("--trades-out", type=Path, default=None)
     sb.add_argument("--write-days", type=Path, default=None, help="받아야 할 (종목, 날짜) 목록만 추가하고 끝냄")
+    en = sub.add_parser("etfnight", help="ETF 오버나이트: 종가 매수 → 다음 날 시가 매도 (네이버 일봉, 주문 없음)")
+    en.add_argument("--symbols", nargs="+", default=["233740", "229200", "122630", "069500"],
+                    help="ETF 코드 (기본: 코스닥150레버리지·코스닥150·코스피200레버리지·코스피200)")
+    en.add_argument("--max-prev-change", type=float, default=0.0,
+                    help="오늘 등락률이 이 %% 미만인 날만 매수 (기본 0 = 하락한 날, 크게 주면 매일)")
+    en.add_argument("--ref", choices=["prev", "open"], default="prev", help="등락률 기준: 전일 종가 / 오늘 시가")
+    en.add_argument("--slippage", type=float, default=0.0, help="한쪽 슬리피지 %% (동시호가면 0)")
+    en.add_argument("--start", default="2021-01-01")
+    en.add_argument("--end", default=None)
+    en.add_argument("--count", type=int, default=1600, help="받을 일봉 수 (약 6년)")
+    en.add_argument("--cache", type=Path, default=Path("data/etf"))
+    en.add_argument("--out", type=Path, default=None, help="거래 목록 CSV 저장 경로 (첫 종목)")
     dm = sub.add_parser("download-minute", help="토스 API 로 목록(code,date)의 1분봉 받기 (.env 필요, 주문 없음)")
     dm.add_argument("--days", type=Path, default=Path("reports/minute_pullback/minute_days.csv"))
     dm.add_argument("--out", type=Path, default=MINUTE_DIR)
@@ -4344,6 +4378,36 @@ def main(argv: list[str] | None = None) -> None:
                 w = csv.DictWriter(f, fieldnames=list(trades[0]))
                 w.writeheader()
                 w.writerows(trades)
+        return
+    if args.command == "etfnight":
+        start = date.fromisoformat(args.start)
+        end = date.fromisoformat(args.end) if args.end else None
+        for sym in args.symbols:
+            download_index(sym, args.cache, args.count)
+            trades = etf_overnight(load_index(args.cache, sym), args.max_prev_change, args.ref,
+                                   args.slippage / 100, start=start, end=end)
+            if not trades:
+                print(f"{sym}: 거래 없음")
+                continue
+            by_year: dict[int, list[float]] = defaultdict(list)
+            eq = peak = 1.0
+            mdd = 0.0
+            for tr in trades:
+                r = tr["ret_pct"] / 100
+                by_year[int(tr["sell_day"][:4])].append(r)
+                eq *= 1 + r
+                peak = max(peak, eq)
+                mdd = min(mdd, eq / peak - 1)
+            rets = [tr["ret_pct"] for tr in trades]
+            years = " / ".join(f"{y} {(math.prod(1 + r for r in v) - 1) * 100:+.1f}%" for y, v in sorted(by_year.items()))
+            print(f"{sym}: {len(trades)}건, 거래당 {sum(rets) / len(rets):+.2f}%, 승률 {sum(r > 0 for r in rets) / len(rets) * 100:.0f}% | "
+                  f"{years} | 연속 {(eq - 1) * 100:+.1f}% MDD {mdd * 100:.1f}%")
+            if args.out and sym == args.symbols[0]:
+                args.out.parent.mkdir(parents=True, exist_ok=True)
+                with open(args.out, "w", encoding="utf-8", newline="") as f:
+                    w = csv.DictWriter(f, fieldnames=list(trades[0]))
+                    w.writeheader()
+                    w.writerows(trades)
         return
     if args.command == "download-minute":
         download_toss_minute(args.days, args.out, args.env)

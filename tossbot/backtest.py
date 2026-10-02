@@ -3174,6 +3174,8 @@ class PullBreakSettings:
     entry_bar_stop: str = "low"  # 매수한 1분봉 안 손절 판단: low(저가가 닿으면, 보수적) / close(종가가 손절가 이하일 때만)
     ma_exit: int = 0  # >0 이면 n분봉 종가가 이 개수 이평선 아래로 끝나면 다음 1분봉 시가에 시장가 매도
     ma_exit_minutes: int = 1  # ma_exit 의 n분봉
+    take_profit2: float = 0.0  # >0 이면 분할 익절: take_profit 에 split_frac 만큼, 나머지는 take_profit2 에서
+    split_frac: float = 0.5
     commission: float = 0.00015
     slippage: float = 0.001
 
@@ -3296,7 +3298,16 @@ def vwma_touch_events(warm: list[MinuteBar], day: list[MinuteBar], prev_close: f
 
 
 def _exit_trade(day: list[MinuteBar], ev: dict, s: PullBreakSettings) -> tuple[int, str, float, str]:
-    """매수 후 청산: (청산 1분봉 위치, 시각, 가격, 사유). 매수 봉에서 손절가 닿으면 손절로 가정."""
+    """매수 후 청산: (청산 1분봉 위치, 시각, 가격, 사유). 매수 봉에서 손절가 닿으면 손절로 가정.
+    take_profit2 > 0 이면 분할 익절: 1차 익절 뒤 나머지는 2차 익절·손절·시각 정리, 가격은 두 번의 가중 평균."""
+    if s.take_profit2 > 0:
+        first = dataclasses.replace(s, take_profit2=0.0)
+        i, t, px, reason = _exit_trade(day, ev, first)
+        if reason != "TAKE_PROFIT":
+            return i, t, px, reason
+        rest = dataclasses.replace(s, take_profit2=0.0, take_profit=s.take_profit2, entry_bar_stop="close")
+        j, t2, px2, reason2 = _exit_trade(day, dict(ev, idx=i), rest)
+        return j, t2, px * s.split_frac + px2 * (1 - s.split_frac), "TP1+" + reason2
     entry = ev["price"]
     stop = entry * (1 - s.stop_pct / 100) if s.stop_pct else ev["stop"]  # 0 이면 손절 없음
     target = ev.get("target") or (entry * (1 + s.take_profit / 100) if s.take_profit > 0 else float("inf"))
@@ -4090,6 +4101,9 @@ def main(argv: list[str] | None = None) -> None:
     sb.add_argument("--ma-exit", type=int, default=0,
                     help="n분봉 종가가 이 개수 이평선 아래로 끝나면 다음 1분봉 시가 매도 (예 5, 0: 없음). --take-profit 0 이면 익절 없음")
     sb.add_argument("--ma-exit-minutes", type=int, default=1, help="--ma-exit 의 n분봉 (1/3/5)")
+    sb.add_argument("--take-profit2", type=float, default=0.0,
+                    help="분할 익절 2차 %% (예 10). --take-profit 에서 --split-frac 만큼, 나머지는 여기서 (0: 안 나눔)")
+    sb.add_argument("--split-frac", type=float, default=0.5, help="1차 익절에서 파는 비율")
     sb.add_argument("--buy-until", default="14:59")
     sb.add_argument("--exit-time", default="15:15")
     sb.add_argument("--trades-out", type=Path, default=None)
@@ -4516,7 +4530,8 @@ def main(argv: list[str] | None = None) -> None:
             return
         s = PullBreakSettings(take_profit=args.take_profit, stop_pct=args.stop_pct, buy_until=args.buy_until,
                               exit_time=args.exit_time, entry_bar_stop=args.entry_bar_stop,
-                              ma_exit=args.ma_exit, ma_exit_minutes=args.ma_exit_minutes)
+                              ma_exit=args.ma_exit, ma_exit_minutes=args.ma_exit_minutes,
+                              take_profit2=args.take_profit2, split_frac=args.split_frac)
         daily = None
         if args.daily:
             daily = {(c, b.day): b for c, (_, bars) in data.items() for b in bars}

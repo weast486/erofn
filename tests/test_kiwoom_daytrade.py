@@ -30,6 +30,7 @@ class FakeClient:
         self.open_orders = {}  # ord_no -> dict
         self.held = {}
         self.cancels = []
+        self.cash = 10_000_000
 
     def balance(self):
         return {"prsm_dpst_aset_amt": "1000000"}
@@ -41,7 +42,7 @@ class FakeClient:
 
     def daily_chart(self, code, base_dt):
         if code == "111110":
-            return daily_rows([10000] * 21 + [12000], "20261001", 1_000_000)  # +20%, 평균 100억
+            return daily_rows([9900] * 21 + [12000], "20261001", 1_000_000)  # +21%, 평균 100억
         if code == "222220":
             return daily_rows([10000] * 21 + [11600], "20261001", 100)  # 거래대금 부족
         return daily_rows([10000] * 22)
@@ -74,6 +75,9 @@ class FakeClient:
         self.cancels.append(order_no)
         self.open_orders.pop(order_no, None)
         return "c" + order_no
+
+    def orderable_cash(self):
+        return self.cash
 
     def unfilled(self):
         return list(self.open_orders.values())
@@ -130,7 +134,7 @@ class KiwoomDayTradeTest(unittest.TestCase):
         kind, code, qty, price, _ = self.client.orders[0]
         self.assertEqual((kind, code), ("buy", "111110"))
         self.assertLessEqual(price, 12000 * 1.015 + 10)
-        self.assertEqual(qty, 200_000 // price)
+        self.assertEqual(qty, int(1_000_000 * self.cfg.position_pct / 100 // price))
         # 다음 확인에서 체결 → 익절 지정가 +7%
         self.at(9, 1)
         self.trader.step()
@@ -139,7 +143,7 @@ class KiwoomDayTradeTest(unittest.TestCase):
         self.assertEqual(self.client.orders[1][0], "sell")
         self.assertGreaterEqual(self.client.orders[1][3], price * 1.07)
         # 손절가 아래로 → 익절 주문 취소 + 시장가 매도
-        self.client.minute["111110"].append(("0930", "11500", "11500", "11000", "11100"))
+        self.client.minute["111110"].append(("0930", "11000", "11000", "10500", "10600"))
         self.at(9, 30)
         self.trader.step()
         self.assertIn(self.client.orders[1][4], self.client.cancels)
@@ -197,3 +201,15 @@ class KiwoomDayTradeTest(unittest.TestCase):
         self.assertEqual(self.client.orders, [])
         t = self.trader.state.trades[0]
         self.assertEqual((t.status, t.exit_reason), ("closed", "TAKE_PROFIT"))
+
+
+class KiwoomCashCapTest(KiwoomDayTradeTest):
+    def test_buy_qty_capped_by_orderable_cash(self):
+        self.client.cash = 50_000
+        self.trader.prepare()
+        self.client.minute["111110"] = [("0900", "11800", "11900", "11700", "11850"),
+                                        ("0901", "11850", "12050", "11850", "12040")]
+        self.at(9, 1)
+        self.trader.step()
+        _, _, qty, price, _ = self.client.orders[0]
+        self.assertEqual(qty, 50_000 // price)

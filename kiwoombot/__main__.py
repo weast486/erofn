@@ -2,7 +2,7 @@
 
     python -m kiwoombot check        # 토큰·잔고·등락률 순위·분봉 조회가 되는지만 확인 (주문 없음)
     python -m kiwoombot candidates   # 오늘(장 전) 대상 종목만 고르고 끝
-    python -m kiwoombot run          # 하루 매매 (08:50 대상 고르기 → 09:00~ 매수 → exit_time 정리)
+    python -m kiwoombot run          # 하루 매매 (08:45 ETF 매도 → 08:50 대상 고르기 → 09:00~ 매수 → exit_time 정리 → 15:21 ETF 매수)
 
 설정은 .env.kiwoom (KIWOOM_APP_KEY, KIWOOM_SECRET_KEY, KIWOOM_MOCK, KIWOOM_DRY_RUN, KW_* 전략 값).
 """
@@ -34,6 +34,10 @@ def check(client: KiwoomClient) -> None:
     print(f"서버: {'모의투자' if client.mock else '실전'} ({client.base_url})")
     bal = client.balance()
     print(f"추정예탁자산: {num(bal.get('prsm_dpst_aset_amt')):,.0f}원, 보유 종목 {len(client.holdings())}개")
+    try:
+        print(f"주문가능금액: {client.orderable_cash():,.0f}원")
+    except Exception as exc:  # noqa: BLE001
+        print(f"주문가능금액 조회 실패: {exc}")
     print(f"미체결 주문: {len(client.unfilled())}건")
     ranks = client.change_rate_ranking(max_pages=1)
     print(f"등락률 상위 {len(ranks)}개, 예: " + ", ".join(f"{r.get('stk_nm')} {r.get('flu_rt')}%" for r in ranks[:5]))
@@ -47,7 +51,7 @@ def check(client: KiwoomClient) -> None:
 
 
 def main(argv: list[str] | None = None) -> None:
-    p = argparse.ArgumentParser(prog="kiwoombot", description="키움 단타 봇 (전일 +15%% 종목 전일 종가 재돌파)")
+    p = argparse.ArgumentParser(prog="kiwoombot", description="키움 단타 봇 (전일 +20%% 종목 전일 종가 재돌파 + ETF 오버나이트)")
     p.add_argument("command", choices=["check", "candidates", "run"])
     p.add_argument("--env", default=".env.kiwoom")
     args = p.parse_args(argv)

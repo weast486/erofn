@@ -163,6 +163,11 @@ class KiwoomClient:
                              "name": r.get("stk_nm", "")}
         return out
 
+    def orderable_cash(self) -> float:
+        """kt00001 예수금상세현황의 주문가능금액(ord_alow_amt). 당일 매도 체결 대금이 바로 반영되는지는 실계좌로 확인 필요."""
+        data, _ = self.request("kt00001", "/api/dostk/acnt", {"qry_tp": "3"})
+        return num(data.get("ord_alow_amt"))
+
     def unfilled(self) -> list[dict]:
         """ka10075 미체결 (전체 종목)."""
         data, _ = self.request("ka10075", "/api/dostk/acnt", {"all_stk_tp": "0", "trde_tp": "0", "stex_tp": "1"})

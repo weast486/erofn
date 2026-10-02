@@ -1,12 +1,14 @@
-"""전일 +15% 종목 다음 날 전일 종가 재돌파 단타 (백테스트 `surgebreak --mode prevclose` 를 실전으로).
+"""전일 +20% 종목 다음 날 전일 종가 재돌파 단타 (백테스트 `surgebreak --mode prevclose` 를 실전으로).
 
 하루 흐름
-  08:50  대상 고르기: 전일 등락률 상위(ka10027) → 일봉(ka10081)으로 전일 +15%↑·직전 20일 평균 거래대금·1주 가격 확인,
+  08:50  대상 고르기: 전일 등락률 상위(ka10027) → 일봉(ka10081)으로 전일 +min_prev_change%↑·직전 20일 평균 거래대금·1주 가격 확인,
          토스 스윙 봇이 들고 있는 종목 제외
   09:00~buy_until  2초마다 1분봉(ka10080) 확인: 시가가 전일 종가 아래에서 시작했고 고가가 전일 종가를 넘으면 매수
          (현재가 + entry_slip_pct 지정가, 전일 종가 + max_chase_pct 를 넘으면 추격 안 함, fill_timeout_sec 뒤 잔량 취소)
   체결 뒤  익절 지정가(매수가 +take_profit_pct) 주문, 현재가가 손절가(매수가 -stop_pct) 이하면 익절 주문 취소 후 시장가 매도
   exit_time  남은 주문 취소, 보유 전량 시장가 매도
+  (etf_enabled) 08:45 어제 산 ETF 매도 주문, 15:21 오늘 ETF 가 내렸으면 매수 주문 — overnight.py
+매수 수량은 키움 주문가능금액 안에서만 정한다.
 """
 from __future__ import annotations
 
@@ -22,6 +24,7 @@ from tossbot.config import KST
 
 from .client import KiwoomClient, num
 from .config import KiwoomConfig
+from .overnight import EtfOvernight
 
 log = logging.getLogger("kiwoombot")
 
@@ -185,6 +188,10 @@ class DayTrader:
             equity = num(self.client.balance().get("prsm_dpst_aset_amt"))
         log.info(f"대상 고르기 ({ymd}, 평가금액 {equity:,.0f}원, {'모의투자' if self.cfg.mock else '실전'}"
                  f"{' · 드라이런' if self.cfg.dry_run else ''})")
+        c = self.cfg
+        log.info(f"설정: 전일 +{c.min_prev_change:g}%↑, {c.buy_until} 까지 매수, 하루 {c.max_positions}종목 x {c.position_pct:g}%, "
+                 f"손절 -{c.stop_pct:g}% / 익절 +{c.take_profit_pct:g}% / {c.exit_time} 정리"
+                 + (f", ETF {c.etf_code} {c.etf_pct:g}% 오버나이트" if c.etf_enabled else ", ETF 끔"))
         self.state = DayState(date=ymd, equity=equity, candidates=self.select_candidates(ymd))
         log.info("오늘 대상 %d종목", len(self.state.candidates))
         self.save()
@@ -251,6 +258,10 @@ class DayTrader:
                 continue
             price = round_up_to_tick(min(cur * (1 + cfg.entry_slip_pct / 100), cap))
             qty = int(self.state.equity * cfg.position_pct / 100 // price)
+            cash = self._orderable()
+            if cash is not None and qty * price > cash:
+                log.info(f"{c.code}: 주문가능금액 {cash:,.0f}원이 모자라 {qty}주 → {int(cash // price)}주")
+                qty = int(cash // price)
             if qty < 1:
                 c.status = "too_expensive"
                 continue
@@ -259,6 +270,16 @@ class DayTrader:
             self.state.trades.append(Trade(c.code, c.name, order_no, qty, price, now.isoformat()))
             log.info(f"매수 주문 {c.code} {c.name}: {qty}주 x {price:,}원 (전일 종가 {c.prev_close:,.0f} 돌파, "
                      f"현재가 {cur:,.0f}) 주문번호 {order_no}")
+
+    def _orderable(self) -> float | None:
+        """실주문 모드에서 키움 주문가능금액 (조회 실패·드라이런이면 None → 평가금액 기준 그대로)."""
+        if self.cfg.dry_run:
+            return None
+        try:
+            return self.client.orderable_cash()
+        except Exception as exc:  # noqa: BLE001
+            log.warning("주문가능금액 조회 실패(평가금액 기준으로 주문): %s", exc)
+            return None
 
     # ------------------------------------------------------------- manage
     def _open_orders(self) -> dict[str, dict]:
@@ -382,26 +403,53 @@ class DayTrader:
         if now.weekday() >= 5:
             log.info("주말이라 종료")
             return
+        etf = EtfOvernight(self.client, self.cfg) if self.cfg.etf_enabled else None
+        hm = self.now_fn().strftime("%H:%M")
+        if etf and hm < "09:00":
+            while self.now_fn().strftime("%H:%M") < self.cfg.etf_sell_time:
+                self.sleep_fn(30)
+            etf.morning_sell()
         while self.now_fn().strftime("%H:%M") < "08:50":
             self.sleep_fn(30)
         self.prepare()
-        if not self.state.candidates and not self.state.trades:
-            log.info("오늘 대상이 없어 종료")
-            return
+        if self.state.candidates or self.state.trades:
+            self.day_loop(etf)
+        else:
+            log.info("오늘 단타 대상 없음")
+        self.summary()
+        if etf:
+            while self.now_fn().strftime("%H:%M") < self.cfg.etf_buy_time:
+                self.sleep_fn(30)
+            if self.now_fn().strftime("%H:%M") < "15:30":
+                try:
+                    equity = num(self.client.balance().get("prsm_dpst_aset_amt"))
+                except Exception as exc:  # noqa: BLE001
+                    log.warning("평가금액 조회 실패: %s", exc)
+                    equity = 0.0
+                if self.cfg.dry_run:
+                    equity = equity or self.state.equity
+                etf.evening_buy(self.now_fn(), equity)
+            else:
+                log.info("장 마감 동시호가가 지나 ETF 매수 안 함")
+
+    def day_loop(self, etf: "EtfOvernight | None" = None) -> None:
+        logged_cash = False
         while True:
             hm = self.now_fn().strftime("%H:%M")
             if hm < "09:00":
                 self.sleep_fn(5)
                 continue
+            if etf and not logged_cash:
+                etf.log_cash_after_open()
+                logged_cash = True
             keep = self.step()
             if hm >= self.cfg.exit_time and not keep:
                 break
             if hm > self.cfg.buy_until and not any(
                     t.status in ("pending", "open", "closing") for t in self.state.trades):
-                log.info("매수 시간이 끝났고 보유 종목이 없어 종료")
+                log.info("매수 시간이 끝났고 보유 종목이 없어 단타 끝")
                 break
             self.sleep_fn(self.cfg.poll_seconds)
-        self.summary()
 
     def summary(self) -> None:
         closed = [t for t in self.state.trades if t.status == "closed" and t.entry_price]

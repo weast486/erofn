@@ -44,9 +44,10 @@ class EtfOvernightTest(unittest.TestCase):
 
     def test_buys_half_of_equity_market_order_on_down_day(self):
         c = FakeClient(rows(9900, 10000))
+        c_pct = self.cfg().etf_pct
         qty = EtfOvernight(c, self.cfg()).evening_buy(NOW, 2_000_000)
         self.assertEqual(c.orders, [("buy", "229200", qty, None)])
-        self.assertEqual(qty, int(1_000_000 // (9900 * 1.01)))
+        self.assertEqual(qty, int(2_000_000 * c_pct / 100 // (9900 * 1.01)))
 
     def test_no_buy_on_up_day_or_holiday(self):
         c = FakeClient(rows(10100, 10000))

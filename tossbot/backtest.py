@@ -3636,6 +3636,117 @@ def run_surge_break(days: dict[date, list[dict]], minute_dir: Path, mode: str, s
     return trades, missing
 
 
+def noon_candidate_days(data: dict, start: date, end: date | None, min_change: float = 5.0,
+                        min_amount: float = 1e10, min_avg_amount: float = 3e9,
+                        max_price: float = 100_000) -> dict[date, list[dict]]:
+    """12시 기준 대상이 될 수 있는 종목·날짜 (일봉으로 미리 거르기, 1분봉 받을 목록용).
+    12시 상승률 X% 이상이면 그날 고가도 X% 이상, 12시까지 거래대금 Y 이상이면 하루 거래대금도 Y 이상이라
+    이 목록은 12시 조건을 만족하는 종목을 모두 포함한다. 일봉이 아직 없는 날은 알 수 없어 빠짐."""
+    out: dict[date, list[dict]] = defaultdict(list)
+    for code, (name, bars) in data.items():
+        amounts = [b.close * b.volume for b in bars]
+        for i in range(21, len(bars)):
+            p, b = bars[i - 1], bars[i]
+            if b.day < start or (end and b.day > end):
+                continue
+            if b.high < p.close * (1 + min_change / 100) or amounts[i] < min_amount:
+                continue
+            if sum(amounts[i - 20:i]) / 20 < min_avg_amount or (max_price and p.close > max_price):
+                continue
+            out[b.day].append({"code": code, "name": name, "prev_close": p.close})
+    return out
+
+
+def noon_pick(day: list[MinuteBar], prev_close: float, cutoff: str = "12:00") -> dict | None:
+    """cutoff 직전까지의 1분봉으로 12시 기준 상승률·누적 거래대금·고가·VWAP."""
+    morning = [m for m in day if m.t < cutoff]
+    if not morning:
+        return None
+    amount = sum(m.close * m.volume for m in morning)
+    vol = sum(m.volume for m in morning)
+    return {"price": morning[-1].close, "chg": (morning[-1].close / prev_close - 1) * 100, "amount": amount,
+            "high": max(m.high for m in morning), "vwap": amount / vol if vol else 0.0, "n": len(morning)}
+
+
+def noon_entry(day: list[MinuteBar], info: dict, entry: str, cutoff: str, buy_until: str,
+               slippage: float, pullback: float = 0.0) -> tuple[int, float] | None:
+    """12시 이후 매수. noon = 12시 첫 봉 시가(시장가), dayhigh = 그때까지 당일 고가를 넘는 순간,
+    vwap = 그때까지 VWAP 에 닿으면 지정가, pullback = 12시 가격보다 N% 아래 지정가."""
+    hi = info["high"]
+    amt = info["amount"]
+    vol = info["amount"] / info["vwap"] if info["vwap"] else 0.0
+    for j, m in enumerate(day):
+        if m.t < cutoff:
+            continue
+        if m.t > buy_until:
+            return None
+        if entry == "noon":
+            return j, m.open * (1 + slippage)
+        if entry == "dayhigh" and m.high > hi:
+            return j, max(m.open, hi) * (1 + slippage)
+        if entry == "vwap" and vol and m.low <= amt / vol:
+            return j, min(m.open, amt / vol)
+        if entry == "pullback" and m.low <= info["price"] * (1 - pullback / 100):
+            level = info["price"] * (1 - pullback / 100)
+            return j, min(m.open, level)
+        hi = max(hi, m.high)
+        amt += m.close * m.volume
+        vol += m.volume
+    return None
+
+
+def noon_exit(day: list[MinuteBar], j: int, price: float, stop_pct: float, take_profit: float,
+              exit_time: str, slippage: float) -> tuple[str, float, str]:
+    """매수 다음 봉부터 손절(시장가)·익절(지정가)·exit_time 시장가 정리. 같은 봉에 둘 다면 손절."""
+    stop = price * (1 - stop_pct / 100) if stop_pct else 0.0
+    target = price * (1 + take_profit / 100) if take_profit else float("inf")
+    for m in day[j + 1:]:
+        if m.t >= exit_time:
+            return m.t, m.open * (1 - slippage), "TIME_EXIT"
+        if stop and m.low <= stop:
+            return m.t, min(m.open, stop) * (1 - slippage), "STOP_LOSS"
+        if m.high >= target:
+            return m.t, max(m.open, target), "TAKE_PROFIT"
+    last = day[-1]
+    return last.t, last.close * (1 - slippage), "TIME_EXIT"
+
+
+def run_noon(days: dict[date, list[dict]], minute_dir: Path, min_change: float, max_change: float,
+             min_amount: float, top: int, rank_by: str, max_price: float, entry: str, stop_pct: float,
+             take_profit: float, cutoff: str = "12:00", buy_until: str = "14:30", exit_time: str = "15:15",
+             slippage: float = 0.001, commission: float = 0.00015, pullback: float = 0.0) -> tuple[list[dict], int]:
+    """날마다 12시 기준 상승률·거래대금 조건 종목 중 상위 top 개(rank_by amount/change) → 12시 이후 매수.
+    종목마다 독립 계산. (거래 목록, 1분봉 없는 후보 수)"""
+    trades, missing = [], 0
+    for d in sorted(days):
+        picked = []
+        for c in days[d]:
+            day = load_minute(minute_dir, c["code"], d)
+            if day is None:
+                missing += 1
+                continue
+            info = noon_pick(day, c["prev_close"], cutoff)
+            if not info or info["chg"] < min_change or (max_change and info["chg"] >= max_change):
+                continue
+            if info["amount"] < min_amount or (max_price and info["price"] > max_price):
+                continue
+            picked.append((info["amount"] if rank_by == "amount" else info["chg"], c, day, info))
+        picked.sort(key=lambda x: -x[0])
+        for rank, (_, c, day, info) in enumerate(picked[:top] if top else picked, 1):
+            ev = noon_entry(day, info, entry, cutoff, buy_until, slippage, pullback)
+            if not ev:
+                continue
+            j, price = ev
+            t, px, reason = noon_exit(day, j, price, stop_pct, take_profit, exit_time, slippage)
+            tax = SELL_TAX_BY_YEAR.get(d.year, 0.0020)
+            ret = px * (1 - commission - tax) / (price * (1 + commission)) - 1
+            trades.append({"trade_day": d.isoformat(), "code": c["code"], "name": c["name"], "rank": rank,
+                           "noon_chg": round(info["chg"], 2), "noon_amount": round(info["amount"] / 1e8),
+                           "entry_time": day[j].t, "entry_price": round(price, 1), "exit_time": t,
+                           "exit_price": round(px, 1), "reason": reason, "ret_pct": round(ret * 100, 3)})
+    return trades, missing
+
+
 def download_toss_minute(days_file: Path, out_dir: Path, env: str = ".env", request_interval: float = 0.12) -> None:
     """days_file(code,date) 의 정규장(09:00~15:30) 1분봉을 토스 API 로 받는다. 이미 받은 날은 건너뜀. 주문 없음."""
     import time
@@ -3971,6 +4082,29 @@ def main(argv: list[str] | None = None) -> None:
     en.add_argument("--count", type=int, default=1600, help="받을 일봉 수 (약 6년)")
     en.add_argument("--cache", type=Path, default=Path("data/etf"))
     en.add_argument("--out", type=Path, default=None, help="거래 목록 CSV 저장 경로 (첫 종목)")
+    nn = sub.add_parser("noon", help="1분봉: 12시까지 상승률·거래대금으로 고른 종목을 12시 이후 매매")
+    nn.add_argument("--start", default="2026-07-01")
+    nn.add_argument("--end", default=None)
+    nn.add_argument("--min-change", type=float, default=5.0, help="12시 기준 전일 대비 상승률 %% 이상")
+    nn.add_argument("--max-change", type=float, default=0.0, help="12시 기준 상승률 %% 미만 (0 = 제한 없음)")
+    nn.add_argument("--min-amount", type=float, default=1e10, help="12시까지 누적 거래대금 이상 (원)")
+    nn.add_argument("--top", type=int, default=0, help="날마다 상위 N 종목만 (0 = 모두)")
+    nn.add_argument("--rank-by", choices=["amount", "change"], default="amount", help="상위 N 순위 기준")
+    nn.add_argument("--max-price", type=float, default=100_000)
+    nn.add_argument("--min-avg-amount", type=float, default=3e9, help="직전 20일 평균 거래대금")
+    nn.add_argument("--entry", choices=["noon", "dayhigh", "vwap", "pullback"], default="noon",
+                    help="noon 12시 시가 / dayhigh 당일 고가 돌파 / vwap VWAP 닿으면 / pullback 12시 가격 -N%%")
+    nn.add_argument("--pullback", type=float, default=2.0, help="--entry pullback 의 눌림 %%")
+    nn.add_argument("--stop-pct", type=float, default=3.0, help="손절 %% (0 = 없음)")
+    nn.add_argument("--take-profit", type=float, default=5.0, help="익절 %% (0 = 없음)")
+    nn.add_argument("--cutoff", default="12:00", help="기준 시각 (이 시각 전 1분봉으로 순위)")
+    nn.add_argument("--buy-until", default="14:30")
+    nn.add_argument("--exit-time", default="15:15")
+    nn.add_argument("--slippage", type=float, default=0.1, help="시장가 슬리피지 %%")
+    nn.add_argument("--cache", type=Path, default=Path("data/ohlcv_long"))
+    nn.add_argument("--minute-dir", type=Path, default=Path("data/minute"))
+    nn.add_argument("--write-days", type=Path, default=None, help="1분봉 받을 목록(code,date,pages)만 만들고 끝")
+    nn.add_argument("--out", type=Path, default=None, help="거래 목록 CSV")
     dm = sub.add_parser("download-minute", help="토스 API 로 목록(code,date)의 1분봉 받기 (.env 필요, 주문 없음)")
     dm.add_argument("--days", type=Path, default=Path("reports/minute_pullback/minute_days.csv"))
     dm.add_argument("--out", type=Path, default=MINUTE_DIR)
@@ -4408,6 +4542,46 @@ def main(argv: list[str] | None = None) -> None:
                     w = csv.DictWriter(f, fieldnames=list(trades[0]))
                     w.writeheader()
                     w.writerows(trades)
+        return
+    if args.command == "noon":
+        start = date.fromisoformat(args.start)
+        end = date.fromisoformat(args.end) if args.end else None
+        days = noon_candidate_days(load_cache(args.cache), start, end, args.min_change, args.min_amount,
+                                   args.min_avg_amount, args.max_price)
+        if args.write_days:
+            rows = sorted((c["code"], d.isoformat(), 4) for d, cs in days.items() for c in cs)
+            args.write_days.parent.mkdir(parents=True, exist_ok=True)
+            with open(args.write_days, "w", encoding="utf-8", newline="") as f:
+                w = csv.writer(f)
+                w.writerow(["code", "date", "pages"])
+                w.writerows(rows)
+            have = sum((args.minute_dir / f"{c}_{d}.csv").exists() for c, d, _ in rows)
+            print(f"목록 {len(rows)}개 (이미 있음 {have}개): {args.write_days}")
+            return
+        trades, missing = run_noon(days, args.minute_dir, args.min_change, args.max_change, args.min_amount,
+                                   args.top, args.rank_by, args.max_price, args.entry, args.stop_pct,
+                                   args.take_profit, args.cutoff, args.buy_until, args.exit_time,
+                                   args.slippage / 100, pullback=args.pullback)
+        print(f"후보 {sum(len(v) for v in days.values())}개 중 1분봉 없음 {missing}개")
+        if not trades:
+            print("거래 없음")
+            return
+        rets = [tr["ret_pct"] for tr in trades]
+        by_month: dict[str, list[float]] = defaultdict(list)
+        for tr in trades:
+            by_month[tr["trade_day"][:7]].append(tr["ret_pct"])
+        reasons = defaultdict(int)
+        for tr in trades:
+            reasons[tr["reason"]] += 1
+        print(f"{len(trades)}건, 거래당 {sum(rets) / len(rets):+.2f}%, 승률 {sum(r > 0 for r in rets) / len(rets) * 100:.0f}% "
+              f"({', '.join(f'{k} {v}' for k, v in sorted(reasons.items()))})")
+        print("월별 거래당: " + " / ".join(f"{m} {sum(v) / len(v):+.2f}% ({len(v)})" for m, v in sorted(by_month.items())))
+        if args.out:
+            args.out.parent.mkdir(parents=True, exist_ok=True)
+            with open(args.out, "w", encoding="utf-8", newline="") as f:
+                w = csv.DictWriter(f, fieldnames=list(trades[0]))
+                w.writeheader()
+                w.writerows(trades)
         return
     if args.command == "download-minute":
         download_toss_minute(args.days, args.out, args.env)

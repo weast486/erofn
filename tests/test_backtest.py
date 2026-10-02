@@ -454,6 +454,29 @@ class NPatternTest(unittest.TestCase):
         self.assertFalse(n_pattern_signal(bars, 29, d))
 
 
+class QuarterTest(unittest.TestCase):
+    def test_quarter_levels_and_trades(self):
+        from tossbot.backtest import (Bar, MinuteBar, PullBreakSettings, quarter_daily_trade, quarter_event,
+                                      quarter_levels, _exit_trade)
+        c = {"prev_open": 10_000, "prev_close": 12_000, "prev_low": 9_800, "prev_high": 12_400, "prev_change": 20}
+        self.assertEqual(quarter_levels(c), (11_500, 11_000))
+        s = PullBreakSettings(take_profit=3, exit_time="15:00")
+        day = [MinuteBar("09:00", 12_100, 12_200, 11_900, 12_000, 1), MinuteBar("09:01", 11_900, 11_950, 11_450, 11_600, 1),
+               MinuteBar("09:02", 11_600, 11_900, 11_550, 11_850, 1), MinuteBar("09:03", 11_850, 11_900, 11_800, 11_880, 1),
+               MinuteBar("15:00", 11_800, 11_850, 11_700, 11_750, 1)]
+        ev = quarter_event(day, c, s)
+        self.assertEqual((ev["time"], ev["price"], ev["stop"]), ("09:01", 11_500, 11_000))
+        self.assertEqual(_exit_trade(day, ev, s)[3], "TAKE_PROFIT")  # 11,845 도달
+        s.take_profit = 10
+        self.assertEqual(_exit_trade(day, ev, s)[1:], ("15:00", 11_800 * 0.999, "TIME_EXIT"))
+        d = Bar(None, 12_100, 12_600, 11_450, 11_800, 1)
+        s.take_profit = 3
+        self.assertEqual(quarter_daily_trade(d, c, s)["reason"], "TIME_EXIT")  # 장중 체결, 종가 < 익절가
+        self.assertEqual(quarter_daily_trade(d, c, s, optimistic=True)["reason"], "TAKE_PROFIT")
+        self.assertEqual(quarter_daily_trade(Bar(None, 11_400, 12_000, 10_900, 11_500, 1), c, s)["reason"], "STOP_LOSS")
+        self.assertIsNone(quarter_daily_trade(Bar(None, 12_100, 12_600, 11_600, 12_300, 1), c, s))
+
+
 class VolBreakoutTest(unittest.TestCase):
     def test_buys_at_target_sells_next_open(self):
         from tossbot.backtest import VolBreakoutSettings, run_vol_breakout

@@ -3473,9 +3473,9 @@ def pullback_break_days(data: dict, start: date, end: date | None, min_change: f
 # ---------------------------------------------------------------- 전일 급등주 다음 날 전일 종가/고점 돌파 (1분봉)
 def surge_break_days(data: dict, start: date, end: date | None, min_prev_change: float = 15.0,
                      min_avg_amount: float = 3e9, max_price: float = 100_000,
-                     max_prev_change: float = 0.0) -> dict[date, list[dict]]:
+                     max_prev_change: float = 0.0, min_prev_amount: float = 0.0) -> dict[date, list[dict]]:
     """전일(D) 상승률 min_prev_change% 이상(max_prev_change > 0 이면 그 미만까지) → D+1 이 매매일.
-    직전 20일 평균 거래대금·1주 가격(D 종가) 조건."""
+    직전 20일 평균 거래대금·1주 가격(D 종가)·D 거래대금(min_prev_amount) 조건."""
     out: dict[date, list[dict]] = defaultdict(list)
     for code, (name, bars) in data.items():
         amounts = [b.close * b.volume for b in bars]
@@ -3487,12 +3487,53 @@ def surge_break_days(data: dict, start: date, end: date | None, min_prev_change:
                 continue
             if sum(amounts[i - 20:i]) / 20 < min_avg_amount or (max_price and d.close > max_price):
                 continue
+            if amounts[i] < min_prev_amount:
+                continue
             trade_day = bars[i + 1].day if i + 1 < len(bars) else _next_weekday(d.day)
             if trade_day < start or (end and trade_day > end):
                 continue
             out[trade_day].append({"code": code, "name": name, "prev_close": d.close, "prev_high": d.high,
+                                   "prev_open": d.open, "prev_low": d.low,
                                    "prev_change": (d.close / p.close - 1) * 100})
     return out
+
+
+def quarter_levels(c: dict, entry_frac: float = 0.75, stop_frac: float = 0.5, basis: str = "body") -> tuple[float, float]:
+    """기준봉(전일)을 4등분한 매수가·손절가. body = 시가~종가, range = 저가~고가. frac 은 아래에서부터 비율."""
+    lo, hi = (c["prev_low"], c["prev_high"]) if basis == "range" else (c["prev_open"], c["prev_close"])
+    return lo + (hi - lo) * entry_frac, lo + (hi - lo) * stop_frac
+
+
+def quarter_event(day: list[MinuteBar], c: dict, s: "PullBreakSettings", entry_frac: float = 0.75,
+                  stop_frac: float = 0.5, basis: str = "body") -> dict | None:
+    """기준봉 다음 날 3/4 지점 지정가 매수 (시가가 이미 아래면 시가에 체결), 손절가 = 1/2 지점."""
+    level, stop = quarter_levels(c, entry_frac, stop_frac, basis)
+    for j, m in enumerate(day):
+        if m.t > s.buy_until:
+            return None
+        if m.low <= level:
+            price = min(m.open, level)
+            return {"time": m.t, "idx": j, "price": price, "stop": stop, "pivot": level,
+                    "chg": (price / c["prev_close"] - 1) * 100}
+    return None
+
+
+def quarter_daily_trade(bar: "Bar", c: dict, s: "PullBreakSettings", entry_frac: float = 0.75,
+                        stop_frac: float = 0.5, basis: str = "body", optimistic: bool = False) -> dict | None:
+    """1분봉 없이 일봉으로 근사. 저가가 손절가에 닿으면 손절(익절보다 먼저로 가정).
+    익절: 시가 체결이면 고가가 익절가 이상일 때. 장중 체결이면 고가가 매수 전에 나왔을 수 있어서
+    optimistic 일 때만 고가로, 아니면 종가가 익절가 이상일 때만 인정. 나머지는 종가 청산(15:00 대신)."""
+    level, stop = quarter_levels(c, entry_frac, stop_frac, basis)
+    if bar.low > level:
+        return None
+    at_open = bar.open <= level
+    price = bar.open if at_open else level
+    target = price * (1 + s.take_profit / 100)
+    if bar.low <= stop:
+        return {"price": price, "exit": min(bar.open, stop) * (1 - s.slippage), "reason": "STOP_LOSS"}
+    if bar.high >= target and (at_open or optimistic or bar.close >= target):
+        return {"price": price, "exit": target, "reason": "TAKE_PROFIT"}
+    return {"price": price, "exit": bar.close * (1 - s.slippage), "reason": "TIME_EXIT"}
 
 
 def surge_break_event(day: list[MinuteBar], c: dict, mode: str, s: "PullBreakSettings",
@@ -3536,16 +3577,37 @@ def surge_break_event(day: list[MinuteBar], c: dict, mode: str, s: "PullBreakSet
 
 
 def run_surge_break(days: dict[date, list[dict]], minute_dir: Path, mode: str, s: "PullBreakSettings",
-                    stop_daylow: bool = False, retest: bool = False) -> tuple[list[dict], int]:
-    """종목·날짜마다 한 번씩 (서로 독립). (거래 목록, 분봉 없는 대상 수)."""
+                    stop_daylow: bool = False, retest: bool = False, q: dict | None = None,
+                    daily: dict | None = None) -> tuple[list[dict], int]:
+    """종목·날짜마다 한 번씩 (서로 독립). (거래 목록, 분봉 없는 대상 수).
+    mode quarter: q = quarter_event 인자. daily = {(code, day): Bar} 를 주면 1분봉 대신 일봉 근사(quarter_daily_trade)."""
     trades, missing = [], 0
+    q = q or {}
     for d in sorted(days):
         for c in days[d]:
+            if daily is not None:
+                bar = daily.get((c["code"], d))
+                if bar is None:
+                    missing += 1
+                    continue
+                r = quarter_daily_trade(bar, c, s, **q)
+                if r:
+                    tax = SELL_TAX_BY_YEAR.get(d.year, 0.0020)
+                    ret = r["exit"] * (1 - s.commission - tax) / (r["price"] * (1 + s.commission)) - 1
+                    trades.append({"trade_day": d.isoformat(), "code": c["code"], "name": c["name"],
+                                   "prev_change": round(c["prev_change"], 1), "level": round(r["price"], 1),
+                                   "entry_time": "", "entry_price": round(r["price"], 1), "exit_time": "",
+                                   "exit_price": round(r["exit"], 1), "reason": r["reason"],
+                                   "ret_pct": round(ret * 100, 3)})
+                continue
             day = load_minute(minute_dir, c["code"], d)
             if day is None:
                 missing += 1
                 continue
-            ev = surge_break_event(day, c, mode, s, stop_daylow, retest)
+            if mode == "quarter":
+                ev = quarter_event(day, c, s, **q)
+            else:
+                ev = surge_break_event(day, c, mode, s, stop_daylow, retest)
             if not ev:
                 continue
             i, t, px, reason = _exit_trade(day, ev, s)
@@ -3828,7 +3890,16 @@ def main(argv: list[str] | None = None) -> None:
     pb.add_argument("--write-days", type=Path, default=None,
                     help="받아야 할 목록만 쓰고 끝냄 (매매일은 하루 전체, 전날은 끝 200분)")
     sb = sub.add_parser("surgebreak", help="1분봉: 전일 급등주가 다음 날 전일 종가(아래에서)·전일 고가를 넘을 때 매수")
-    sb.add_argument("--mode", choices=["prevclose", "prevhigh"], default="prevclose")
+    sb.add_argument("--mode", choices=["prevclose", "prevhigh", "quarter"], default="prevclose",
+                    help="quarter = 기준봉(전일)을 4등분해 3/4 지점 지정가 매수, 1/2 지점 이탈 손절 (--stop-pct 0 과 함께)")
+    sb.add_argument("--min-prev-amount", type=float, default=0.0, help="전일(기준봉) 거래대금 하한 (원)")
+    sb.add_argument("--q-entry", type=float, default=0.75, help="quarter: 매수 지점 (아래에서부터 비율)")
+    sb.add_argument("--q-stop", type=float, default=0.5, help="quarter: 손절 지점 (아래에서부터 비율)")
+    sb.add_argument("--q-basis", choices=["body", "range"], default="body",
+                    help="quarter: 4등분 기준 body = 시가~종가 / range = 저가~고가")
+    sb.add_argument("--daily", action="store_true",
+                    help="quarter: 1분봉 대신 일봉으로 근사 (손절 먼저, 장중 체결 뒤 익절은 종가가 익절가 이상일 때만)")
+    sb.add_argument("--optimistic", action="store_true", help="quarter --daily: 장중 체결이어도 고가로 익절 인정")
     sb.add_argument("--start", default="2026-07-01")
     sb.add_argument("--end", default=None)
     sb.add_argument("--cache", type=Path, default=Path("data/ohlcv_long"))
@@ -4197,7 +4268,8 @@ def main(argv: list[str] | None = None) -> None:
         end = date.fromisoformat(args.end) if args.end else None
         data = load_cache(args.cache)
         days = surge_break_days(data, start, end, args.min_prev_change, args.min_avg_amount, args.max_price,
-                                args.max_prev_change)
+                                args.max_prev_change, args.min_prev_amount)
+        q = {"entry_frac": args.q_entry, "stop_frac": args.q_stop, "basis": args.q_basis}
         if args.write_days:
             need: dict[tuple[str, str], int] = {}
             if args.write_days.exists():
@@ -4209,10 +4281,14 @@ def main(argv: list[str] | None = None) -> None:
             n_add = 0
             for d, rows in days.items():
                 for r in rows:
-                    level = r["prev_close"] if args.mode == "prevclose" else r["prev_high"]
                     b = daily.get((r["code"], d))
-                    if b is not None and not (b.open < level < b.high):
-                        continue
+                    if args.mode == "quarter":
+                        if b is not None and b.low > quarter_levels(r, **q)[0]:
+                            continue  # 매수가까지 안 내려온 날
+                    else:
+                        level = r["prev_close"] if args.mode == "prevclose" else r["prev_high"]
+                        if b is not None and not (b.open < level < b.high):
+                            continue
                     need[(r["code"], d.isoformat())] = 4
                     n_add += 1
             args.write_days.parent.mkdir(parents=True, exist_ok=True)
@@ -4225,7 +4301,12 @@ def main(argv: list[str] | None = None) -> None:
             return
         s = PullBreakSettings(take_profit=args.take_profit, stop_pct=args.stop_pct, buy_until=args.buy_until,
                               exit_time=args.exit_time, entry_bar_stop=args.entry_bar_stop)
-        trades, missing = run_surge_break(days, args.minute_dir, args.mode, s, args.stop_daylow, args.retest)
+        daily = None
+        if args.daily:
+            daily = {(c, b.day): b for c, (_, bars) in data.items() for b in bars}
+        qq = dict(q, optimistic=args.optimistic) if args.daily else q
+        trades, missing = run_surge_break(days, args.minute_dir, args.mode, s, args.stop_daylow, args.retest,
+                                          qq if args.mode == "quarter" else None, daily)
         rets = [t["ret_pct"] for t in trades]
         print(f"대상 {sum(len(v) for v in days.values())}건 (분봉 없음 {missing}) → 매수 {len(trades)}건", end="")
         if rets:

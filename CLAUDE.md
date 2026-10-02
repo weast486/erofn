@@ -5,6 +5,7 @@
 ## 구성
 - `tossbot/` 실전 봇 (토스증권 Open API). 사용자 PC(Windows, `E:\erofn`)에서 `windows\run_bot.bat` 으로 **실거래 중**
 - `tossbot/backtest.py` 일봉 백테스트 엔진 (CLI: `python -m tossbot.backtest run --help`)
+- `kiwoombot/` 키움증권 단타 봇 (2026-10-02, 토스 스윙과 다른 계좌). 전일 +15%↑ 종목이 시가가 전일 종가 아래에서 시작해 전일 종가를 넘으면 9:05 까지 매수(평가금액 20%·최대 5종목), 손절 -7% 시장가 / 익절 +7% 지정가 / 12:00 정리. 설정 `.env.kiwoom`(예시 `.env.kiwoom.example`), 실행 `windows\kiwoom_check.bat` → `windows\run_kiwoom_daytrade.bat`. 기본은 모의투자+드라이런, 실제 키움 서버 응답은 아직 미확인
 - `reports/전략_변경이력.md` 실전 전략 변경 기록 — 실전 규칙을 바꾸면 반드시 한 줄 추가
 - `reports/breakout_20d_sl47_tp20/` 신고가 전략 매매내역·분석
 

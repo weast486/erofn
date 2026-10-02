@@ -6,3 +6,5 @@ logs/
 .venv/
 data/
 backtest_results/
+.env.kiwoom
+state_kiwoom/

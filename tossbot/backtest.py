@@ -3172,6 +3172,8 @@ class PullBreakSettings:
     stop_pct: float = 0.0  # >0 이면 손절 = 매수가 -N% (0 이면 눌림 저점 이탈)
     hold_bars: int = -1  # >=0 이면 손절 없이 매수 봉 + N 개 1분봉 뒤 종가에 매도 (그 사이 익절가 닿으면 익절)
     entry_bar_stop: str = "low"  # 매수한 1분봉 안 손절 판단: low(저가가 닿으면, 보수적) / close(종가가 손절가 이하일 때만)
+    ma_exit: int = 0  # >0 이면 n분봉 종가가 이 개수 이평선 아래로 끝나면 다음 1분봉 시가에 시장가 매도
+    ma_exit_minutes: int = 1  # ma_exit 의 n분봉
     commission: float = 0.00015
     slippage: float = 0.001
 
@@ -3297,8 +3299,9 @@ def _exit_trade(day: list[MinuteBar], ev: dict, s: PullBreakSettings) -> tuple[i
     """매수 후 청산: (청산 1분봉 위치, 시각, 가격, 사유). 매수 봉에서 손절가 닿으면 손절로 가정."""
     entry = ev["price"]
     stop = entry * (1 - s.stop_pct / 100) if s.stop_pct else ev["stop"]  # 0 이면 손절 없음
-    target = ev.get("target") or entry * (1 + s.take_profit / 100)
+    target = ev.get("target") or (entry * (1 + s.take_profit / 100) if s.take_profit > 0 else float("inf"))
     i0 = ev["idx"]
+    ma_cut = _ma_exit_bars(day, s.ma_exit, s.ma_exit_minutes) if s.ma_exit else {}
     if s.hold_bars >= 0:
         # 손절 없음: 매수 봉에서는 익절 판단 안 함(순서 모름), 이후 봉에서 익절가 닿으면 익절, 아니면 N 봉 뒤 종가
         last = min(i0 + s.hold_bars, len(day) - 1)
@@ -3316,8 +3319,26 @@ def _exit_trade(day: list[MinuteBar], ev: dict, s: PullBreakSettings) -> tuple[i
             return i, b.t, min(b.open, stop) * (1 - s.slippage), "STOP_LOSS"
         if b.high >= target:
             return i, b.t, max(b.open, target), "TAKE_PROFIT"
+        if i - 1 >= i0 and (i - 1) in ma_cut:
+            # 직전 n분봉이 이평선 아래로 끝남 → 이번 1분봉 시가에 매도 (손절·익절은 시가로 먼저 판단됨)
+            return i, b.t, b.open * (1 - s.slippage), "MA_EXIT"
     last = day[-1]
     return len(day) - 1, last.t, last.close * (1 - s.slippage), "TIME_EXIT"
+
+
+def _ma_exit_bars(day: list[MinuteBar], ma: int, minutes: int = 1) -> set[int]:
+    """n분봉 종가가 그 봉 포함 ma 개 종가 이평선 아래로 끝난 n분봉의 마지막 1분봉 위치들 (당일 봉만으로 계산)."""
+    out: set[int] = set()
+    closes: list[float] = []
+    for i, b in enumerate(day):
+        end = 540 + -(-(_minutes(b.t) - 540) // minutes) * minutes
+        nxt = day[i + 1] if i + 1 < len(day) else None
+        if nxt is not None and 540 + -(-(_minutes(nxt.t) - 540) // minutes) * minutes == end:
+            continue  # 아직 같은 n분봉
+        closes.append(b.close)
+        if len(closes) >= ma and b.close < sum(closes[-ma:]) / ma:
+            out.add(i)
+    return out
 
 
 def kelly_equity(trades: list[dict], scale: float, start: float = 1e6, window: int = 50, warmup: int = 20,
@@ -4066,6 +4087,9 @@ def main(argv: list[str] | None = None) -> None:
     sb.add_argument("--retest", action="store_true", help="돌파 순간 대신, 돌파 뒤 기준가로 되돌아오면 지정가 매수")
     sb.add_argument("--take-profit", type=float, default=5.0)
     sb.add_argument("--entry-bar-stop", choices=["low", "close"], default="low")
+    sb.add_argument("--ma-exit", type=int, default=0,
+                    help="n분봉 종가가 이 개수 이평선 아래로 끝나면 다음 1분봉 시가 매도 (예 5, 0: 없음). --take-profit 0 이면 익절 없음")
+    sb.add_argument("--ma-exit-minutes", type=int, default=1, help="--ma-exit 의 n분봉 (1/3/5)")
     sb.add_argument("--buy-until", default="14:59")
     sb.add_argument("--exit-time", default="15:15")
     sb.add_argument("--trades-out", type=Path, default=None)
@@ -4491,7 +4515,8 @@ def main(argv: list[str] | None = None) -> None:
                   f"{args.write_days}")
             return
         s = PullBreakSettings(take_profit=args.take_profit, stop_pct=args.stop_pct, buy_until=args.buy_until,
-                              exit_time=args.exit_time, entry_bar_stop=args.entry_bar_stop)
+                              exit_time=args.exit_time, entry_bar_stop=args.entry_bar_stop,
+                              ma_exit=args.ma_exit, ma_exit_minutes=args.ma_exit_minutes)
         daily = None
         if args.daily:
             daily = {(c, b.day): b for c, (_, bars) in data.items() for b in bars}

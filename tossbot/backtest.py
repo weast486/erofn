@@ -3505,9 +3505,12 @@ def quarter_levels(c: dict, entry_frac: float = 0.75, stop_frac: float = 0.5, ba
 
 
 def quarter_event(day: list[MinuteBar], c: dict, s: "PullBreakSettings", entry_frac: float = 0.75,
-                  stop_frac: float = 0.5, basis: str = "body") -> dict | None:
-    """기준봉 다음 날 3/4 지점 지정가 매수 (시가가 이미 아래면 시가에 체결), 손절가 = 1/2 지점."""
+                  stop_frac: float = 0.5, basis: str = "body", skip_gap: bool = False) -> dict | None:
+    """기준봉 다음 날 3/4 지점 지정가 매수 (시가가 이미 아래면 시가에 체결), 손절가 = 1/2 지점.
+    skip_gap 이면 시가가 손절가 이하(갭하락)인 날은 매수 안 함."""
     level, stop = quarter_levels(c, entry_frac, stop_frac, basis)
+    if skip_gap and day and day[0].open <= stop:
+        return None
     for j, m in enumerate(day):
         if m.t > s.buy_until:
             return None
@@ -3519,12 +3522,13 @@ def quarter_event(day: list[MinuteBar], c: dict, s: "PullBreakSettings", entry_f
 
 
 def quarter_daily_trade(bar: "Bar", c: dict, s: "PullBreakSettings", entry_frac: float = 0.75,
-                        stop_frac: float = 0.5, basis: str = "body", optimistic: bool = False) -> dict | None:
+                        stop_frac: float = 0.5, basis: str = "body", optimistic: bool = False,
+                        skip_gap: bool = False) -> dict | None:
     """1분봉 없이 일봉으로 근사. 저가가 손절가에 닿으면 손절(익절보다 먼저로 가정).
     익절: 시가 체결이면 고가가 익절가 이상일 때. 장중 체결이면 고가가 매수 전에 나왔을 수 있어서
     optimistic 일 때만 고가로, 아니면 종가가 익절가 이상일 때만 인정. 나머지는 종가 청산(15:00 대신)."""
     level, stop = quarter_levels(c, entry_frac, stop_frac, basis)
-    if bar.low > level:
+    if bar.low > level or (skip_gap and bar.open <= stop):
         return None
     at_open = bar.open <= level
     price = bar.open if at_open else level
@@ -3897,6 +3901,7 @@ def main(argv: list[str] | None = None) -> None:
     sb.add_argument("--q-stop", type=float, default=0.5, help="quarter: 손절 지점 (아래에서부터 비율)")
     sb.add_argument("--q-basis", choices=["body", "range"], default="body",
                     help="quarter: 4등분 기준 body = 시가~종가 / range = 저가~고가")
+    sb.add_argument("--q-skip-gap", action="store_true", help="quarter: 시가가 손절 지점 이하(갭하락)면 매수 안 함")
     sb.add_argument("--daily", action="store_true",
                     help="quarter: 1분봉 대신 일봉으로 근사 (손절 먼저, 장중 체결 뒤 익절은 종가가 익절가 이상일 때만)")
     sb.add_argument("--optimistic", action="store_true", help="quarter --daily: 장중 체결이어도 고가로 익절 인정")
@@ -4269,7 +4274,7 @@ def main(argv: list[str] | None = None) -> None:
         data = load_cache(args.cache)
         days = surge_break_days(data, start, end, args.min_prev_change, args.min_avg_amount, args.max_price,
                                 args.max_prev_change, args.min_prev_amount)
-        q = {"entry_frac": args.q_entry, "stop_frac": args.q_stop, "basis": args.q_basis}
+        q = {"entry_frac": args.q_entry, "stop_frac": args.q_stop, "basis": args.q_basis, "skip_gap": args.q_skip_gap}
         if args.write_days:
             need: dict[tuple[str, str], int] = {}
             if args.write_days.exists():

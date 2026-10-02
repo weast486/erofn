@@ -474,6 +474,12 @@ class QuarterTest(unittest.TestCase):
         self.assertEqual(quarter_daily_trade(d, c, s)["reason"], "TIME_EXIT")  # 장중 체결, 종가 < 익절가
         self.assertEqual(quarter_daily_trade(d, c, s, optimistic=True)["reason"], "TAKE_PROFIT")
         self.assertEqual(quarter_daily_trade(Bar(None, 11_400, 12_000, 10_900, 11_500, 1), c, s)["reason"], "STOP_LOSS")
+        gap = Bar(None, 10_900, 11_600, 10_800, 11_500, 1)  # 시가가 손절가 11,000 아래
+        self.assertEqual(quarter_daily_trade(gap, c, s)["reason"], "STOP_LOSS")
+        self.assertIsNone(quarter_daily_trade(gap, c, s, skip_gap=True))
+        gday = [MinuteBar("09:00", 10_900, 11_000, 10_850, 10_950, 1)]
+        self.assertIsNotNone(quarter_event(gday, c, s))
+        self.assertIsNone(quarter_event(gday, c, s, skip_gap=True))
         self.assertIsNone(quarter_daily_trade(Bar(None, 12_100, 12_600, 11_600, 12_300, 1), c, s))
 
 

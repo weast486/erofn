@@ -35,7 +35,7 @@ class KiwoomConfig:
     # ETF 오버나이트: 오늘 ETF 가 전일 종가보다 내렸으면 장 마감 동시호가에 사서 다음 날 장 시작 동시호가에 팖
     etf_enabled: bool = True
     etf_code: str = "229200"  # KODEX 코스닥150 (레버리지는 233740)
-    etf_pct: float = 50.0  # 평가금액의 N%
+    etf_pct: float = 100.0  # 평가금액의 N% (주문가능금액의 98% 안에서)
     etf_max_change: float = 0.0  # 오늘 등락률이 이 % 미만일 때만 매수 (0 = 내린 날)
     etf_buy_time: str = "15:21"  # 장 마감 동시호가(15:20~15:30) 중 시장가 주문
     etf_sell_time: str = "08:45"  # 장 시작 동시호가(08:30~09:00) 중 시장가 주문

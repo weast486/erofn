@@ -5,7 +5,7 @@ import unittest
 from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 
-from binancebot.backtest import ET, Bar, MinBar, Params, orb_trade, run, surge_trade, vwap_trade, vwma_trades
+from binancebot.backtest import ET, Bar, MinBar, Params, orb_trade, run, rsi_values, surge_trade, vwap_trade, vwma_trades
 from binancebot.data import keep_bar, tradfi_symbols
 from binancebot.sizing import SizeRule, position_size
 
@@ -103,6 +103,14 @@ class VwmaTest(unittest.TestCase):
         trades = vwma_trades("X", mins, p)
         self.assertAlmostEqual(trades[0].exit, 108.15)
         self.assertEqual((trades[0].side, trades[0].entry, trades[0].reason), (1, 103, "target"))
+
+
+class RsiTest(unittest.TestCase):
+    def test_rsi(self):
+        self.assertEqual(rsi_values([1, 2, 3, 4], 3)[3], 100.0)
+        r = rsi_values([10, 11, 10, 11, 10, 11], 2)
+        self.assertIsNone(r[1])
+        self.assertTrue(0 < r[5] < 100)
 
 
 class DataTest(unittest.TestCase):

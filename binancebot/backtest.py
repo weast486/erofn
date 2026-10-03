@@ -90,6 +90,9 @@ class Params:
     vwma_source: str = "all"   # all = 받아 둔 봉 전부(UTC 12~22시) / rth = 정규장 봉만으로 VWMA 계산
     vwma_stop_basis: str = "entry"  # entry = 진입가 대비 stop_pct / vwma = VWMA 대비 stop_pct
     vwma_target_r: float = 0.0  # 익절 = 위험의 R배 (0 이면 take_profit_pct, 둘 다 0 이면 정리 시각까지)
+    vwma_rsi_period: int = 14
+    vwma_rsi_long_min: float = 0.0    # 롱: 직전 봉 RSI 가 이 값 이상 (숏은 100-값 이하)
+    vwma_rsi_long_max: float = 100.0  # 롱: 직전 봉 RSI 가 이 값 이하 (숏은 100-값 이상)
     surge_entry: str = "stop"  # stop = 전날 종가에 역지정가 / next = 넘은 1분봉 다음 봉 시가 (보수적)
     rule: SizeRule = field(default_factory=SizeRule)
 
@@ -361,6 +364,26 @@ def is_rth(t: datetime) -> bool:
     return t.weekday() < 5 and d not in US_HOLIDAYS and time(9, 30) <= t.time() < session_close(d)
 
 
+def rsi_values(closes: list[float], period: int) -> list[float | None]:
+    """와일더 RSI. 앞 period 개는 None."""
+    out: list[float | None] = [None] * len(closes)
+    if period <= 0 or len(closes) <= period:
+        return out
+    gains = losses = 0.0
+    for i in range(1, period + 1):
+        ch = closes[i] - closes[i - 1]
+        gains += max(ch, 0)
+        losses += max(-ch, 0)
+    ag, al = gains / period, losses / period
+    out[period] = 100.0 if al == 0 else 100 - 100 / (1 + ag / al)
+    for i in range(period + 1, len(closes)):
+        ch = closes[i] - closes[i - 1]
+        ag = (ag * (period - 1) + max(ch, 0)) / period
+        al = (al * (period - 1) + max(-ch, 0)) / period
+        out[i] = 100.0 if al == 0 else 100 - 100 / (1 + ag / al)
+    return out
+
+
 def vwma_trades(symbol: str, mins: list[MinBar], p: Params) -> list[Trade]:
     """VWMA 눌림: 직전 완성된 N분봉 기준 조건이 맞으면 다음 N분 동안 1분봉으로 지정가 체결·손절·익절 확인.
     진입은 정규장 vwma_start~buy_until 만, 정리는 exit_time (당일 단타), 한 번에 한 포지션."""
@@ -389,17 +412,23 @@ def vwma_trades(symbol: str, mins: list[MinBar], p: Params) -> list[Trade]:
             pv -= a
             vv -= b2
         vwma.append(pv / vv if len(window) == p.vwma_len and vv > 0 else None)
-    # i번째 봉이 끝난 뒤의 신호
+    rsi = rsi_values(closes, p.vwma_rsi_period)
+
+    # i번째 봉이 끝난 뒤의 신호 (vwma_slope_bars 0 = 기울기 조건 없음)
     def signal(i: int) -> int:
-        n, s = p.vwma_min_above, p.vwma_slope_bars
+        n, s = max(p.vwma_min_above, 1), p.vwma_slope_bars
         if i < max(n, s) or vwma[i] is None or vwma[i - s] is None:
             return 0
         recent = range(i - n + 1, i + 1)
         if any(vwma[j] is None for j in recent):
             return 0
-        if vwma[i] > vwma[i - s] and all(closes[j] > vwma[j] for j in recent):
+        r = rsi[i]
+        lo, hi = p.vwma_rsi_long_min, p.vwma_rsi_long_max
+        rsi_long = r is None and lo <= 0 and hi >= 100 or r is not None and lo <= r <= hi
+        rsi_short = r is None and lo <= 0 and hi >= 100 or r is not None and 100 - hi <= r <= 100 - lo
+        if (s == 0 or vwma[i] > vwma[i - s]) and all(closes[j] > vwma[j] for j in recent) and rsi_long:
             return 1
-        if vwma[i] < vwma[i - s] and all(closes[j] < vwma[j] for j in recent):
+        if (s == 0 or vwma[i] < vwma[i - s]) and all(closes[j] < vwma[j] for j in recent) and rsi_short:
             return -1
         return 0
     sig_at = {}  # 1분봉 시각 → (방향, VWMA) : 그 1분봉이 속한 N분봉 직전 봉의 신호
@@ -408,7 +437,8 @@ def vwma_trades(symbol: str, mins: list[MinBar], p: Params) -> list[Trade]:
         if sg and (p.direction == "both" or (sg == 1) == (p.direction == "long")):
             sig_at[keys[i + 1]] = (sg, vwma[i])
     trades: list[Trade] = []
-    pos = None  # (side, entry_bar, entry, stop, target, fee_entry)
+    used: set[datetime] = set()  # 신호 봉마다 진입 한 번
+    pos = None  # (side, entry_bar, entry, stop, target)
     for b in mins:
         if not is_rth(b.t):
             continue
@@ -432,12 +462,13 @@ def vwma_trades(symbol: str, mins: list[MinBar], p: Params) -> list[Trade]:
         if b.t.time() < p.vwap_start or b.t.time() >= p.buy_until or b.t >= close_t:
             continue
         k = b.t.replace(minute=b.t.minute - b.t.minute % tf, second=0, microsecond=0)
-        if k not in sig_at:
+        if k not in sig_at or k in used:
             continue
         side, v = sig_at[k]
         lvl = v * (1 + side * p.vwma_band / 100)
         if not ((b.l <= lvl) if side == 1 else (b.h >= lvl)):
             continue
+        used.add(k)
         entry = min(b.o, lvl) if side == 1 else max(b.o, lvl)
         base = entry if p.vwma_stop_basis == "entry" else v
         stop = base * (1 - side * p.stop_pct / 100)

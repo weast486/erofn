@@ -36,11 +36,14 @@ def main() -> None:
     bt.add_argument("--surge-entry", choices=["stop", "next"], default="stop", help="surge: 전날 종가 역지정가 / 다음 1분봉 시가")
     bt.add_argument("--vwma-tf", type=int, default=15, help="vwma: 분봉 단위")
     bt.add_argument("--vwma-len", type=int, default=100)
-    bt.add_argument("--vwma-slope-bars", type=int, default=1, help="vwma: VWMA 가 N봉 전보다 높으면 상승")
+    bt.add_argument("--vwma-slope-bars", type=int, default=1, help="vwma: VWMA 가 N봉 전보다 높으면 상승 (0 = 기울기 조건 없음)")
     bt.add_argument("--vwma-min-above", type=int, default=20, help="vwma: 종가가 VWMA 위(아래)에 있던 연속 봉 수")
     bt.add_argument("--vwma-band", type=float, default=0.0, help="vwma: 지정가 = VWMA x (1+band%%), 숏은 반대")
     bt.add_argument("--vwma-source", choices=["all", "rth"], default="all", help="vwma: 받아 둔 봉 전부 / 정규장 봉만")
     bt.add_argument("--vwma-stop-basis", choices=["entry", "vwma"], default="entry")
+    bt.add_argument("--vwma-rsi-period", type=int, default=14)
+    bt.add_argument("--vwma-rsi-long-min", type=float, default=0.0, help="vwma: 롱은 직전 봉 RSI 이 값 이상 (숏은 100-값 이하)")
+    bt.add_argument("--vwma-rsi-long-max", type=float, default=100.0, help="vwma: 롱은 직전 봉 RSI 이 값 이하 (숏은 100-값 이상)")
     bt.add_argument("--vwma-target-r", type=float, default=0.0, help="vwma: 익절 = 위험의 R배")
     bt.add_argument("--maker-fee", type=float, default=0.02, help="지정가 수수료 %%")
     bt.add_argument("--orb", type=int, default=15, help="시가 범위 분 (장 시작 뒤 N분)")
@@ -74,6 +77,8 @@ def main() -> None:
                    vwma_tf=a.vwma_tf, vwma_len=a.vwma_len, vwma_slope_bars=a.vwma_slope_bars,
                    vwma_min_above=a.vwma_min_above, vwma_band=a.vwma_band, vwma_source=a.vwma_source,
                    vwma_stop_basis=a.vwma_stop_basis, vwma_target_r=a.vwma_target_r,
+                   vwma_rsi_period=a.vwma_rsi_period, vwma_rsi_long_min=a.vwma_rsi_long_min,
+                   vwma_rsi_long_max=a.vwma_rsi_long_max,
                    rule=SizeRule(a.risk, a.leverage, a.fee, a.slippage))
         run(Path(a.data), p, a.symbols, a.capital, a.start, a.end)
 

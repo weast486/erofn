@@ -5,7 +5,7 @@ import unittest
 from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 
-from binancebot.backtest import ET, Bar, Params, orb_trade, run, surge_trade, vwap_trade
+from binancebot.backtest import ET, Bar, MinBar, Params, orb_trade, run, surge_trade, vwap_trade, vwma_trades
 from binancebot.data import keep_bar, tradfi_symbols
 from binancebot.sizing import SizeRule, position_size
 
@@ -88,6 +88,21 @@ class VwapSurgeTest(unittest.TestCase):
         self.assertEqual((t.entry, t.reason, t.exit), (100, "target", 105))
         self.assertIsNone(surge_trade("X", date(2026, 9, 1), bars, p, 0, prev_close=100, prev_change=8))
         self.assertIsNone(surge_trade("X", date(2026, 9, 1), bars, p, 0, prev_close=97, prev_change=12))
+
+
+class VwmaTest(unittest.TestCase):
+    def test_long_pullback_to_vwma(self):
+        p = Params(strategy="vwma", vwma_tf=1, vwma_len=3, vwma_min_above=2, vwap_start=time(9, 30),
+                   stop_pct=5, vwma_target_r=1, rule=SizeRule(2, 5, 0, 0))
+        t0 = datetime.combine(date(2026, 9, 1), time(9, 30), ET)
+        px = [(100, 100, 100, 100), (101, 101, 101, 101), (102, 102, 102, 102), (103, 103, 103, 103),
+              (104, 104, 104, 104),
+              (104, 104, 102, 103),   # 직전 VWMA(102,103,104 평균 103) 지정가 → 103 매수
+              (103, 109, 103, 108)]   # 손절 5% → 위험 5.15, 1R = 108.15 익절
+        mins = [MinBar(t0 + timedelta(minutes=i), o, h, l, c, 1) for i, (o, h, l, c) in enumerate(px)]
+        trades = vwma_trades("X", mins, p)
+        self.assertAlmostEqual(trades[0].exit, 108.15)
+        self.assertEqual((trades[0].side, trades[0].entry, trades[0].reason), (1, 103, "target"))
 
 
 class DataTest(unittest.TestCase):

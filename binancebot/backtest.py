@@ -81,6 +81,15 @@ class Params:
     take_profit_pct: float = 0.0  # 진입가 대비 익절 % (0 = vwap 은 VWAP 복귀, surge 는 없음)
     # surge: 전날 +N%↑ 종목이 전날 종가 아래에서 시작해 전날 종가를 넘으면 매수
     surge_min_change: float = 10.0
+    # vwma: N분봉 거래량가중이동평균(VWMA) 위에 min_above 봉 이상 + VWMA 상승 → VWMA 부근 지정가 롱 (반대면 숏)
+    vwma_tf: int = 15          # 분봉 단위
+    vwma_len: int = 100
+    vwma_slope_bars: int = 1   # VWMA 가 이 봉 수 전보다 높으면 상승
+    vwma_min_above: int = 20   # 직전 연속 봉 수 (종가가 VWMA 위)
+    vwma_band: float = 0.0     # 지정가 = VWMA x (1 + band%) (롱), 숏은 x (1 - band%)
+    vwma_source: str = "all"   # all = 받아 둔 봉 전부(UTC 12~22시) / rth = 정규장 봉만으로 VWMA 계산
+    vwma_stop_basis: str = "entry"  # entry = 진입가 대비 stop_pct / vwma = VWMA 대비 stop_pct
+    vwma_target_r: float = 0.0  # 익절 = 위험의 R배 (0 이면 take_profit_pct, 둘 다 0 이면 정리 시각까지)
     surge_entry: str = "stop"  # stop = 전날 종가에 역지정가 / next = 넘은 1분봉 다음 봉 시가 (보수적)
     rule: SizeRule = field(default_factory=SizeRule)
 
@@ -326,6 +335,124 @@ def max_drawdown(values: list[float]) -> float:
     return mdd * 100
 
 
+
+@dataclass
+class MinBar:
+    t: datetime  # ET
+    o: float
+    h: float
+    l: float
+    c: float
+    v: float
+
+
+def load_minutes(path: Path) -> list[MinBar]:
+    out = []
+    with gzip.open(path, "rt", newline="") as f:
+        for row in csv.DictReader(f):
+            t = datetime.fromtimestamp(int(row["open_ms"]) / 1000, tz=UTC).astimezone(ET)
+            out.append(MinBar(t, float(row["open"]), float(row["high"]), float(row["low"]), float(row["close"]), float(row["volume"])))
+    out.sort(key=lambda b: b.t)
+    return out
+
+
+def is_rth(t: datetime) -> bool:
+    d = t.date()
+    return t.weekday() < 5 and d not in US_HOLIDAYS and time(9, 30) <= t.time() < session_close(d)
+
+
+def vwma_trades(symbol: str, mins: list[MinBar], p: Params) -> list[Trade]:
+    """VWMA 눌림: 직전 완성된 N분봉 기준 조건이 맞으면 다음 N분 동안 1분봉으로 지정가 체결·손절·익절 확인.
+    진입은 정규장 vwma_start~buy_until 만, 정리는 exit_time (당일 단타), 한 번에 한 포지션."""
+    slip = p.rule.slippage_pct / 100
+    tf = p.vwma_tf
+    # N분봉 만들기 (ET 기준 tf 분 단위)
+    groups: dict[datetime, list[MinBar]] = {}
+    for b in mins:
+        if p.vwma_source == "rth" and not is_rth(b.t):
+            continue
+        k = b.t.replace(minute=b.t.minute - b.t.minute % tf, second=0, microsecond=0)
+        groups.setdefault(k, []).append(b)
+    keys = sorted(groups)
+    closes, vwma = [], []
+    pv = vv = 0.0
+    window: list[tuple[float, float]] = []
+    for k in keys:
+        g = groups[k]
+        c, v = g[-1].c, sum(b.v for b in g)
+        closes.append(c)
+        window.append((c * v, v))
+        pv += c * v
+        vv += v
+        if len(window) > p.vwma_len:
+            a, b2 = window.pop(0)
+            pv -= a
+            vv -= b2
+        vwma.append(pv / vv if len(window) == p.vwma_len and vv > 0 else None)
+    # i번째 봉이 끝난 뒤의 신호
+    def signal(i: int) -> int:
+        n, s = p.vwma_min_above, p.vwma_slope_bars
+        if i < max(n, s) or vwma[i] is None or vwma[i - s] is None:
+            return 0
+        recent = range(i - n + 1, i + 1)
+        if any(vwma[j] is None for j in recent):
+            return 0
+        if vwma[i] > vwma[i - s] and all(closes[j] > vwma[j] for j in recent):
+            return 1
+        if vwma[i] < vwma[i - s] and all(closes[j] < vwma[j] for j in recent):
+            return -1
+        return 0
+    sig_at = {}  # 1분봉 시각 → (방향, VWMA) : 그 1분봉이 속한 N분봉 직전 봉의 신호
+    for i in range(len(keys) - 1):
+        sg = signal(i)
+        if sg and (p.direction == "both" or (sg == 1) == (p.direction == "long")):
+            sig_at[keys[i + 1]] = (sg, vwma[i])
+    trades: list[Trade] = []
+    pos = None  # (side, entry_bar, entry, stop, target, fee_entry)
+    for b in mins:
+        if not is_rth(b.t):
+            continue
+        d = b.t.date()
+        close_t = _close_t(d, p)
+        if pos:
+            side, eb, entry, stop, target = pos
+            reason = px = None
+            if b.t >= close_t or eb.t.date() != d:
+                reason, px = "time", b.o * (1 - side * slip)
+            elif (b.l <= stop) if side == 1 else (b.h >= stop):
+                reason = "stop"
+                px = (min(b.o, stop) if side == 1 else max(b.o, stop)) * (1 - side * slip)
+            elif target is not None and ((b.h >= target) if side == 1 else (b.l <= target)):
+                reason, px = "target", (max(b.o, target) if side == 1 else min(b.o, target))
+            if reason:
+                trades.append(Trade(symbol, eb.t.date(), side, eb.t, entry, stop, b.t, px, reason, fee_entry=p.maker_fee,
+                                    fee_exit=p.maker_fee if reason == "target" else None))
+                pos = None
+            continue
+        if b.t.time() < p.vwap_start or b.t.time() >= p.buy_until or b.t >= close_t:
+            continue
+        k = b.t.replace(minute=b.t.minute - b.t.minute % tf, second=0, microsecond=0)
+        if k not in sig_at:
+            continue
+        side, v = sig_at[k]
+        lvl = v * (1 + side * p.vwma_band / 100)
+        if not ((b.l <= lvl) if side == 1 else (b.h >= lvl)):
+            continue
+        entry = min(b.o, lvl) if side == 1 else max(b.o, lvl)
+        base = entry if p.vwma_stop_basis == "entry" else v
+        stop = base * (1 - side * p.stop_pct / 100)
+        if (stop >= entry) if side == 1 else (stop <= entry):
+            continue
+        risk = abs(entry - stop)
+        target = (entry + side * risk * p.vwma_target_r if p.vwma_target_r > 0
+                  else entry * (1 + side * p.take_profit_pct / 100) if p.take_profit_pct > 0 else None)
+        if (b.l <= stop) if side == 1 else (b.h >= stop):  # 진입 1분봉 안에서 손절가 → 보수적으로 손절
+            trades.append(Trade(symbol, d, side, b.t, entry, stop, b.t, stop * (1 - side * slip), "stop", fee_entry=p.maker_fee))
+            continue
+        pos = (side, b, entry, stop, target)
+    return trades
+
+
 def make_trade(sym: str, d: date, bars: list[Bar], p: Params, prev_close: float | None, prev_change: float | None) -> Trade | None:
     slip = p.rule.slippage_pct
     if p.strategy == "vwap":
@@ -353,6 +480,13 @@ def run(data_dir: Path, p: Params, symbols: list[str] | None = None, capital: fl
         sym = f.name.split("_")[0]
         filters[sym] = lot_filters(meta.get(sym, {}))
         funding = load_funding(data_dir / f"{sym}_funding.csv")
+        if p.strategy == "vwma":
+            for t in vwma_trades(sym, load_minutes(f), p):
+                if (start and t.day < start) or (end and t.day > end):
+                    continue
+                apply_funding(t, funding)
+                trades.append(t)
+            continue
         days = load_bars(f)
         prev_qv = prev_close = prev_change = None
         for d in sorted(days):

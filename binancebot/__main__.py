@@ -26,14 +26,22 @@ def main() -> None:
     bt.add_argument("--capital", type=float, default=1000.0, help="시작 금액 (USDT)")
     bt.add_argument("--start", type=date.fromisoformat)
     bt.add_argument("--end", type=date.fromisoformat)
-    bt.add_argument("--strategy", choices=["orb", "vwap", "surge"], default="orb")
+    bt.add_argument("--strategy", choices=["orb", "vwap", "surge", "vwma"], default="orb")
     bt.add_argument("--vwap-dev", type=float, default=2.0, help="vwap: VWAP 에서 벗어난 %% 에 지정가 진입")
-    bt.add_argument("--vwap-start", type=time.fromisoformat, default=time(10, 0), help="vwap: 이 시각부터 진입")
+    bt.add_argument("--vwap-start", type=time.fromisoformat, default=time(10, 0), help="vwap·vwma: 이 시각부터 진입")
     bt.add_argument("--buy-until", type=time.fromisoformat, default=time(15, 0), help="vwap·surge: 진입 마감 (미국 동부)")
     bt.add_argument("--stop-pct", type=float, default=2.0, help="vwap·surge: 진입가 대비 손절 %%")
     bt.add_argument("--take-profit", type=float, default=0.0, help="vwap·surge: 익절 %% (0 = vwap 은 VWAP 복귀, surge 는 없음)")
     bt.add_argument("--surge-min-change", type=float, default=10.0, help="surge: 전날 상승률 하한 %%")
     bt.add_argument("--surge-entry", choices=["stop", "next"], default="stop", help="surge: 전날 종가 역지정가 / 다음 1분봉 시가")
+    bt.add_argument("--vwma-tf", type=int, default=15, help="vwma: 분봉 단위")
+    bt.add_argument("--vwma-len", type=int, default=100)
+    bt.add_argument("--vwma-slope-bars", type=int, default=1, help="vwma: VWMA 가 N봉 전보다 높으면 상승")
+    bt.add_argument("--vwma-min-above", type=int, default=20, help="vwma: 종가가 VWMA 위(아래)에 있던 연속 봉 수")
+    bt.add_argument("--vwma-band", type=float, default=0.0, help="vwma: 지정가 = VWMA x (1+band%%), 숏은 반대")
+    bt.add_argument("--vwma-source", choices=["all", "rth"], default="all", help="vwma: 받아 둔 봉 전부 / 정규장 봉만")
+    bt.add_argument("--vwma-stop-basis", choices=["entry", "vwma"], default="entry")
+    bt.add_argument("--vwma-target-r", type=float, default=0.0, help="vwma: 익절 = 위험의 R배")
     bt.add_argument("--maker-fee", type=float, default=0.02, help="지정가 수수료 %%")
     bt.add_argument("--orb", type=int, default=15, help="시가 범위 분 (장 시작 뒤 N분)")
     bt.add_argument("--direction", choices=["both", "long", "short"], default="both")
@@ -63,6 +71,9 @@ def main() -> None:
                    strategy=a.strategy, vwap_dev=a.vwap_dev, vwap_start=a.vwap_start, buy_until=a.buy_until,
                    stop_pct=a.stop_pct, take_profit_pct=a.take_profit, surge_min_change=a.surge_min_change,
                    maker_fee=a.maker_fee, surge_entry=a.surge_entry,
+                   vwma_tf=a.vwma_tf, vwma_len=a.vwma_len, vwma_slope_bars=a.vwma_slope_bars,
+                   vwma_min_above=a.vwma_min_above, vwma_band=a.vwma_band, vwma_source=a.vwma_source,
+                   vwma_stop_basis=a.vwma_stop_basis, vwma_target_r=a.vwma_target_r,
                    rule=SizeRule(a.risk, a.leverage, a.fee, a.slippage))
         run(Path(a.data), p, a.symbols, a.capital, a.start, a.end)
 

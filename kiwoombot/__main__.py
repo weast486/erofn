@@ -4,6 +4,7 @@
     python -m kiwoombot candidates   # 오늘(장 전) 대상 종목만 고르고 끝
     python -m kiwoombot update-settings  # .env.kiwoom 전략 값을 최신 추천으로 (키·모의/드라이런 유지)
     python -m kiwoombot run          # 하루 매매 (08:45 ETF 매도 → 08:50 대상 고르기 → 09:00~ 매수 → exit_time 정리 → 15:21 ETF 매수)
+    python -m kiwoombot loop         # 켜 둔 채로 거래일마다 run 반복 (주말·저녁에 켜도 다음 평일 08:40 까지 기다림)
 
 설정은 .env.kiwoom (KIWOOM_APP_KEY, KIWOOM_SECRET_KEY, KIWOOM_MOCK, KIWOOM_DRY_RUN, KW_* 전략 값).
 """
@@ -11,7 +12,8 @@ from __future__ import annotations
 
 import argparse
 import logging
-from datetime import datetime
+import time
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from tossbot.config import KST, load_dotenv
@@ -49,6 +51,49 @@ def check(client: KiwoomClient) -> None:
         daily = client.daily_chart(code, datetime.now(KST).strftime("%Y%m%d"))
         print(f"{code} 일봉 {len(daily)}개, 최근: {daily[0] if daily else '-'}")
     print("확인 끝 (주문은 보내지 않았어요)")
+
+
+LOOP_START = (8, 40)  # loop: 거래일마다 이 시각에 run 시작 (08:45 ETF 매도 전)
+LOOP_END = "15:30"  # 이 시각이 지났으면 다음 평일로
+LOOP_RETRIES = 20  # 하루 안에서 오류가 나면 30초 뒤 이어서 다시 (상태 파일로 이어짐)
+
+
+def next_start(now: datetime, last_run: str = "") -> datetime:
+    """loop 가 다음에 run 을 시작할 시각. 평일 08:40~15:30 사이이고 오늘(last_run) 아직 안 돌렸으면 지금."""
+    d = now
+    for _ in range(8):
+        if d.weekday() < 5 and d.strftime("%Y%m%d") != last_run:
+            start = d.replace(hour=LOOP_START[0], minute=LOOP_START[1], second=0, microsecond=0)
+            if d.date() != now.date() or now < start:
+                return start
+            if now.strftime("%H:%M") < LOOP_END:
+                return now
+        d = (d + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+    raise RuntimeError("unreachable")
+
+
+def loop(cfg: KiwoomConfig, now_fn=None, sleep_fn=time.sleep) -> None:
+    """창을 켜 둔 채로 거래일마다 run 을 되풀이한다 (주말·장 마감 뒤에 켜도 다음 평일 아침까지 기다림)."""
+    log = logging.getLogger("kiwoombot")
+    now_fn = now_fn or (lambda: datetime.now(KST))
+    last_run = ""
+    while True:
+        start = next_start(now_fn(), last_run)
+        if start > now_fn():
+            log.info("다음 실행 %s 까지 대기 (이 창을 닫지 마세요)", start.strftime("%m-%d %H:%M"))
+            while now_fn() < start:
+                sleep_fn(min(60.0, max(1.0, (start - now_fn()).total_seconds())))
+        last_run = now_fn().strftime("%Y%m%d")
+        for attempt in range(LOOP_RETRIES + 1):
+            try:
+                DayTrader(KiwoomClient(cfg.app_key, cfg.secret_key, mock=cfg.mock), cfg).run()
+                break
+            except Exception:  # noqa: BLE001
+                log.exception("실행 중 오류 (%d/%d)", attempt + 1, LOOP_RETRIES)
+                if attempt >= LOOP_RETRIES or now_fn().strftime("%H:%M") >= LOOP_END:
+                    log.error("오늘은 더 시도하지 않음 — 보유 종목·미체결 주문을 직접 확인하세요")
+                    break
+                sleep_fn(30)
 
 
 KEEP_KEYS = ("KIWOOM_APP_KEY", "KIWOOM_SECRET_KEY", "KIWOOM_MOCK", "KIWOOM_DRY_RUN", "KW_SWING_STATE_FILE", "KW_STATE_DIR")
@@ -94,7 +139,7 @@ def update_settings(env_path: Path, example_path: Path) -> list[tuple[str, str, 
 
 def main(argv: list[str] | None = None) -> None:
     p = argparse.ArgumentParser(prog="kiwoombot", description="키움 단타 봇 (전일 +20%% 종목 전일 종가 재돌파 + ETF 오버나이트)")
-    p.add_argument("command", choices=["check", "candidates", "run", "update-settings"])
+    p.add_argument("command", choices=["check", "candidates", "run", "loop", "update-settings"])
     p.add_argument("--env", default=".env.kiwoom")
     args = p.parse_args(argv)
     if args.command == "update-settings":
@@ -121,6 +166,9 @@ def main(argv: list[str] | None = None) -> None:
               + (f"ETF {c.etf_code} {c.etf_pct:g}% 오버나이트" if c.etf_enabled else "ETF 끔")
               + f" ({'모의투자' if c.mock else '실전'}{', 드라이런' if c.dry_run else ', 실제 주문'})")
         check(client)
+        return
+    if args.command == "loop":
+        loop(cfg)
         return
     trader = DayTrader(client, cfg)
     if args.command == "candidates":

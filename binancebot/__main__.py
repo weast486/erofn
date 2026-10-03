@@ -44,6 +44,7 @@ def main() -> None:
     bt.add_argument("--vwma-rsi-period", type=int, default=14)
     bt.add_argument("--vwma-rsi-long-min", type=float, default=0.0, help="vwma: 롱은 직전 봉 RSI 이 값 이상 (숏은 100-값 이하)")
     bt.add_argument("--vwma-rsi-long-max", type=float, default=100.0, help="vwma: 롱은 직전 봉 RSI 이 값 이하 (숏은 100-값 이상)")
+    bt.add_argument("--vwma-max-touch", type=int, default=0, help="vwma: VWMA 한쪽에 자리 잡은 뒤 N번째 닿음까지만 (0 = 제한 없음)")
     bt.add_argument("--vwma-target-r", type=float, default=0.0, help="vwma: 익절 = 위험의 R배")
     bt.add_argument("--maker-fee", type=float, default=0.02, help="지정가 수수료 %%")
     bt.add_argument("--orb", type=int, default=15, help="시가 범위 분 (장 시작 뒤 N분)")
@@ -78,7 +79,7 @@ def main() -> None:
                    vwma_min_above=a.vwma_min_above, vwma_band=a.vwma_band, vwma_source=a.vwma_source,
                    vwma_stop_basis=a.vwma_stop_basis, vwma_target_r=a.vwma_target_r,
                    vwma_rsi_period=a.vwma_rsi_period, vwma_rsi_long_min=a.vwma_rsi_long_min,
-                   vwma_rsi_long_max=a.vwma_rsi_long_max,
+                   vwma_rsi_long_max=a.vwma_rsi_long_max, vwma_max_touch=a.vwma_max_touch,
                    rule=SizeRule(a.risk, a.leverage, a.fee, a.slippage))
         run(Path(a.data), p, a.symbols, a.capital, a.start, a.end)
 

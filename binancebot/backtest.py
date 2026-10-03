@@ -91,6 +91,7 @@ class Params:
     vwma_stop_basis: str = "entry"  # entry = 진입가 대비 stop_pct / vwma = VWMA 대비 stop_pct
     vwma_target_r: float = 0.0  # 익절 = 위험의 R배 (0 이면 take_profit_pct, 둘 다 0 이면 정리 시각까지)
     vwma_rsi_period: int = 14
+    vwma_max_touch: int = 0    # 종가가 VWMA 를 넘어 한쪽에 자리 잡은 뒤 N번째 닿음까지만 진입 (0 = 제한 없음)
     vwma_rsi_long_min: float = 0.0    # 롱: 직전 봉 RSI 가 이 값 이상 (숏은 100-값 이하)
     vwma_rsi_long_max: float = 100.0  # 롱: 직전 봉 RSI 가 이 값 이하 (숏은 100-값 이상)
     surge_entry: str = "stop"  # stop = 전날 종가에 역지정가 / next = 넘은 1분봉 다음 봉 시가 (보수적)
@@ -431,9 +432,26 @@ def vwma_trades(symbol: str, mins: list[MinBar], p: Params) -> list[Trade]:
         if (s == 0 or vwma[i] < vwma[i - s]) and all(closes[j] < vwma[j] for j in recent) and rsi_short:
             return -1
         return 0
+    # 닿음 횟수: 직전 봉 종가가 VWMA 위(아래)인 구간에서 이번 봉이 지정가 수준까지 오면 1회. 종가가 반대로 넘어가면 0 부터
+    touch_no = [0] * len(keys)
+    side_prev, cnt = 0, 0
+    for j in range(1, len(keys)):
+        i = j - 1
+        if vwma[i] is None:
+            continue
+        side = 1 if closes[i] > vwma[i] else -1 if closes[i] < vwma[i] else 0
+        if side != side_prev:
+            cnt, side_prev = 0, side
+        g = groups[keys[j]]
+        lvl = vwma[i] * (1 + side * p.vwma_band / 100)
+        if side == 1 and min(b.l for b in g) <= lvl or side == -1 and max(b.h for b in g) >= lvl:
+            cnt += 1
+        touch_no[j] = cnt
     sig_at = {}  # 1분봉 시각 → (방향, VWMA) : 그 1분봉이 속한 N분봉 직전 봉의 신호
     for i in range(len(keys) - 1):
         sg = signal(i)
+        if p.vwma_max_touch and touch_no[i + 1] > p.vwma_max_touch:
+            continue
         if sg and (p.direction == "both" or (sg == 1) == (p.direction == "long")):
             sig_at[keys[i + 1]] = (sg, vwma[i])
     trades: list[Trade] = []

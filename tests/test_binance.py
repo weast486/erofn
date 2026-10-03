@@ -104,6 +104,19 @@ class VwmaTest(unittest.TestCase):
         self.assertAlmostEqual(trades[0].exit, 108.15)
         self.assertEqual((trades[0].side, trades[0].entry, trades[0].reason), (1, 103, "target"))
 
+    def test_max_touch(self):
+        # 위에 자리 잡은 뒤 1번째 닿음은 1분봉 5, 2번째는 7 → 최대 1번이면 7 에서는 진입 안 함
+        p = Params(strategy="vwma", vwma_tf=1, vwma_len=3, vwma_min_above=1, vwma_slope_bars=0, vwap_start=time(9, 30),
+                   stop_pct=50, take_profit_pct=1, rule=SizeRule(2, 5, 0, 0))
+        t0 = datetime.combine(date(2026, 9, 1), time(9, 30), ET)
+        px = [(100, 100, 100, 100), (101, 101, 101, 101), (102, 102, 102, 102), (103, 103, 103, 103),
+              (104, 104, 104, 104), (104, 105, 102, 104.5), (104.5, 106, 104.4, 105.5), (105, 105, 103, 104.5),
+              (104.5, 107, 104.4, 106)]
+        mins = [MinBar(t0 + timedelta(minutes=i), o, h, l, c, 1) for i, (o, h, l, c) in enumerate(px)]
+        self.assertEqual(len(vwma_trades("X", mins, p)), 2)
+        p.vwma_max_touch = 1
+        self.assertEqual(len(vwma_trades("X", mins, p)), 1)
+
 
 class RsiTest(unittest.TestCase):
     def test_rsi(self):

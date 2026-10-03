@@ -39,6 +39,9 @@ class KiwoomConfig:
     etf_max_change: float = 0.0  # 오늘 등락률이 이 % 미만일 때만 매수 (0 = 내린 날)
     etf_buy_time: str = "15:21"  # 장 마감 동시호가(15:20~15:30) 중 시장가 주문
     etf_sell_time: str = "08:45"  # 장 시작 동시호가(08:30~09:00) 중 시장가 주문
+    # 수익 적립금: 수익 난 날 하루 손익의 N% 를 주문 금액에서 빼 둠 (0 = 끔). 운용금이 floor 아래면 적립금에서 채움
+    reserve_pct: float = 50.0
+    reserve_floor: float = 1_000_000
 
     @classmethod
     def from_env(cls) -> "KiwoomConfig":
@@ -71,4 +74,6 @@ class KiwoomConfig:
             etf_max_change=f("KW_ETF_MAX_CHANGE", "etf_max_change"),
             etf_buy_time=_get("KW_ETF_BUY_TIME", cls.etf_buy_time),
             etf_sell_time=_get("KW_ETF_SELL_TIME", cls.etf_sell_time),
+            reserve_pct=f("KW_RESERVE_PCT", "reserve_pct"),
+            reserve_floor=f("KW_RESERVE_FLOOR", "reserve_floor"),
         )

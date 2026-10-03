@@ -2,6 +2,7 @@
 
     python -m kiwoombot check        # 토큰·잔고·등락률 순위·분봉 조회가 되는지만 확인 (주문 없음)
     python -m kiwoombot candidates   # 오늘(장 전) 대상 종목만 고르고 끝
+    python -m kiwoombot reserve      # 적립금·운용금 보기 (--set 금액 으로 적립금 직접 고치기)
     python -m kiwoombot update-settings  # .env.kiwoom 전략 값을 최신 추천으로 (키·모의/드라이런 유지)
     python -m kiwoombot run          # 하루 매매 (08:45 ETF 매도 → 08:50 대상 고르기 → 09:00~ 매수 → exit_time 정리 → 15:21 ETF 매수)
     python -m kiwoombot loop         # 켜 둔 채로 거래일마다 run 반복 (주말·저녁에 켜도 다음 평일 08:40 까지 기다림)
@@ -22,6 +23,7 @@ from tossbot.config import KST, load_dotenv
 from .client import KiwoomClient, num
 from .config import KiwoomConfig
 from .daytrade import DayTrader
+from .reserve import ReserveBook
 
 
 def setup_logging(state_dir: str) -> None:
@@ -52,6 +54,19 @@ def check(client: KiwoomClient) -> None:
         daily = client.daily_chart(code, datetime.now(KST).strftime("%Y%m%d"))
         print(f"{code} 일봉 {len(daily)}개, 최근: {daily[0] if daily else '-'}")
     print("확인 끝 (주문은 보내지 않았어요)")
+
+
+def show_reserve(client: KiwoomClient, cfg: KiwoomConfig) -> None:
+    book = ReserveBook(cfg.state_dir, cfg.reserve_pct, cfg.reserve_floor)
+    if not book.enabled:
+        print("적립금: 끔 (KW_RESERVE_PCT=0)")
+        return
+    st = book.load()
+    equity = num(client.balance().get("prsm_dpst_aset_amt"))
+    print(f"적립금: {st.reserve:,.0f}원 / 운용금(주문 기준): {book.operating(equity):,.0f}원 / 평가금액: {equity:,.0f}원 "
+          f"(수익의 {cfg.reserve_pct:g}% 적립, 운용금 {cfg.reserve_floor:,.0f}원 아래면 적립금에서 보충)")
+    for h in st.history[-5:]:
+        print("  " + ", ".join(f"{k}={v:,}" if isinstance(v, (int, float)) else f"{k}={v}" for k, v in h.items()))
 
 
 def acquire_lock(state_dir: str):
@@ -160,8 +175,9 @@ def update_settings(env_path: Path, example_path: Path) -> list[tuple[str, str, 
 
 def main(argv: list[str] | None = None) -> None:
     p = argparse.ArgumentParser(prog="kiwoombot", description="키움 단타 봇 (전일 +20%% 종목 전일 종가 재돌파 + ETF 오버나이트)")
-    p.add_argument("command", choices=["check", "candidates", "run", "loop", "update-settings"])
+    p.add_argument("command", choices=["check", "candidates", "run", "loop", "reserve", "update-settings"])
     p.add_argument("--env", default=".env.kiwoom")
+    p.add_argument("--set", type=float, default=None, help="reserve: 적립금을 이 금액(원)으로 고침")
     args = p.parse_args(argv)
     if args.command == "update-settings":
         env_path = Path(args.env)
@@ -187,6 +203,14 @@ def main(argv: list[str] | None = None) -> None:
               + (f"ETF {c.etf_code} {c.etf_pct:g}% 오버나이트" if c.etf_enabled else "ETF 끔")
               + f" ({'모의투자' if c.mock else '실전'}{', 드라이런' if c.dry_run else ', 실제 주문'})")
         check(client)
+        show_reserve(client, cfg)
+        return
+    if args.command == "reserve":
+        if args.set is not None:
+            book = ReserveBook(cfg.state_dir, cfg.reserve_pct, cfg.reserve_floor)
+            before = book.load().reserve
+            print(f"적립금을 {before:,.0f}원 → {book.set_reserve(args.set).reserve:,.0f}원으로 고쳤어요.")
+        show_reserve(client, cfg)
         return
     trader = DayTrader(client, cfg)
     if args.command == "candidates":

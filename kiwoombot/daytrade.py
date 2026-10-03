@@ -25,6 +25,7 @@ from tossbot.config import KST
 from .client import KiwoomClient, num, ord_key
 from .config import KiwoomConfig
 from .overnight import EtfOvernight
+from .reserve import ReserveBook
 
 log = logging.getLogger("kiwoombot")
 
@@ -105,6 +106,7 @@ class DayTrader:
         self.state: DayState | None = None
         self.state_dir = Path(cfg.state_dir)
         self._sim_price: dict[str, float] = {}  # dry-run 체결 흉내용 마지막 가격
+        self.reserve = ReserveBook(cfg.state_dir, cfg.reserve_pct, cfg.reserve_floor, cfg.dry_run)
 
     # ------------------------------------------------------------- state io
     def _state_path(self, ymd: str) -> Path:
@@ -186,12 +188,17 @@ class DayTrader:
             equity = equity or 1_000_000
         else:
             equity = num(self.client.balance().get("prsm_dpst_aset_amt"))
-        log.info(f"대상 고르기 ({ymd}, 평가금액 {equity:,.0f}원, {'모의투자' if self.cfg.mock else '실전'}"
-                 f"{' · 드라이런' if self.cfg.dry_run else ''})")
+        self.reserve.ensure_base(equity, ymd)
+        total, equity = equity, self.reserve.operating(equity)  # 주문 금액은 적립금을 뺀 운용금 기준
+        log.info(f"대상 고르기 ({ymd}, 평가금액 {total:,.0f}원"
+                 + (f" = 운용금 {equity:,.0f} + 적립금 {total - equity:,.0f}" if self.reserve.enabled else "")
+                 + f", {'모의투자' if self.cfg.mock else '실전'}{' · 드라이런' if self.cfg.dry_run else ''})")
         c = self.cfg
         log.info(f"설정: 전일 +{c.min_prev_change:g}%↑, {c.buy_until} 까지 매수, 하루 {c.max_positions}종목 x {c.position_pct:g}%, "
                  f"손절 -{c.stop_pct:g}% / 익절 +{c.take_profit_pct:g}% / {c.exit_time} 정리"
-                 + (f", ETF {c.etf_code} {c.etf_pct:g}% 오버나이트" if c.etf_enabled else ", ETF 끔"))
+                 + (f", ETF {c.etf_code} {c.etf_pct:g}% 오버나이트" if c.etf_enabled else ", ETF 끔")
+                 + (f", 수익의 {c.reserve_pct:g}% 적립(운용금 {c.reserve_floor:,.0f}원 아래면 보충)" if self.reserve.enabled
+                    else ", 적립 끔"))
         self.state = DayState(date=ymd, equity=equity, candidates=self.select_candidates(ymd))
         log.info("오늘 대상 %d종목", len(self.state.candidates))
         self.save()
@@ -417,6 +424,7 @@ class DayTrader:
         else:
             log.info("오늘 단타 대상 없음")
         self.summary()
+        self.settle_reserve()
         if etf:
             while self.now_fn().strftime("%H:%M") < self.cfg.etf_buy_time:
                 self.sleep_fn(30)
@@ -426,11 +434,27 @@ class DayTrader:
                 except Exception as exc:  # noqa: BLE001
                     log.warning("평가금액 조회 실패: %s", exc)
                     equity = 0.0
+                if equity:  # 12시 정리 뒤의 평가금액 변화 = 입출금, ETF 는 운용금만큼만
+                    self.reserve.mark_flows(equity, self.state.date)
+                    equity = self.reserve.operating(equity)
                 if self.cfg.dry_run:
                     equity = equity or self.state.equity
                 etf.evening_buy(self.now_fn(), equity)
             else:
                 log.info("장 마감 동시호가가 지나 ETF 매수 안 함")
+
+    def settle_reserve(self) -> None:
+        """정리 시각(exit_time)이 지나 보유 종목이 없을 때 하루 손익을 재고 수익의 일부를 적립한다."""
+        if not self.reserve.enabled:
+            return
+        while self.now_fn().strftime("%H:%M") < self.cfg.exit_time:
+            self.sleep_fn(30)
+        try:
+            equity = num(self.client.balance().get("prsm_dpst_aset_amt"))
+        except Exception as exc:  # noqa: BLE001
+            log.warning("평가금액 조회 실패로 적립금 정산을 건너뜀: %s", exc)
+            return
+        self.reserve.settle(equity, self.state.date)
 
     def day_loop(self, etf: "EtfOvernight | None" = None) -> None:
         logged_cash = False

@@ -86,6 +86,11 @@ class ReserveBookTest(unittest.TestCase):
         self.assertFalse((Path(self.tmp.name) / "reserve.json").exists())  # 드라이런은 파일을 바꾸지 않음
 
 
+class ReserveDefaultOffTest(unittest.TestCase):
+    def test_default_config_has_reserve_off(self):
+        self.assertEqual(KiwoomConfig().reserve_pct, 0.0)  # 기본은 적립 없음 (전액 복리)
+
+
 class FakeBalanceClient:
     def __init__(self, equity):
         self.equity = equity
@@ -101,7 +106,8 @@ class DayTraderReserveTest(unittest.TestCase):
     def test_order_size_uses_operating_equity_and_settles_after_exit_time(self):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
-        cfg = KiwoomConfig(app_key="x", secret_key="y", dry_run=False, state_dir=tmp.name, swing_state_file="")
+        cfg = KiwoomConfig(app_key="x", secret_key="y", dry_run=False, state_dir=tmp.name, swing_state_file="",
+                           reserve_pct=50.0)
         ReserveBook(tmp.name, 50, 1_000_000).set_reserve(300_000)
         client = FakeBalanceClient(1_500_000)
         clock = [datetime(2026, 10, 5, 8, 50, tzinfo=KST)]

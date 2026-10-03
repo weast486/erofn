@@ -22,7 +22,7 @@ from pathlib import Path
 from tossbot.broker import round_up_to_tick
 from tossbot.config import KST
 
-from .client import KiwoomClient, num
+from .client import KiwoomClient, num, ord_key
 from .config import KiwoomConfig
 from .overnight import EtfOvernight
 
@@ -285,7 +285,7 @@ class DayTrader:
     def _open_orders(self) -> dict[str, dict]:
         if self.cfg.dry_run:
             return {}
-        return {str(o.get("ord_no", "")): o for o in self.client.unfilled()}
+        return {ord_key(o.get("ord_no")): o for o in self.client.unfilled()}
 
     def _holdings(self) -> dict[str, dict]:
         if self.cfg.dry_run:
@@ -306,7 +306,7 @@ class DayTrader:
                     t.qty, t.entry_price = t.order_qty, float(t.order_price)
                     self._opened(t)
                     continue
-                o = orders.get(t.buy_order)
+                o = orders.get(ord_key(t.buy_order))
                 age = (now - datetime.fromisoformat(t.ordered_at)).total_seconds()
                 if o is not None:
                     if age >= cfg.fill_timeout_sec:
@@ -350,7 +350,7 @@ class DayTrader:
 
     def _sell_all(self, t: Trade, held: dict, orders: dict, now: datetime, reason: str, price: float) -> None:
         if not self.cfg.dry_run:
-            if t.tp_order and t.tp_order in orders:
+            if t.tp_order and ord_key(t.tp_order) in orders:
                 self.client.cancel(t.code, t.tp_order)
             qty = (held.get(t.code) or {}).get("qty", 0)
             if qty:
@@ -381,7 +381,7 @@ class DayTrader:
         if not self.cfg.dry_run:
             for t in live:  # 미체결 매수·익절 주문 모두 취소
                 for no in (t.buy_order, t.tp_order):
-                    if no and no in orders:
+                    if no and ord_key(no) in orders:
                         self.client.cancel(t.code, no)
             self.sleep_fn(1)
         held = self._holdings()

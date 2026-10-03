@@ -39,6 +39,16 @@ def num(value: Any) -> float:
     return abs(float(s))
 
 
+def token_invalid(code: Any, message: Any) -> bool:
+    """응답이 '토큰이 유효하지 않음'(return_code 3, 메시지에 8005)인지."""
+    return str(code) == "3" and "8005" in str(message or "")
+
+
+def ord_key(order_no: Any) -> str:
+    """주문번호 비교용: 주문 응답('00024')과 미체결 목록('0000024')의 자릿수가 달라도 같게 본다."""
+    return str(order_no or "").strip().lstrip("0")
+
+
 class KiwoomClient:
     MAX_RETRIES = 3
 
@@ -84,6 +94,7 @@ class KiwoomClient:
     # --------------------------------------------------------------- request
     def request(self, api_id: str, path: str, body: dict, cont_key: str = "") -> tuple[dict, str]:
         """TR 호출. (응답 본문, 다음 페이지 키 — 없으면 '')."""
+        retried_token = False
         for attempt in range(self.MAX_RETRIES + 1):
             with self._lock:
                 wait = self.min_interval - (time.monotonic() - self._last_call)
@@ -117,6 +128,13 @@ class KiwoomClient:
             except ValueError:
                 data = {}
             code = data.get("return_code", 0 if resp.status_code < 400 else None)
+            # 토큰 무효는 HTTP 401 이 아니라 본문 return_code 3 / 메시지 8005 로 오기도 한다.
+            # 요청이 처리되기 전에 거절된 것이라 주문도 다시 보내도 중복되지 않는다.
+            if token_invalid(code, data.get("return_msg")) and not retried_token:
+                log.warning("%s 토큰이 유효하지 않음 → 다시 발급받아 재시도", api_id)
+                self._token = None
+                retried_token = True
+                continue
             if resp.status_code >= 400 or code not in (0, "0", None):
                 raise KiwoomApiError(api_id, resp.status_code, code, str(data.get("return_msg") or resp.text[:200]))
             next_key = resp.headers.get("next-key", "") if resp.headers.get("cont-yn") == "Y" else ""

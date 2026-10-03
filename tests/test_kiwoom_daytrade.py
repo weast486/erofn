@@ -203,6 +203,41 @@ class KiwoomDayTradeTest(unittest.TestCase):
         self.assertEqual((t.status, t.exit_reason), ("closed", "TAKE_PROFIT"))
 
 
+class PaddedOrderNoClient(FakeClient):
+    """미체결 목록의 주문번호만 7자리로 0 을 채워 돌려준다 (주문 응답과 자릿수가 다른 경우)."""
+
+    def unfilled(self):
+        return [{**o, "ord_no": str(o["ord_no"]).zfill(7)} for o in self.open_orders.values()]
+
+
+class KiwoomOrderNoPaddingTest(unittest.TestCase):
+    def test_stop_cancels_take_profit_when_order_no_padded(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        cfg = KiwoomConfig(app_key="x", secret_key="y", mock=True, dry_run=False, state_dir=tmp.name, swing_state_file="")
+        client = PaddedOrderNoClient()
+        clock = [datetime(2026, 10, 2, 8, 50, tzinfo=KST)]
+        client.now = clock[0]
+        trader = DayTrader(client, cfg, now_fn=lambda: clock[0], sleep_fn=lambda s: None)
+
+        def at(hh, mm):
+            clock[0] = datetime(2026, 10, 2, hh, mm, tzinfo=KST)
+            client.now = clock[0]
+
+        trader.prepare()
+        client.minute["111110"] = [("0900", "11800", "11900", "11700", "11850"),
+                                   ("0901", "11850", "12050", "11850", "12040")]
+        at(9, 1)
+        trader.step()
+        trader.step()
+        tp_no = client.orders[1][4]
+        client.minute["111110"].append(("0930", "11000", "11000", "10500", "10600"))
+        at(9, 30)
+        trader.step()
+        self.assertIn(tp_no, client.cancels)  # 원래 주문번호 그대로 취소
+        self.assertIsNone(client.orders[-1][3])  # 시장가 매도
+
+
 class KiwoomCashCapTest(KiwoomDayTradeTest):
     def test_buy_qty_capped_by_orderable_cash(self):
         self.client.cash = 50_000

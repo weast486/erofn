@@ -1,3 +1,4 @@
+import tempfile
 import unittest
 from datetime import datetime, timedelta
 from unittest import mock
@@ -34,6 +35,18 @@ class KiwoomLoopNextStartTest(unittest.TestCase):
 
     def test_friday_after_run_waits_until_monday(self):
         self.assertEqual(next_start(at(2026, 10, 9, 15, 31), "20261009"), at(2026, 10, 12, 8, 40))
+
+
+class KiwoomLockTest(unittest.TestCase):
+    def test_second_start_is_refused_until_first_closes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            first = kmain.acquire_lock(tmp)
+            self.assertIsNotNone(first)
+            self.assertIsNone(kmain.acquire_lock(tmp))  # 이미 켜져 있음
+            first.close()
+            again = kmain.acquire_lock(tmp)  # 먼저 켠 창이 닫히면 다시 켤 수 있음
+            self.assertIsNotNone(again)
+            again.close()
 
 
 class KiwoomLoopRunTest(unittest.TestCase):

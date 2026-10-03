@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -51,6 +52,26 @@ def check(client: KiwoomClient) -> None:
         daily = client.daily_chart(code, datetime.now(KST).strftime("%Y%m%d"))
         print(f"{code} 일봉 {len(daily)}개, 최근: {daily[0] if daily else '-'}")
     print("확인 끝 (주문은 보내지 않았어요)")
+
+
+def acquire_lock(state_dir: str):
+    """봇이 두 번 켜지지 않게 잠금 파일을 잡는다. 이미 다른 창이 잡고 있으면 None.
+    돌려준 파일을 들고 있는 동안만 잠기고, 창이 닫히거나 PC 가 꺼지면 저절로 풀린다."""
+    path = Path(state_dir) / "bot.lock"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    f = open(path, "a+")
+    try:
+        if os.name == "nt":
+            import msvcrt
+            f.seek(0)
+            msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        f.close()
+        return None
+    return f
 
 
 LOOP_START = (8, 40)  # loop: 거래일마다 이 시각에 run 시작 (08:45 ETF 매도 전)
@@ -167,12 +188,16 @@ def main(argv: list[str] | None = None) -> None:
               + f" ({'모의투자' if c.mock else '실전'}{', 드라이런' if c.dry_run else ', 실제 주문'})")
         check(client)
         return
-    if args.command == "loop":
-        loop(cfg)
-        return
     trader = DayTrader(client, cfg)
     if args.command == "candidates":
         trader.prepare()
+        return
+    lock = acquire_lock(cfg.state_dir)  # run·loop 는 주문을 내므로 한 번에 하나만
+    if lock is None:
+        print("키움 단타 봇이 이미 켜져 있어요. 먼저 켠 창이 그대로 돌고 있으니 이 창은 닫아도 됩니다.")
+        return
+    if args.command == "loop":
+        loop(cfg)
         return
     trader.run()
 

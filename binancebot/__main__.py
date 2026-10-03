@@ -33,6 +33,8 @@ def main() -> None:
     bt.add_argument("--max-range", type=float, default=100.0, help="시가 범위 폭 상한 %%")
     bt.add_argument("--min-open-qv", type=float, default=0.0, help="시가 범위 동안 거래대금 하한 (USDT)")
     bt.add_argument("--max-positions", type=int, default=10)
+    bt.add_argument("--min-prev-qv", type=float, default=0.0, help="전날 정규장 거래대금 하한 (USDT)")
+    bt.add_argument("--underlying", default="EQUITY", help="EQUITY(미국 주식·ETF) / ALL")
     bt.add_argument("--risk", type=float, default=2.0, help="거래당 손절 금액 = 평가금액의 %%")
     bt.add_argument("--leverage", type=float, default=5.0, help="포지션 합계 / 평가금액 상한")
     bt.add_argument("--fee", type=float, default=0.05, help="한쪽 수수료 %%")
@@ -46,6 +48,7 @@ def main() -> None:
         p = Params(orb_minutes=a.orb, direction=a.direction, stop_mode=a.stop_mode, target_r=a.target_r,
                    exit_time=a.exit_time, min_range_pct=a.min_range, max_range_pct=a.max_range,
                    min_open_qv=a.min_open_qv, max_positions=a.max_positions,
+                   min_prev_qv=a.min_prev_qv, underlying=a.underlying,
                    rule=SizeRule(a.risk, a.leverage, a.fee, a.slippage))
         run(Path(a.data), p, a.symbols, a.capital, a.start, a.end)
 

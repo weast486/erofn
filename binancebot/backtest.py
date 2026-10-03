@@ -67,6 +67,8 @@ class Params:
     max_range_pct: float = 100.0
     min_open_qv: float = 0.0  # 시가 범위 동안 거래대금 하한 (USDT)
     max_positions: int = 10   # 동시에 들고 있을 최대 종목 수
+    min_prev_qv: float = 0.0  # 전날 정규장 거래대금 하한 (USDT, 미래 정보 없음)
+    underlying: str = "EQUITY"  # symbols.json underlyingType (EQUITY = 미국 주식·ETF, ALL = 전부)
     rule: SizeRule = field(default_factory=SizeRule)
 
 
@@ -219,6 +221,8 @@ def run(data_dir: Path, p: Params, symbols: list[str] | None = None, capital: fl
     if sj.exists():
         meta = {s["symbol"]: s for s in json.loads(sj.read_text(encoding="utf-8"))["symbols"]}
     files = sorted(data_dir.glob("*_1m.csv.gz"))
+    if meta and p.underlying != "ALL":
+        files = [f for f in files if meta.get(f.name.split("_")[0], {}).get("underlyingType") == p.underlying]
     if symbols:
         want = {s.upper() for s in symbols}
         files = [f for f in files if f.name.split("_")[0] in want]
@@ -228,8 +232,15 @@ def run(data_dir: Path, p: Params, symbols: list[str] | None = None, capital: fl
         sym = f.name.split("_")[0]
         filters[sym] = lot_filters(meta.get(sym, {}))
         funding = load_funding(data_dir / f"{sym}_funding.csv")
-        for d, bars in load_bars(f).items():
+        days = load_bars(f)
+        prev_qv = None
+        for d in sorted(days):
+            bars = days[d]
+            qv, pq = sum(b.qv for b in bars), prev_qv
+            prev_qv = qv
             if (start and d < start) or (end and d > end):
+                continue
+            if p.min_prev_qv > 0 and (pq is None or pq < p.min_prev_qv):
                 continue
             t = orb_trade(sym, d, bars, p, p.rule.slippage_pct)
             if t:

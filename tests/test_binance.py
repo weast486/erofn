@@ -5,7 +5,7 @@ import unittest
 from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 
-from binancebot.backtest import ET, Bar, Params, orb_trade, run
+from binancebot.backtest import ET, Bar, Params, orb_trade, run, surge_trade, vwap_trade
 from binancebot.data import keep_bar, tradfi_symbols
 from binancebot.sizing import SizeRule, position_size
 
@@ -66,6 +66,28 @@ class OrbTest(unittest.TestCase):
         bars = bars_from([(100, 101, 99, 100), (100, 101, 99.5, 100.5),
                           (100.5, 101.5, 100.4, 101.2), (101, 106, 98, 100)])
         self.assertEqual(orb_trade("X", date(2026, 9, 1), bars, self.p, 0).reason, "stop")
+
+
+class VwapSurgeTest(unittest.TestCase):
+    def test_vwap_long_back_to_vwap(self):
+        p = Params(strategy="vwap", vwap_dev=2, vwap_start=time(9, 30), stop_pct=5, rule=SizeRule(2, 5, 0, 0))
+        bars = bars_from([(100, 100, 100, 100), (100, 100, 100, 100),
+                          (99, 99, 97, 97.5),     # VWAP 100 의 -2% = 98 지정가 매수
+                          (97.5, 99.9, 97.4, 99.5),
+                          (99.5, 101, 99.4, 100.5)])  # VWAP(약 99.6) 닿음 → 청산
+        t = vwap_trade("X", date(2026, 9, 1), bars, p, 0)
+        self.assertEqual((t.side, t.entry, t.reason), (1, 98, "target"))
+        self.assertTrue(99 < t.exit < 100)
+        self.assertEqual(t.fee_entry, 0.02)
+
+    def test_surge_requires_open_below_prev_close(self):
+        p = Params(strategy="surge", surge_min_change=10, buy_until=time(10, 0), stop_pct=5, take_profit_pct=5,
+                   rule=SizeRule(2, 5, 0, 0))
+        bars = bars_from([(98, 99, 97, 98.5), (98.5, 100.5, 98.4, 100.2), (100.2, 105.5, 100, 105)])
+        t = surge_trade("X", date(2026, 9, 1), bars, p, 0, prev_close=100, prev_change=12)
+        self.assertEqual((t.entry, t.reason, t.exit), (100, "target", 105))
+        self.assertIsNone(surge_trade("X", date(2026, 9, 1), bars, p, 0, prev_close=100, prev_change=8))
+        self.assertIsNone(surge_trade("X", date(2026, 9, 1), bars, p, 0, prev_close=97, prev_change=12))
 
 
 class DataTest(unittest.TestCase):

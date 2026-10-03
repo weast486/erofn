@@ -51,6 +51,8 @@ class Trade:
     exit: float
     reason: str
     funding: float = 0.0  # 1개당 펀딩 비용(가격 단위, +면 냄)
+    fee_entry: float | None = None  # 진입 수수료 % (None = 테이커 rule.fee_pct, 지정가면 메이커)
+    fee_exit: float | None = None
     qty: float = 0.0
     pnl: float = 0.0
     risk: float = 0.0
@@ -69,6 +71,17 @@ class Params:
     max_positions: int = 10   # 동시에 들고 있을 최대 종목 수
     min_prev_qv: float = 0.0  # 전날 정규장 거래대금 하한 (USDT, 미래 정보 없음)
     underlying: str = "EQUITY"  # symbols.json underlyingType (EQUITY = 미국 주식·ETF, ALL = 전부)
+    strategy: str = "orb"     # orb / vwap / surge
+    maker_fee: float = 0.02   # 지정가(메이커) 수수료 %
+    # vwap: 당일 VWAP 에서 dev% 벗어나면 반대로 지정가 진입, VWAP 닿으면 청산
+    vwap_dev: float = 2.0
+    vwap_start: time = time(10, 0)
+    buy_until: time = time(15, 0)
+    stop_pct: float = 2.0     # 진입가 대비 손절 % (vwap·surge)
+    take_profit_pct: float = 0.0  # 진입가 대비 익절 % (0 = vwap 은 VWAP 복귀, surge 는 없음)
+    # surge: 전날 +N%↑ 종목이 전날 종가 아래에서 시작해 전날 종가를 넘으면 매수
+    surge_min_change: float = 10.0
+    surge_entry: str = "stop"  # stop = 전날 종가에 역지정가 / next = 넘은 1분봉 다음 봉 시가 (보수적)
     rule: SizeRule = field(default_factory=SizeRule)
 
 
@@ -153,6 +166,103 @@ def orb_trade(symbol: str, d: date, bars: list[Bar], p: Params, slip: float) -> 
     return None
 
 
+def run_exit(symbol: str, d: date, side: int, entry_bar: Bar, entry: float, stop: float, rest: list[Bar],
+             close_t: datetime, slip: float, target: float | None = None, target_fn=None,
+             fee_entry: float | None = None, maker_fee: float = 0.02) -> Trade:
+    """진입 뒤 손절(시장가)·익절(지정가, 메이커)·정리 시각. target_fn(i) 는 i번째 봉 직전까지 아는 목표가."""
+    s = slip / 100
+    for i, b in enumerate(rest):
+        if b.t >= close_t:
+            return Trade(symbol, d, side, entry_bar.t, entry, stop, b.t, b.o * (1 - side * s), "time", fee_entry=fee_entry)
+        if (b.l <= stop) if side == 1 else (b.h >= stop):
+            px = min(b.o, stop) if side == 1 else max(b.o, stop)
+            return Trade(symbol, d, side, entry_bar.t, entry, stop, b.t, px * (1 - side * s), "stop", fee_entry=fee_entry)
+        tg = target_fn(i) if target_fn else target
+        if tg is not None and ((b.h >= tg) if side == 1 else (b.l <= tg)):
+            px = max(b.o, tg) if side == 1 else min(b.o, tg)
+            return Trade(symbol, d, side, entry_bar.t, entry, stop, b.t, px, "target", fee_entry=fee_entry, fee_exit=maker_fee)
+    last = rest[-1] if rest else entry_bar
+    return Trade(symbol, d, side, entry_bar.t, entry, stop, last.t, last.c * (1 - side * s), "time", fee_entry=fee_entry)
+
+
+def _close_t(d: date, p: Params) -> datetime:
+    return datetime.combine(d, min(p.exit_time, (datetime.combine(d, session_close(d)) - timedelta(minutes=5)).time()), ET)
+
+
+def vwap_trade(symbol: str, d: date, bars: list[Bar], p: Params, slip: float) -> Trade | None:
+    """VWAP 되돌림: 직전 봉까지의 VWAP 에서 vwap_dev% 아래(위)에 지정가 매수(매도) → VWAP 복귀 지정가 청산."""
+    if not bars or bars[0].t.time() > time(9, 35):
+        return None
+    close_t = _close_t(d, p)
+    pv = vol = 0.0
+    vwaps = []  # i번째 봉 직전까지의 VWAP
+    for b in bars:
+        vwaps.append(pv / vol if vol else None)
+        typ = (b.h + b.l + b.c) / 3
+        q = b.qv / typ if typ else 0.0  # 수량
+        pv += typ * q
+        vol += q
+    k = p.vwap_dev / 100
+    for i, b in enumerate(bars):
+        v = vwaps[i]
+        if v is None or b.t.time() < p.vwap_start:
+            continue
+        if b.t.time() >= p.buy_until or b.t >= close_t:
+            return None
+        lo_lvl, hi_lvl = v * (1 - k), v * (1 + k)
+        long_ok = p.direction in ("both", "long") and b.l <= lo_lvl
+        short_ok = p.direction in ("both", "short") and b.h >= hi_lvl
+        if long_ok and short_ok:
+            return None
+        if not (long_ok or short_ok):
+            continue
+        side = 1 if long_ok else -1
+        lvl = lo_lvl if long_ok else hi_lvl
+        entry = min(b.o, lvl) if side == 1 else max(b.o, lvl)
+        stop = entry * (1 - side * p.stop_pct / 100)
+        # 진입 봉 안에서 손절가까지 갔으면 손절 (순서 모름 → 보수적)
+        if (b.l <= stop) if side == 1 else (b.h >= stop):
+            return Trade(symbol, d, side, b.t, entry, stop, b.t, stop * (1 - side * slip / 100), "stop", fee_entry=p.maker_fee)
+        rest = bars[i + 1:]
+        if p.take_profit_pct > 0:
+            return run_exit(symbol, d, side, b, entry, stop, rest, close_t, slip,
+                            target=entry * (1 + side * p.take_profit_pct / 100), fee_entry=p.maker_fee, maker_fee=p.maker_fee)
+        return run_exit(symbol, d, side, b, entry, stop, rest, close_t, slip,
+                        target_fn=lambda j: vwaps[i + 1 + j], fee_entry=p.maker_fee, maker_fee=p.maker_fee)
+    return None
+
+
+def surge_trade(symbol: str, d: date, bars: list[Bar], p: Params, slip: float, prev_close: float | None,
+                prev_change: float | None) -> Trade | None:
+    """전날 +N%↑ 종목이 전날 종가 아래에서 시작해 buy_until 까지 전날 종가를 넘으면 매수 (역지정가, 테이커)."""
+    if prev_close is None or prev_change is None or prev_change < p.surge_min_change:
+        return None
+    if not bars or bars[0].t.time() > time(9, 35) or bars[0].o >= prev_close:
+        return None
+    close_t = _close_t(d, p)
+    s = slip / 100
+    for i, b in enumerate(bars):
+        if b.t.time() >= p.buy_until or b.t >= close_t:
+            return None
+        if b.h < prev_close:
+            continue
+        if p.surge_entry == "next":
+            if i + 1 >= len(bars):
+                return None
+            b, i = bars[i + 1], i + 1
+            entry = b.o * (1 + s)
+        else:
+            entry = max(b.o, prev_close) * (1 + s)
+        stop = entry * (1 - p.stop_pct / 100)
+        target = entry * (1 + p.take_profit_pct / 100) if p.take_profit_pct > 0 else None
+        if p.surge_entry == "next" and (b.l <= stop or (target is not None and b.h >= target)):
+            # 진입 봉 안에서 손절·익절 순서를 모름 → 손절가에 닿았으면 손절, 아니면 다음 봉부터
+            if b.l <= stop:
+                return Trade(symbol, d, 1, b.t, entry, stop, b.t, stop * (1 - s), "stop")
+        return run_exit(symbol, d, 1, b, entry, stop, bars[i + 1:], close_t, slip, target=target, maker_fee=p.maker_fee)
+    return None
+
+
 def apply_funding(t: Trade, funding: list[tuple[datetime, float]]) -> None:
     a, z = t.entry_t.astimezone(UTC), t.exit_t.astimezone(UTC)
     t.funding = sum(rate * t.entry * t.side for ft, rate in funding if a < ft <= z)
@@ -181,7 +291,9 @@ def simulate(trades: list[Trade], p: Params, capital: float, filters: dict[str, 
     def close_until(ts: datetime | None):
         nonlocal equity
         for t in sorted([t for t in open_ if ts is None or t.exit_t <= ts], key=lambda t: t.exit_t):
-            fee = (t.entry + t.exit) * t.qty * rule.fee_pct / 100
+            fe = rule.fee_pct if t.fee_entry is None else t.fee_entry
+            fx = rule.fee_pct if t.fee_exit is None else t.fee_exit
+            fee = (t.entry * fe + t.exit * fx) * t.qty / 100
             t.pnl = (t.exit - t.entry) * t.side * t.qty - fee - t.funding * t.qty
             equity += t.pnl
             open_.remove(t)
@@ -214,6 +326,15 @@ def max_drawdown(values: list[float]) -> float:
     return mdd * 100
 
 
+def make_trade(sym: str, d: date, bars: list[Bar], p: Params, prev_close: float | None, prev_change: float | None) -> Trade | None:
+    slip = p.rule.slippage_pct
+    if p.strategy == "vwap":
+        return vwap_trade(sym, d, bars, p, slip)
+    if p.strategy == "surge":
+        return surge_trade(sym, d, bars, p, slip, prev_close, prev_change)
+    return orb_trade(sym, d, bars, p, slip)
+
+
 def run(data_dir: Path, p: Params, symbols: list[str] | None = None, capital: float = 1000.0,
         start: date | None = None, end: date | None = None, verbose: bool = True) -> dict:
     meta = {}
@@ -233,16 +354,18 @@ def run(data_dir: Path, p: Params, symbols: list[str] | None = None, capital: fl
         filters[sym] = lot_filters(meta.get(sym, {}))
         funding = load_funding(data_dir / f"{sym}_funding.csv")
         days = load_bars(f)
-        prev_qv = None
+        prev_qv = prev_close = prev_change = None
         for d in sorted(days):
             bars = days[d]
-            qv, pq = sum(b.qv for b in bars), prev_qv
-            prev_qv = qv
+            pq, pc, pch = prev_qv, prev_close, prev_change
+            prev_qv = sum(b.qv for b in bars)
+            prev_change = (bars[-1].c / prev_close - 1) * 100 if prev_close else None
+            prev_close = bars[-1].c
             if (start and d < start) or (end and d > end):
                 continue
             if p.min_prev_qv > 0 and (pq is None or pq < p.min_prev_qv):
                 continue
-            t = orb_trade(sym, d, bars, p, p.rule.slippage_pct)
+            t = make_trade(sym, d, bars, p, pc, pch)
             if t:
                 apply_funding(t, funding)
                 trades.append(t)

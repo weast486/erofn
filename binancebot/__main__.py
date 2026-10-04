@@ -27,7 +27,7 @@ def main() -> None:
     bt.add_argument("--capital", type=float, default=1000.0, help="시작 금액 (USDT)")
     bt.add_argument("--start", type=date.fromisoformat)
     bt.add_argument("--end", type=date.fromisoformat)
-    bt.add_argument("--strategy", choices=["orb", "vwap", "surge", "vwma", "swing", "flag"], default="orb")
+    bt.add_argument("--strategy", choices=["orb", "vwap", "surge", "vwma", "swing", "flag", "first5"], default="orb")
     bt.add_argument("--vwap-dev", type=float, default=2.0, help="vwap: VWAP 에서 벗어난 %% 에 지정가 진입")
     bt.add_argument("--vwap-start", type=time.fromisoformat, default=time(10, 0), help="vwap·vwma: 이 시각부터 진입")
     bt.add_argument("--buy-until", type=time.fromisoformat, default=time(15, 0), help="vwap·surge: 진입 마감 (미국 동부)")
@@ -68,6 +68,18 @@ def main() -> None:
     bt.add_argument("--flag-vol", action="store_true", help="flag: 깃발 거래량 < 깃대 거래량")
     bt.add_argument("--flag-source", choices=["rth", "all"], default="rth")
     bt.add_argument("--flag-entry-bar", choices=["close", "low"], default="close", help="flag: 돌파 1분봉 안 손절 = 종가 / 저가 기준(보수적)")
+    bt.add_argument("--f5-pattern", choices=["A", "B"], default="A", help="first5: A 고가 돌파 / B 눌림 반등")
+    bt.add_argument("--f5-entry", choices=["touch", "close"], default="touch")
+    bt.add_argument("--f5-breakout-until", type=time.fromisoformat, default=time(9, 45))
+    bt.add_argument("--f5-b-support", choices=["open", "mid"], default="open")
+    bt.add_argument("--f5-b-until", type=time.fromisoformat, default=time(9, 55))
+    bt.add_argument("--f5-min-body", type=float, default=0.5)
+    bt.add_argument("--f5-vol-mult", type=float, default=0.0)
+    bt.add_argument("--f5-gap-min", type=float, default=-100.0)
+    bt.add_argument("--f5-gap-max", type=float, default=100.0)
+    bt.add_argument("--f5-stop-pct", type=float, default=2.0)
+    bt.add_argument("--f5-tp1", type=float, default=2.0)
+    bt.add_argument("--f5-tp2", type=float, default=5.0)
     bt.add_argument("--maker-fee", type=float, default=0.02, help="지정가 수수료 %%")
     bt.add_argument("--orb", type=int, default=15, help="시가 범위 분 (장 시작 뒤 N분)")
     bt.add_argument("--direction", choices=["both", "long", "short"], default="both")
@@ -97,6 +109,10 @@ def main() -> None:
                    strategy=a.strategy, vwap_dev=a.vwap_dev, vwap_start=a.vwap_start, buy_until=a.buy_until,
                    stop_pct=a.stop_pct, take_profit_pct=a.take_profit, surge_min_change=a.surge_min_change,
                    maker_fee=a.maker_fee, surge_entry=a.surge_entry,
+                   f5_pattern=a.f5_pattern, f5_entry=a.f5_entry, f5_breakout_until=a.f5_breakout_until,
+                   f5_b_support=a.f5_b_support, f5_b_until=a.f5_b_until, f5_min_body=a.f5_min_body,
+                   f5_vol_mult=a.f5_vol_mult, f5_gap_min=a.f5_gap_min, f5_gap_max=a.f5_gap_max,
+                   f5_stop_pct=a.f5_stop_pct, f5_tp1=a.f5_tp1, f5_tp2=a.f5_tp2,
                    swing_tf=a.swing_tf, swing_n=a.swing_n, swing_buy1=a.swing_buy1, swing_buy2=a.swing_buy2,
                    swing_tp2=a.swing_tp2, swing_split=not a.swing_single, swing_source=a.swing_source, swing_min_d=a.swing_min_d,
                    vwma_tf=a.vwma_tf, vwma_len=a.vwma_len, vwma_slope_bars=a.vwma_slope_bars,

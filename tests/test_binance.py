@@ -5,7 +5,7 @@ import unittest
 from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 
-from binancebot.backtest import ET, Bar, MinBar, Params, flag_setups, orb_trade, run, rsi_values, surge_trade, swing_setups, vwap_trade, vwma_trades
+from binancebot.backtest import ET, Bar, MinBar, Params, flag_setups, orb_trade, run, first5_trades, rsi_values, surge_trade, swing_setups, vwap_trade, vwma_trades
 from binancebot.data import keep_bar, tradfi_symbols
 from binancebot.sizing import SizeRule, position_size
 
@@ -149,6 +149,25 @@ class FlagTest(unittest.TestCase):
         self.assertNotIn(bars[5][0], out)  # 깃발 2봉뿐
         self.assertEqual(flag_setups(bars, Params(flag_pole_bars=3, flag_pole_pct=5, flag_min=3, flag_retrace=0.4)), {})
         self.assertEqual(flag_setups(bars, Params(flag_pole_bars=3, flag_pole_pct=7, flag_min=3)), {})
+
+
+class First5Test(unittest.TestCase):
+    def _mins(self, d, pxs, start=time(9, 30)):
+        t0 = datetime.combine(d, start, ET)
+        return [MinBar(t0 + timedelta(minutes=i), o, h, l, c, 100) for i, (o, h, l, c) in enumerate(pxs)]
+
+    def test_breakout_close_then_targets(self):
+        prev = self._mins(date(2026, 8, 31), [(100, 100, 100, 100)] * 5, start=time(15, 50))
+        first = [(100, 100.5, 99.8, 100.4), (100.4, 101, 100.3, 100.9), (100.9, 101, 100.8, 101), (101, 101, 100.9, 101), (101, 101, 100.9, 101)]
+        second = [(101, 101.2, 100.9, 101.1)] * 4 + [(101.1, 101.6, 101.0, 101.5)]   # 9:35~9:40 봉 종가 101.5 > 첫 봉 고가 101
+        after = [(101.5, 103.6, 101.4, 103.5), (103.5, 106.7, 103.4, 106.5)]           # +2% 절반, +5% 나머지
+        mins = prev + self._mins(date(2026, 9, 1), first + second + after)
+        p = Params(strategy="first5", f5_entry="close", f5_min_body=0.5, f5_stop_pct=2, f5_tp1=2, f5_tp2=5,
+                   exit_time=time(10, 0), rule=SizeRule(2, 5, 0, 0))
+        trades, st = first5_trades("X", mins, p)
+        self.assertEqual(st["entries"], 1)
+        self.assertEqual([(t.reason, t.size_frac) for t in trades], [("target", 0.5), ("target", 0.5)])
+        self.assertAlmostEqual(trades[0].entry, 101.5)
 
 
 class DataTest(unittest.TestCase):

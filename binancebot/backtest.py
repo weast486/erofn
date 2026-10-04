@@ -14,7 +14,7 @@ import csv
 import gzip
 import json
 import math
-from collections import defaultdict
+from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
@@ -121,6 +121,19 @@ class Params:
     flag_vol: bool = False        # 깃발 평균 거래량 < 깃대 평균 거래량일 때만
     flag_source: str = "rth"      # 패턴을 찾는 봉: rth / all
     flag_entry_bar: str = "close"  # 돌파한 1분봉 안 손절 판단: close = 종가가 손절가 이하면 손절 / low = 저가만 닿아도 손절 (보수적)
+    # first5: 첫 5분봉(9:30~9:35) 기준 돌파(A)·눌림(B) 매수, 분할 익절
+    f5_pattern: str = "A"         # A = 첫 5분봉 고가 돌파 / B = 시가·중간값 지지 뒤 반등 양봉
+    f5_entry: str = "touch"       # A: touch = 고가에 역지정가 / close = 5분봉 종가가 고가 위면 그 종가
+    f5_breakout_until: time = time(9, 45)  # A: 2·3번째 5분봉까지
+    f5_b_support: str = "open"    # B: 종가로 깨면 안 되는 선 open(첫 봉 시가) / mid(중간값)
+    f5_b_until: time = time(9, 55)
+    f5_min_body: float = 0.5      # 첫 봉 몸통 / (고가-저가) 하한, 양봉만
+    f5_vol_mult: float = 0.0      # 첫 봉 거래량 >= 최근 10일 첫 봉 평균 x 값 (0 = 조건 없음)
+    f5_gap_min: float = -100.0    # 시가 갭(전날 정규장 종가 대비 %) 범위
+    f5_gap_max: float = 100.0
+    f5_stop_pct: float = 2.0      # 매수가 대비 손절 % (닿으면)
+    f5_tp1: float = 2.0           # 절반 익절 %
+    f5_tp2: float = 5.0           # 나머지 익절 %
     surge_entry: str = "stop"  # stop = 전날 종가에 역지정가 / next = 넘은 1분봉 다음 봉 시가 (보수적)
     rule: SizeRule = field(default_factory=SizeRule)
 
@@ -771,6 +784,114 @@ def flag_trades(symbol: str, mins: list[MinBar], p: Params) -> tuple[list[Trade]
     return trades, stats
 
 
+
+def first5_trades(symbol: str, mins: list[MinBar], p: Params) -> tuple[list[Trade], dict]:
+    """첫 5분봉 돌파·눌림 매수. 손절 = 5분봉 종가가 첫 봉 저가 아래 or 매수가 -f5_stop_pct% 닿음, 익절 절반 tp1·나머지 tp2."""
+    slip = p.rule.slippage_pct / 100
+    days: dict[date, list[MinBar]] = defaultdict(list)
+    for b in mins:
+        if is_rth(b.t):
+            days[b.t.date()].append(b)
+    trades: list[Trade] = []
+    st = Counter()
+    prev_close = None
+    first_vols: list[float] = []
+    for d in sorted(days):
+        bars = days[d]
+        pc, prev_close = prev_close, bars[-1].c
+        if bars[0].t.time() != time(9, 30):
+            continue
+        first = [b for b in bars if b.t.time() < time(9, 35)]
+        o1, h1, l1, c1, v1 = first[0].o, max(b.h for b in first), min(b.l for b in first), first[-1].c, sum(b.v for b in first)
+        avg_v = sum(first_vols[-10:]) / len(first_vols[-10:]) if first_vols else None
+        first_vols.append(v1)
+        st["days"] += 1
+        gap = (o1 / pc - 1) * 100 if pc else None
+        if gap is None or not (p.f5_gap_min <= gap <= p.f5_gap_max):
+            continue
+        st["gap_ok"] += 1
+        if not (c1 > o1 and h1 > l1 and (c1 - o1) / (h1 - l1) >= p.f5_min_body):
+            continue
+        if p.f5_vol_mult > 0 and (avg_v is None or v1 < avg_v * p.f5_vol_mult):
+            continue
+        st["first_ok"] += 1
+        close_t = datetime.combine(d, p.exit_time, ET)
+        rest = [b for b in bars if b.t.time() >= time(9, 35)]
+        # 5분봉 경계 표시: 각 1분봉이 그 5분봉의 마지막이면 5분봉 (o,h,l,c) 반환
+        five: dict[datetime, list[MinBar]] = defaultdict(list)
+        for b in rest:
+            five[b.t.replace(minute=b.t.minute - b.t.minute % 5)].append(b)
+        entry = entry_i = None
+        mid = (o1 + h1) / 2 if False else (h1 + l1) / 2
+        support = o1 if p.f5_b_support == "open" else mid
+        dipped = False
+        for i, b in enumerate(rest):
+            k = b.t.replace(minute=b.t.minute - b.t.minute % 5)
+            g = five[k]
+            is_last = b is g[-1]
+            if p.f5_pattern == "A":
+                if b.t.time() >= p.f5_breakout_until:
+                    break
+                if p.f5_entry == "touch" and b.h >= h1:
+                    entry, entry_i = max(b.o, h1) * (1 + slip), i
+                    break
+                if p.f5_entry == "close" and is_last and b.c > h1:
+                    entry, entry_i = b.c * (1 + slip), i
+                    break
+            else:
+                if b.t.time() >= p.f5_b_until:
+                    break
+                if is_last:
+                    go, gh, gl, gc = g[0].o, max(x.h for x in g), min(x.l for x in g), g[-1].c
+                    if gc < support:
+                        break  # 지지선을 종가로 깨면 포기
+                    if gl <= mid:
+                        if dipped and gc > go:
+                            entry, entry_i = gc * (1 + slip), i
+                            break
+                        dipped = True
+                        if gc > go:  # 눌림 봉 자체가 반등 양봉이면 그 봉에서
+                            entry, entry_i = gc * (1 + slip), i
+                            break
+                    elif dipped and gc > go:
+                        entry, entry_i = gc * (1 + slip), i
+                        break
+        if entry is None:
+            continue
+        st["entries"] += 1
+        stop_px = entry * (1 - p.f5_stop_pct / 100)
+        tp1, tp2 = entry * (1 + p.f5_tp1 / 100), entry * (1 + p.f5_tp2 / 100)
+        risk = entry - stop_px
+        eb = rest[entry_i]
+        units = 1.0
+        half_done = False
+        for b in rest[entry_i + 1:]:
+            k = b.t.replace(minute=b.t.minute - b.t.minute % 5)
+            if b.t >= close_t:
+                trades.append(Trade(symbol, d, 1, eb.t, entry, stop_px, b.t, b.o * (1 - slip), "time", size_risk=risk, size_frac=units))
+                units = 0
+                break
+            if b.l <= stop_px:
+                trades.append(Trade(symbol, d, 1, eb.t, entry, stop_px, b.t, min(b.o, stop_px) * (1 - slip), "stop", size_risk=risk, size_frac=units))
+                units = 0
+                break
+            if not half_done and b.h >= tp1:
+                trades.append(Trade(symbol, d, 1, eb.t, entry, stop_px, b.t, max(b.o, tp1), "target", fee_exit=p.maker_fee, size_risk=risk, size_frac=0.5))
+                units, half_done = 0.5, True
+            if half_done and b.h >= tp2:
+                trades.append(Trade(symbol, d, 1, eb.t, entry, stop_px, b.t, max(b.o, tp2), "target", fee_exit=p.maker_fee, size_risk=risk, size_frac=units))
+                units = 0
+                break
+            if b is five[k][-1] and b.c < l1:  # 5분봉 종가가 첫 봉 저가 아래
+                trades.append(Trade(symbol, d, 1, eb.t, entry, stop_px, b.t, b.c * (1 - slip), "stop", size_risk=risk, size_frac=units))
+                units = 0
+                break
+        if units > 0:
+            last = bars[-1]
+            trades.append(Trade(symbol, d, 1, eb.t, entry, stop_px, last.t, last.c * (1 - slip), "time", size_risk=risk, size_frac=units))
+    return trades, dict(st)
+
+
 def make_trade(sym: str, d: date, bars: list[Bar], p: Params, prev_close: float | None, prev_change: float | None) -> Trade | None:
     slip = p.rule.slippage_pct
     if p.strategy == "vwap":
@@ -798,6 +919,16 @@ def run(data_dir: Path, p: Params, symbols: list[str] | None = None, capital: fl
         sym = f.name.split("_")[0]
         filters[sym] = lot_filters(meta.get(sym, {}))
         funding = load_funding(data_dir / f"{sym}_funding.csv")
+        if p.strategy == "first5":
+            tr, st = first5_trades(sym, load_minutes(f), p)
+            if verbose:
+                print(f"{sym}: {st}")
+            for t in tr:
+                if (start and t.day < start) or (end and t.day > end):
+                    continue
+                apply_funding(t, funding)
+                trades.append(t)
+            continue
         if p.strategy == "swing":
             tr, st = swing_trades(sym, load_minutes(f), p)
             if verbose:

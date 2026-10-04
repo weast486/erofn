@@ -5,7 +5,7 @@ import unittest
 from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 
-from binancebot.backtest import ET, Bar, MinBar, Params, orb_trade, run, rsi_values, surge_trade, swing_setups, vwap_trade, vwma_trades
+from binancebot.backtest import ET, Bar, MinBar, Params, flag_setups, orb_trade, run, rsi_values, surge_trade, swing_setups, vwap_trade, vwma_trades
 from binancebot.data import keep_bar, tradfi_symbols
 from binancebot.sizing import SizeRule, position_size
 
@@ -135,6 +135,20 @@ class SwingTest(unittest.TestCase):
         out = swing_setups(bars, 1)
         self.assertEqual([(o[1], o[2]) for o in out], [(14, 24)])
         self.assertEqual(out[0][0], bars[6][0])
+
+
+class FlagTest(unittest.TestCase):
+    def test_bull_flag(self):
+        t0 = datetime(2026, 9, 1, 9, 30, tzinfo=ET)
+        # 깃대 100 → 106 (2봉), 깃발 3봉 고점 105·104·104, 저점 103 (되돌림 3/6 = 0.5)
+        hl = [(101, 100), (103, 100.5), (106, 102.5), (105, 103.5), (104, 103), (104, 103.2), (104.5, 103.5)]
+        bars = [(t0 + timedelta(minutes=15 * i), 0, h, l, 0, 1.0) for i, (h, l) in enumerate(hl)]
+        p = Params(flag_pole_bars=3, flag_pole_pct=5, flag_min=3, flag_max=8, flag_retrace=0.5)
+        out = flag_setups(bars, p)
+        self.assertEqual(out[bars[6][0]], (105, 103, 6))
+        self.assertNotIn(bars[5][0], out)  # 깃발 2봉뿐
+        self.assertEqual(flag_setups(bars, Params(flag_pole_bars=3, flag_pole_pct=5, flag_min=3, flag_retrace=0.4)), {})
+        self.assertEqual(flag_setups(bars, Params(flag_pole_bars=3, flag_pole_pct=7, flag_min=3)), {})
 
 
 class DataTest(unittest.TestCase):

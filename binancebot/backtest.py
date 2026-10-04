@@ -106,6 +106,21 @@ class Params:
     swing_split: bool = True      # False = 1차 매수가에 한 번 매수(2차 없음), 고점2 절반 매도 없이 전량 매도가에 한 번 매도
     swing_source: str = "rth"     # 패턴을 찾는 봉: rth = 정규장 / all = 받아 둔 봉 전부
     swing_min_d: float = 0.0      # D 가 고점2 의 몇 % 이상일 때만
+    # flag: 상승 깃발형 — 깃대(pole_bars 봉 안에 +pole_pct%↑) 뒤 flag_min~flag_max 봉 동안 깃대 고점 아래에서 눌림
+    #       (깃대 상승폭의 max_retrace 이하), 깃발 고점(또는 깃대 고점)을 넘으면 역지정가 매수
+    flag_tf: int = 15
+    flag_pole_bars: int = 4       # 깃대: 고점 포함 직전 N봉 안의 최저가 → 고점
+    flag_pole_pct: float = 3.0    # 깃대 상승률 하한 %
+    flag_min: int = 2             # 깃발 봉 수 하한
+    flag_max: int = 8             # 깃발 봉 수 상한
+    flag_retrace: float = 0.5     # 깃발 저점이 깃대 상승폭의 몇 배 이상 되돌리면 무효
+    flag_entry: str = "flag"      # flag = 깃발 고점 돌파 / pole = 깃대 고점 돌파
+    flag_stop: str = "flag"       # flag = 깃발 저점 / mid = 깃발 저점과 진입가 가운데 / pct = 진입가 -stop_pct%
+    flag_target: float = 1.0      # 익절 = 진입가 + 깃대 길이 x 값 (0 = 없음, target_r 우선)
+    flag_target_r: float = 0.0    # 익절 = 위험의 R배 (0 이면 flag_target)
+    flag_vol: bool = False        # 깃발 평균 거래량 < 깃대 평균 거래량일 때만
+    flag_source: str = "rth"      # 패턴을 찾는 봉: rth / all
+    flag_entry_bar: str = "close"  # 돌파한 1분봉 안 손절 판단: close = 종가가 손절가 이하면 손절 / low = 저가만 닿아도 손절 (보수적)
     surge_entry: str = "stop"  # stop = 전날 종가에 역지정가 / next = 넘은 1분봉 다음 봉 시가 (보수적)
     rule: SizeRule = field(default_factory=SizeRule)
 
@@ -663,6 +678,99 @@ def swing_trades(symbol: str, mins: list[MinBar], p: Params) -> tuple[list[Trade
     return trades, stats
 
 
+def flag_setups(bars, p: Params) -> dict[datetime, tuple[float, float, float]]:
+    """i번째 tf 분봉이 끝난 뒤 깃발형이면 다음 봉 시각 → (돌파 가격, 깃발 저점, 깃대 길이).
+    bars: (시각, 시가, 고가, 저가, 종가, 거래량)"""
+    out = {}
+    hs, ls, vs = [b[2] for b in bars], [b[3] for b in bars], [b[5] for b in bars]
+    for i in range(p.flag_pole_bars - 1 + p.flag_min, len(bars) - 1):
+        lo_w = max(0, i - p.flag_max)
+        h = max(range(lo_w, i + 1), key=lambda j: (hs[j], j))  # 같은 값이면 나중 봉
+        m = i - h
+        if m < p.flag_min or h - p.flag_pole_bars + 1 < 0:
+            continue
+        top = hs[h]
+        if any(hs[j] >= top for j in range(h + 1, i + 1)):
+            continue
+        p0 = h - p.flag_pole_bars + 1
+        pole_low = min(ls[p0:h + 1])
+        pole = top - pole_low
+        if pole <= 0 or pole / pole_low * 100 < p.flag_pole_pct:
+            continue
+        flag_low = min(ls[h + 1:i + 1])
+        if (top - flag_low) > pole * p.flag_retrace:
+            continue
+        if p.flag_vol and sum(vs[h + 1:i + 1]) / m >= sum(vs[p0:h + 1]) / (h - p0 + 1):
+            continue
+        level = max(hs[h + 1:i + 1]) if p.flag_entry == "flag" else top
+        out[bars[i + 1][0]] = (level, flag_low, pole)
+    return out
+
+
+def flag_trades(symbol: str, mins: list[MinBar], p: Params) -> tuple[list[Trade], dict]:
+    """상승 깃발형 돌파 매수 (롱만). 직전 완성된 tf 분봉 기준 패턴이면 다음 tf 분 동안 1분봉으로 돌파·손절·익절 확인.
+    한 번에 한 포지션, 진입은 정규장 vwap_start~buy_until, exit_time 정리."""
+    slip = p.rule.slippage_pct / 100
+    tf = p.flag_tf
+    groups: dict[datetime, list[MinBar]] = {}
+    for b in mins:
+        if p.flag_source == "rth" and not is_rth(b.t):
+            continue
+        k = b.t.replace(minute=b.t.minute - b.t.minute % tf, second=0, microsecond=0)
+        groups.setdefault(k, []).append(b)
+    bars = [(k, g[0].o, max(x.h for x in g), min(x.l for x in g), g[-1].c, sum(x.v for x in g))
+            for k, g in sorted(groups.items())]
+    setups = flag_setups(bars, p)
+    stats = {"setups": len(setups), "entries": 0}
+    trades: list[Trade] = []
+    pos = None  # (진입 1분봉, 진입가, 손절, 익절)
+    for b in mins:
+        if not is_rth(b.t):
+            continue
+        d = b.t.date()
+        close_t = _close_t(d, p)
+        if pos:
+            eb, entry, stop, target = pos
+            reason = px = None
+            if b.t >= close_t or eb.t.date() != d:
+                reason, px = "time", b.o * (1 - slip)
+            elif b.l <= stop:
+                reason, px = "stop", min(b.o, stop) * (1 - slip)
+            elif target is not None and b.h >= target:
+                reason, px = "target", max(b.o, target)
+            if reason:
+                trades.append(Trade(symbol, eb.t.date(), 1, eb.t, entry, stop, b.t, px, reason,
+                                    fee_exit=p.maker_fee if reason == "target" else None))
+                pos = None
+            continue
+        if b.t.time() < p.vwap_start or b.t.time() >= p.buy_until or b.t >= close_t:
+            continue
+        k = b.t.replace(minute=b.t.minute - b.t.minute % tf, second=0, microsecond=0)
+        if k not in setups:
+            continue
+        level, flag_low, pole = setups[k]
+        if b.h < level:
+            continue
+        del setups[k]  # 신호 봉마다 한 번
+        entry = max(b.o, level) * (1 + slip)
+        stop = (flag_low if p.flag_stop == "flag" else (flag_low + entry) / 2 if p.flag_stop == "mid"
+                else entry * (1 - p.stop_pct / 100))
+        if stop >= entry:
+            continue
+        risk = entry - stop
+        target = (entry + risk * p.flag_target_r if p.flag_target_r > 0
+                  else entry + pole * p.flag_target if p.flag_target > 0 else None)
+        stats["entries"] += 1
+        if b.l <= stop and b.o >= level:  # 시가로 바로 진입했는데 같은 1분봉에서 손절가 → 보수적으로 손절
+            trades.append(Trade(symbol, d, 1, b.t, entry, stop, b.t, stop * (1 - slip), "stop"))
+            continue
+        if b.o < level and (b.c if p.flag_entry_bar == "close" else b.l) <= stop:  # 돌파한 1분봉 안에서 손절가 → 손절
+            trades.append(Trade(symbol, d, 1, b.t, entry, stop, b.t, stop * (1 - slip), "stop"))
+            continue
+        pos = (b, entry, stop, target)
+    return trades, stats
+
+
 def make_trade(sym: str, d: date, bars: list[Bar], p: Params, prev_close: float | None, prev_change: float | None) -> Trade | None:
     slip = p.rule.slippage_pct
     if p.strategy == "vwap":
@@ -695,6 +803,16 @@ def run(data_dir: Path, p: Params, symbols: list[str] | None = None, capital: fl
             if verbose:
                 print(f"{sym}: 패턴 {st['setups']}개, 확정 때 이미 1차 매수가 아래 {st['skipped_below']}, "
                       f"체결 전 고점 돌파 취소 {st['cancel_high']}, 1차 체결 {st['filled']}")
+            for t in tr:
+                if (start and t.day < start) or (end and t.day > end):
+                    continue
+                apply_funding(t, funding)
+                trades.append(t)
+            continue
+        if p.strategy == "flag":
+            tr, st = flag_trades(sym, load_minutes(f), p)
+            if verbose:
+                print(f"{sym}: 깃발형 신호 {st['setups']}개, 진입 {st['entries']}건")
             for t in tr:
                 if (start and t.day < start) or (end and t.day > end):
                     continue

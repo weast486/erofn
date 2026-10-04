@@ -137,6 +137,8 @@ class Params:
     f5_stop_pct: float = 2.0      # 매수가 대비 손절 % (닿으면)
     f5_tp1: float = 2.0           # 절반 익절 %
     f5_tp2: float = 5.0           # 나머지 익절 %
+    f5_tp_short: float = 0.0      # 숏 익절 % (0 = f5_tp1 과 같음)
+    f5_stop_short: float = 0.0    # 숏 손절 % (0 = f5_stop_pct 와 같음)
     f5_side: str = "long"         # long / short / both (숏 = 첫 봉 음봉, 저가 하향 돌파)
     f5_split: bool = True         # False = tp1 에서 전량 매도 (한 번 매도)
     surge_entry: str = "stop"  # stop = 전날 종가에 역지정가 / next = 넘은 1분봉 다음 봉 시가 (보수적)
@@ -884,8 +886,10 @@ def first5_trades(symbol: str, mins: list[MinBar], p: Params) -> tuple[list[Trad
             continue
         st["entries"] += 1
         s_ = side
-        stop_px = entry * (1 - s_ * p.f5_stop_pct / 100)
-        tp1, tp2 = entry * (1 + s_ * p.f5_tp1 / 100), entry * (1 + s_ * p.f5_tp2 / 100)
+        stop_pct = p.f5_stop_short if (s_ == -1 and p.f5_stop_short > 0) else p.f5_stop_pct
+        tp1_pct = p.f5_tp_short if (s_ == -1 and p.f5_tp_short > 0) else p.f5_tp1
+        stop_px = entry * (1 - s_ * stop_pct / 100)
+        tp1, tp2 = entry * (1 + s_ * tp1_pct / 100), entry * (1 + s_ * p.f5_tp2 / 100)
         risk = abs(entry - stop_px)
         eb = rest[entry_i]
         units = 1.0

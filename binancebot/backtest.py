@@ -137,6 +137,7 @@ class Params:
     f5_stop_pct: float = 2.0      # 매수가 대비 손절 % (닿으면)
     f5_tp1: float = 2.0           # 절반 익절 %
     f5_tp2: float = 5.0           # 나머지 익절 %
+    f5_side: str = "long"         # long / short / both (숏 = 첫 봉 음봉, 저가 하향 돌파)
     f5_split: bool = True         # False = tp1 에서 전량 매도 (한 번 매도)
     surge_entry: str = "stop"  # stop = 전날 종가에 역지정가 / next = 넘은 1분봉 다음 봉 시가 (보수적)
     size_mode: str = "risk"  # risk = 손절 금액 기준(위험 %) / lev = 평가금액 x 고정 배율
@@ -825,8 +826,15 @@ def first5_trades(symbol: str, mins: list[MinBar], p: Params) -> tuple[list[Trad
         if gap is None or not (p.f5_gap_min <= gap <= p.f5_gap_max):
             continue
         st["gap_ok"] += 1
-        if not (c1 > o1 and h1 > l1 and (c1 - o1) / (h1 - l1) >= p.f5_min_body):
+        if h1 <= l1:
             continue
+        side = 1 if c1 > o1 else -1
+        if (side == 1 and p.f5_side == "short") or (side == -1 and p.f5_side == "long"):
+            continue
+        if abs(c1 - o1) / (h1 - l1) < p.f5_min_body or c1 == o1:
+            continue
+        if side == -1 and p.f5_pattern != "A":
+            continue  # 숏은 돌파(A)만
         if p.f5_vol_mult > 0 and (avg_v is None or v1 < avg_v * p.f5_vol_mult):
             continue
         st["first_ok"] += 1
@@ -847,11 +855,12 @@ def first5_trades(symbol: str, mins: list[MinBar], p: Params) -> tuple[list[Trad
             if p.f5_pattern == "A":
                 if b.t.time() >= p.f5_breakout_until:
                     break
-                if p.f5_entry == "touch" and b.h >= h1:
-                    entry, entry_i = max(b.o, h1) * (1 + slip), i
+                lvl = h1 if side == 1 else l1
+                if p.f5_entry == "touch" and ((b.h >= lvl) if side == 1 else (b.l <= lvl)):
+                    entry, entry_i = (max(b.o, lvl) if side == 1 else min(b.o, lvl)) * (1 + side * slip), i
                     break
-                if p.f5_entry == "close" and is_last and b.c > h1:
-                    entry, entry_i = b.c * (1 + slip), i
+                if p.f5_entry == "close" and is_last and ((b.c > lvl) if side == 1 else (b.c < lvl)):
+                    entry, entry_i = b.c * (1 + side * slip), i
                     break
             else:
                 if b.t.time() >= p.f5_b_until:
@@ -874,40 +883,48 @@ def first5_trades(symbol: str, mins: list[MinBar], p: Params) -> tuple[list[Trad
         if entry is None:
             continue
         st["entries"] += 1
-        stop_px = entry * (1 - p.f5_stop_pct / 100)
-        tp1, tp2 = entry * (1 + p.f5_tp1 / 100), entry * (1 + p.f5_tp2 / 100)
-        risk = entry - stop_px
+        s_ = side
+        stop_px = entry * (1 - s_ * p.f5_stop_pct / 100)
+        tp1, tp2 = entry * (1 + s_ * p.f5_tp1 / 100), entry * (1 + s_ * p.f5_tp2 / 100)
+        risk = abs(entry - stop_px)
         eb = rest[entry_i]
         units = 1.0
         half_done = False
+
+        def piece(b, px, reason, frac, maker=False):
+            trades.append(Trade(symbol, d, s_, eb.t, entry, stop_px, b.t, px, reason,
+                                fee_exit=p.maker_fee if maker else None, size_risk=risk, size_frac=frac))
+
         for b in rest[entry_i + 1:]:
             k = b.t.replace(minute=b.t.minute - b.t.minute % 5)
             if b.t >= close_t:
-                trades.append(Trade(symbol, d, 1, eb.t, entry, stop_px, b.t, b.o * (1 - slip), "time", size_risk=risk, size_frac=units))
+                piece(b, b.o * (1 - s_ * slip), "time", units)
                 units = 0
                 break
-            if b.l <= stop_px:
-                trades.append(Trade(symbol, d, 1, eb.t, entry, stop_px, b.t, min(b.o, stop_px) * (1 - slip), "stop", size_risk=risk, size_frac=units))
+            if (b.l <= stop_px) if s_ == 1 else (b.h >= stop_px):
+                px = min(b.o, stop_px) if s_ == 1 else max(b.o, stop_px)
+                piece(b, px * (1 - s_ * slip), "stop", units)
                 units = 0
                 break
-            if not p.f5_split and b.h >= tp1:
-                trades.append(Trade(symbol, d, 1, eb.t, entry, stop_px, b.t, max(b.o, tp1), "target", fee_exit=p.maker_fee, size_risk=risk, size_frac=1.0))
+            hit1 = (b.h >= tp1) if s_ == 1 else (b.l <= tp1)
+            if not p.f5_split and hit1:
+                piece(b, max(b.o, tp1) if s_ == 1 else min(b.o, tp1), "target", 1.0, True)
                 units = 0
                 break
-            if not half_done and b.h >= tp1:
-                trades.append(Trade(symbol, d, 1, eb.t, entry, stop_px, b.t, max(b.o, tp1), "target", fee_exit=p.maker_fee, size_risk=risk, size_frac=0.5))
+            if not half_done and hit1:
+                piece(b, max(b.o, tp1) if s_ == 1 else min(b.o, tp1), "target", 0.5, True)
                 units, half_done = 0.5, True
-            if half_done and b.h >= tp2:
-                trades.append(Trade(symbol, d, 1, eb.t, entry, stop_px, b.t, max(b.o, tp2), "target", fee_exit=p.maker_fee, size_risk=risk, size_frac=units))
+            if half_done and ((b.h >= tp2) if s_ == 1 else (b.l <= tp2)):
+                piece(b, max(b.o, tp2) if s_ == 1 else min(b.o, tp2), "target", units, True)
                 units = 0
                 break
-            if b is five[k][-1] and b.c < l1:  # 5분봉 종가가 첫 봉 저가 아래
-                trades.append(Trade(symbol, d, 1, eb.t, entry, stop_px, b.t, b.c * (1 - slip), "stop", size_risk=risk, size_frac=units))
+            if b is five[k][-1] and ((b.c < l1) if s_ == 1 else (b.c > h1)):  # 5분봉 종가가 첫 봉 반대편 끝을 넘음
+                piece(b, b.c * (1 - s_ * slip), "stop", units)
                 units = 0
                 break
         if units > 0:
             last = bars[-1]
-            trades.append(Trade(symbol, d, 1, eb.t, entry, stop_px, last.t, last.c * (1 - slip), "time", size_risk=risk, size_frac=units))
+            piece(last, last.c * (1 - s_ * slip), "time", units)
     return trades, dict(st)
 
 

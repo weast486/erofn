@@ -169,6 +169,18 @@ class First5Test(unittest.TestCase):
         self.assertEqual([(t.reason, t.size_frac) for t in trades], [("target", 0.5), ("target", 0.5)])
         self.assertAlmostEqual(trades[0].entry, 101.5)
 
+    def test_short_mirror(self):
+        prev = self._mins(date(2026, 8, 31), [(100, 100, 100, 100)] * 5, start=time(15, 50))
+        first = [(100, 100.2, 99.5, 99.6), (99.6, 99.7, 99.0, 99.1), (99.1, 99.2, 99.0, 99.0), (99, 99.1, 99, 99), (99, 99.1, 99, 99)]
+        second = [(99, 99.1, 98.8, 98.9)] * 4 + [(98.9, 99.0, 98.4, 98.5)]   # 5분봉 종가 98.5 < 첫 봉 저가 99
+        after = [(98.5, 98.6, 96.4, 96.5)]                                     # -2% 전량 익절
+        mins = prev + self._mins(date(2026, 9, 1), first + second + after)
+        p = Params(strategy="first5", f5_entry="close", f5_side="short", f5_min_body=0.5, f5_stop_pct=2, f5_tp1=2,
+                   f5_split=False, exit_time=time(10, 0), rule=SizeRule(2, 5, 0, 0))
+        trades, st = first5_trades("X", mins, p)
+        self.assertEqual([(t.side, t.reason) for t in trades], [(-1, "target")])
+        self.assertAlmostEqual(trades[0].exit, 98.5 * 0.98)
+
 
 class DataTest(unittest.TestCase):
     def test_keep_bar_weekday_window(self):

@@ -137,6 +137,7 @@ class Params:
     f5_stop_pct: float = 2.0      # 매수가 대비 손절 % (닿으면)
     f5_tp1: float = 2.0           # 절반 익절 %
     f5_tp2: float = 5.0           # 나머지 익절 %
+    f5_split: bool = True         # False = tp1 에서 전량 매도 (한 번 매도)
     surge_entry: str = "stop"  # stop = 전날 종가에 역지정가 / next = 넘은 1분봉 다음 봉 시가 (보수적)
     size_mode: str = "risk"  # risk = 손절 금액 기준(위험 %) / lev = 평가금액 x 고정 배율
     lev_etf: float = 2.0     # size_mode=lev: 레버리지 ETF 배율
@@ -887,6 +888,10 @@ def first5_trades(symbol: str, mins: list[MinBar], p: Params) -> tuple[list[Trad
                 break
             if b.l <= stop_px:
                 trades.append(Trade(symbol, d, 1, eb.t, entry, stop_px, b.t, min(b.o, stop_px) * (1 - slip), "stop", size_risk=risk, size_frac=units))
+                units = 0
+                break
+            if not p.f5_split and b.h >= tp1:
+                trades.append(Trade(symbol, d, 1, eb.t, entry, stop_px, b.t, max(b.o, tp1), "target", fee_exit=p.maker_fee, size_risk=risk, size_frac=1.0))
                 units = 0
                 break
             if not half_done and b.h >= tp1:

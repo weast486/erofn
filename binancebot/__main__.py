@@ -79,6 +79,7 @@ def main() -> None:
     bt.add_argument("--f5-gap-max", type=float, default=100.0)
     bt.add_argument("--f5-stop-pct", type=float, default=2.0)
     bt.add_argument("--f5-tp1", type=float, default=2.0)
+    bt.add_argument("--f5-single", action="store_true", help="first5: f5-tp1 에서 전량 매도 (한 번 매도)")
     bt.add_argument("--f5-tp2", type=float, default=5.0)
     bt.add_argument("--size-mode", choices=["risk", "lev"], default="risk", help="risk = 손절 금액 기준 / lev = 고정 배율")
     bt.add_argument("--lev-etf", type=float, default=2.0, help="size-mode lev: 레버리지 ETF 배율")
@@ -116,7 +117,7 @@ def main() -> None:
                    f5_pattern=a.f5_pattern, f5_entry=a.f5_entry, f5_breakout_until=a.f5_breakout_until,
                    f5_b_support=a.f5_b_support, f5_b_until=a.f5_b_until, f5_min_body=a.f5_min_body,
                    f5_vol_mult=a.f5_vol_mult, f5_gap_min=a.f5_gap_min, f5_gap_max=a.f5_gap_max,
-                   f5_stop_pct=a.f5_stop_pct, f5_tp1=a.f5_tp1, f5_tp2=a.f5_tp2,
+                   f5_stop_pct=a.f5_stop_pct, f5_tp1=a.f5_tp1, f5_tp2=a.f5_tp2, f5_split=not a.f5_single,
                    swing_tf=a.swing_tf, swing_n=a.swing_n, swing_buy1=a.swing_buy1, swing_buy2=a.swing_buy2,
                    swing_tp2=a.swing_tp2, swing_split=not a.swing_single, swing_source=a.swing_source, swing_min_d=a.swing_min_d,
                    vwma_tf=a.vwma_tf, vwma_len=a.vwma_len, vwma_slope_bars=a.vwma_slope_bars,

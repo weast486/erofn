@@ -26,7 +26,7 @@ def main() -> None:
     bt.add_argument("--capital", type=float, default=1000.0, help="시작 금액 (USDT)")
     bt.add_argument("--start", type=date.fromisoformat)
     bt.add_argument("--end", type=date.fromisoformat)
-    bt.add_argument("--strategy", choices=["orb", "vwap", "surge", "vwma"], default="orb")
+    bt.add_argument("--strategy", choices=["orb", "vwap", "surge", "vwma", "swing"], default="orb")
     bt.add_argument("--vwap-dev", type=float, default=2.0, help="vwap: VWAP 에서 벗어난 %% 에 지정가 진입")
     bt.add_argument("--vwap-start", type=time.fromisoformat, default=time(10, 0), help="vwap·vwma: 이 시각부터 진입")
     bt.add_argument("--buy-until", type=time.fromisoformat, default=time(15, 0), help="vwap·surge: 진입 마감 (미국 동부)")
@@ -46,6 +46,13 @@ def main() -> None:
     bt.add_argument("--vwma-rsi-long-max", type=float, default=100.0, help="vwma: 롱은 직전 봉 RSI 이 값 이하 (숏은 100-값 이상)")
     bt.add_argument("--vwma-max-touch", type=int, default=0, help="vwma: VWMA 한쪽에 자리 잡은 뒤 N번째 닿음까지만 (0 = 제한 없음)")
     bt.add_argument("--vwma-target-r", type=float, default=0.0, help="vwma: 익절 = 위험의 R배")
+    bt.add_argument("--swing-tf", type=int, default=15, help="swing: 분봉 단위")
+    bt.add_argument("--swing-n", type=int, default=3, help="swing: 고점·저점 = 좌우 N봉 중 최고·최저")
+    bt.add_argument("--swing-buy1", type=float, default=0.5, help="swing: 1차 매수 = 저점2 + (고점2-저점2) x 값")
+    bt.add_argument("--swing-buy2", type=float, default=0.25, help="swing: 2차 매수")
+    bt.add_argument("--swing-tp2", type=float, default=0.5, help="swing: 전량 매도 = 고점2 + (고점2-저점2) x 값")
+    bt.add_argument("--swing-source", choices=["rth", "all"], default="rth")
+    bt.add_argument("--swing-min-d", type=float, default=0.0, help="swing: 고점2-저점2 가 고점2 의 %% 이상")
     bt.add_argument("--maker-fee", type=float, default=0.02, help="지정가 수수료 %%")
     bt.add_argument("--orb", type=int, default=15, help="시가 범위 분 (장 시작 뒤 N분)")
     bt.add_argument("--direction", choices=["both", "long", "short"], default="both")
@@ -75,6 +82,8 @@ def main() -> None:
                    strategy=a.strategy, vwap_dev=a.vwap_dev, vwap_start=a.vwap_start, buy_until=a.buy_until,
                    stop_pct=a.stop_pct, take_profit_pct=a.take_profit, surge_min_change=a.surge_min_change,
                    maker_fee=a.maker_fee, surge_entry=a.surge_entry,
+                   swing_tf=a.swing_tf, swing_n=a.swing_n, swing_buy1=a.swing_buy1, swing_buy2=a.swing_buy2,
+                   swing_tp2=a.swing_tp2, swing_source=a.swing_source, swing_min_d=a.swing_min_d,
                    vwma_tf=a.vwma_tf, vwma_len=a.vwma_len, vwma_slope_bars=a.vwma_slope_bars,
                    vwma_min_above=a.vwma_min_above, vwma_band=a.vwma_band, vwma_source=a.vwma_source,
                    vwma_stop_basis=a.vwma_stop_basis, vwma_target_r=a.vwma_target_r,

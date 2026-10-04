@@ -53,6 +53,8 @@ class Trade:
     funding: float = 0.0  # 1개당 펀딩 비용(가격 단위, +면 냄)
     fee_entry: float | None = None  # 진입 수수료 % (None = 테이커 rule.fee_pct, 지정가면 메이커)
     fee_exit: float | None = None
+    size_risk: float | None = None  # 수량 계산용 1단위당 위험(가격). None = |entry-stop|
+    size_frac: float = 1.0          # 그 수량의 몇 배 (분할 매수·매도 조각)
     qty: float = 0.0
     pnl: float = 0.0
     risk: float = 0.0
@@ -94,6 +96,14 @@ class Params:
     vwma_max_touch: int = 0    # 종가가 VWMA 를 넘어 한쪽에 자리 잡은 뒤 N번째 닿음까지만 진입 (0 = 제한 없음)
     vwma_rsi_long_min: float = 0.0    # 롱: 직전 봉 RSI 가 이 값 이상 (숏은 100-값 이하)
     vwma_rsi_long_max: float = 100.0  # 롱: 직전 봉 RSI 가 이 값 이하 (숏은 100-값 이상)
+    # swing: 저점1<저점2·고점1<고점2 (저1→고1→저2→고2) 뒤 되돌림 분할 매수
+    swing_tf: int = 15
+    swing_n: int = 3              # 고점·저점 = 좌우 N봉 중 최고·최저
+    swing_buy1: float = 0.5       # 1차 매수 = 저점2 + D x 값 (D = 고점2 - 저점2)
+    swing_buy2: float = 0.25      # 2차 매수 (3/4 지점 = 고점2 에서 3/4 내려온 곳)
+    swing_tp2: float = 0.5        # 전량 매도 = 고점2 + D x 값 (1차 매도는 고점2 에서 절반)
+    swing_source: str = "rth"     # 패턴을 찾는 봉: rth = 정규장 / all = 받아 둔 봉 전부
+    swing_min_d: float = 0.0      # D 가 고점2 의 몇 % 이상일 때만
     surge_entry: str = "stop"  # stop = 전날 종가에 역지정가 / next = 넘은 1분봉 다음 봉 시가 (보수적)
     rule: SizeRule = field(default_factory=SizeRule)
 
@@ -317,7 +327,16 @@ def simulate(trades: list[Trade], p: Params, capital: float, filters: dict[str, 
         if len(open_) >= p.max_positions:
             continue
         step, mn = filters.get(t.symbol, (0.0, 0.0))
-        qty = position_size(equity, t.entry, t.stop, rule, sum(x.entry * x.qty for x in open_), step, mn)
+        if t.size_risk:  # 분할 조각: 같은 셋업 전체가 손절되면 평가금액 x 위험% 를 잃도록
+            per = t.size_risk + t.entry * (2 * rule.fee_pct + rule.slippage_pct) / 100
+            q = equity * rule.risk_pct / 100 / per * t.size_frac
+            room = equity * rule.max_leverage - sum(x.entry * x.qty for x in open_)
+            q = min(q, max(room, 0.0) / t.entry)
+            qty = math.floor(q / step + 1e-9) * step if step > 0 else q
+            if qty * t.entry < mn:
+                qty = 0.0
+        else:
+            qty = position_size(equity, t.entry, t.stop, rule, sum(x.entry * x.qty for x in open_), step, mn)
         if qty <= 0:
             continue
         t.qty = qty
@@ -502,6 +521,143 @@ def vwma_trades(symbol: str, mins: list[MinBar], p: Params) -> list[Trade]:
     return trades
 
 
+
+def tf_bars(mins: list[MinBar], tf: int, source: str) -> list[tuple[datetime, float, float, float, float]]:
+    """1분봉 → tf 분봉 (시각, 시가, 고가, 저가, 종가). source=rth 면 정규장 봉만."""
+    groups: dict[datetime, list[MinBar]] = {}
+    for b in mins:
+        if source == "rth" and not is_rth(b.t):
+            continue
+        k = b.t.replace(minute=b.t.minute - b.t.minute % tf, second=0, microsecond=0)
+        groups.setdefault(k, []).append(b)
+    return [(k, g[0].o, max(x.h for x in g), min(x.l for x in g), g[-1].c) for k, g in sorted(groups.items())]
+
+
+def swing_setups(bars, n: int) -> list[tuple[datetime, float, float]]:
+    """상승 패턴 확정 시점 목록: (확정된 봉 다음 봉 시각, 저점2, 고점2).
+    피벗은 좌우 n봉 최고·최저, 오른쪽 n봉이 지나야 확정. 같은 종류가 이어지면 더 극단인 것만 남김."""
+    hs, ls = [b[2] for b in bars], [b[3] for b in bars]
+    piv = []  # (종류 'H'/'L', 값)
+    out = []
+    for c in range(2 * n, len(bars)):
+        i = c - n  # 이번 봉(c)이 끝나면 i 가 피벗인지 확정
+        new = []
+        if hs[i] >= max(hs[i - n:i]) and hs[i] > max(hs[i + 1:c + 1]):
+            new.append(("H", hs[i]))
+        if ls[i] <= min(ls[i - n:i]) and ls[i] < min(ls[i + 1:c + 1]):
+            new.append(("L", ls[i]))
+        for kind, v in new:
+            if piv and piv[-1][0] == kind:
+                if (kind == "H" and v > piv[-1][1]) or (kind == "L" and v < piv[-1][1]):
+                    piv[-1] = (kind, v)
+                else:
+                    continue
+            else:
+                piv.append((kind, v))
+            if kind == "H" and len(piv) >= 4:
+                (k1, l1), (k2, h1), (k3, l2), (k4, h2) = piv[-4:]
+                if (k1, k2, k3) == ("L", "H", "L") and l2 > l1 and h2 > h1 and c + 1 < len(bars):
+                    out.append((bars[c + 1][0], l2, h2, bars[c][4]))
+    return out
+
+
+def swing_trades(symbol: str, mins: list[MinBar], p: Params) -> tuple[list[Trade], dict]:
+    """상승 패턴 되돌림 분할 매수 (1분봉으로 체결 순서 확인). 반환: 거래 조각, 통계."""
+    slip = p.rule.slippage_pct / 100
+    bars = tf_bars(mins, p.swing_tf, p.swing_source)
+    setups = swing_setups(bars, p.swing_n)
+    stats = {"setups": len(setups), "skipped_below": 0, "cancel_high": 0, "cancel_low": 0, "filled": 0}
+    by_start: dict[datetime, tuple] = {}
+    for t0, l2, h2, close in setups:
+        by_start[t0] = (l2, h2, close)
+    trades: list[Trade] = []
+    setup = None   # dict
+    legs: list[list] = []  # [entry, 남은 단위, 진입 1분봉]
+    tp1_done = False
+
+    def close_legs(b, px, reason, fee_exit=None):
+        nonlocal legs
+        for e, u, eb in legs:
+            if u > 0:
+                trades.append(Trade(symbol, eb.t.date(), 1, eb.t, e, setup["l2"], b.t, px, reason,
+                                    fee_entry=p.maker_fee, fee_exit=fee_exit, size_risk=setup["risk"], size_frac=u))
+        legs = []
+
+    for b in mins:
+        k = b.t.replace(minute=b.t.minute - b.t.minute % p.swing_tf, second=0, microsecond=0)
+        if k in by_start and not legs:
+            l2, h2, close = by_start.pop(k)
+            d = h2 - l2
+            m1, m2 = l2 + d * p.swing_buy1, l2 + d * p.swing_buy2
+            if d <= 0 or d / h2 * 100 < p.swing_min_d:
+                pass
+            elif close <= m1:
+                stats["skipped_below"] += 1
+            else:
+                setup = {"l2": l2, "h2": h2, "m1": m1, "m2": m2, "t2": h2 + d * p.swing_tp2,
+                         "risk": (m1 - l2) + (m2 - l2), "f1": False, "f2": False}
+                tp1_done = False
+        if not is_rth(b.t):
+            continue
+        close_t = _close_t(b.t.date(), p)
+        if legs and (b.t >= close_t or legs[0][2].t.date() != b.t.date()):
+            close_legs(b, b.o * (1 - slip), "time")
+            setup = None
+            continue
+        if setup is None:
+            continue
+        if legs:
+            if b.l <= setup["l2"]:
+                close_legs(b, min(b.o, setup["l2"]) * (1 - slip), "stop")
+                setup = None
+                continue
+            if not tp1_done and b.h >= setup["h2"]:
+                tp1_done = True
+                total = sum(u for _, u, _ in legs)
+                sell = total / 2
+                px = max(b.o, setup["h2"])
+                rest = []
+                for e, u, eb in legs:  # 먼저 산 조각부터 판다
+                    q = min(u, sell)
+                    if q > 0:
+                        trades.append(Trade(symbol, eb.t.date(), 1, eb.t, e, setup["l2"], b.t, px, "target",
+                                            fee_entry=p.maker_fee, fee_exit=p.maker_fee, size_risk=setup["risk"], size_frac=q))
+                        sell -= q
+                    rest.append([e, u - q, eb])
+                legs = [x for x in rest if x[1] > 0]
+            if tp1_done and legs and b.h >= setup["t2"]:
+                close_legs(b, max(b.o, setup["t2"]), "target", fee_exit=p.maker_fee)
+                setup = None
+                continue
+            if tp1_done:
+                continue  # 1차 매도 뒤에는 추가 매수 안 함
+        # 진입 대기 / 추가 매수
+        if not legs and b.h > setup["h2"]:
+            stats["cancel_high"] += 1
+            setup = None
+            continue
+        if not legs and b.o <= setup["l2"]:  # 저점2 아래로 갭 → 패턴 깨짐
+            stats["cancel_low"] += 1
+            setup = None
+            continue
+        if b.t.time() < p.vwap_start or b.t.time() >= p.buy_until or b.t >= close_t:
+            continue
+        filled_now = False
+        if not setup["f1"] and b.l <= setup["m1"]:
+            setup["f1"] = True
+            legs.append([min(b.o, setup["m1"]), 1.0, b])
+            stats["filled"] += 1
+            filled_now = True
+        if setup["f1"] and not setup["f2"] and b.l <= setup["m2"]:
+            setup["f2"] = True
+            legs.append([min(b.o, setup["m2"]), 1.0, b])
+            filled_now = True
+        if filled_now and b.l <= setup["l2"]:  # 진입 1분봉 안에서 저점2 이탈 → 보수적으로 손절
+            close_legs(b, setup["l2"] * (1 - slip), "stop")
+            setup = None
+    return trades, stats
+
+
 def make_trade(sym: str, d: date, bars: list[Bar], p: Params, prev_close: float | None, prev_change: float | None) -> Trade | None:
     slip = p.rule.slippage_pct
     if p.strategy == "vwap":
@@ -529,6 +685,17 @@ def run(data_dir: Path, p: Params, symbols: list[str] | None = None, capital: fl
         sym = f.name.split("_")[0]
         filters[sym] = lot_filters(meta.get(sym, {}))
         funding = load_funding(data_dir / f"{sym}_funding.csv")
+        if p.strategy == "swing":
+            tr, st = swing_trades(sym, load_minutes(f), p)
+            if verbose:
+                print(f"{sym}: 패턴 {st['setups']}개, 확정 때 이미 1차 매수가 아래 {st['skipped_below']}, "
+                      f"체결 전 고점 돌파 취소 {st['cancel_high']}, 1차 체결 {st['filled']}")
+            for t in tr:
+                if (start and t.day < start) or (end and t.day > end):
+                    continue
+                apply_funding(t, funding)
+                trades.append(t)
+            continue
         if p.strategy == "vwma":
             for t in vwma_trades(sym, load_minutes(f), p):
                 if (start and t.day < start) or (end and t.day > end):

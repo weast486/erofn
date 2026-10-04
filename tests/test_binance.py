@@ -5,7 +5,7 @@ import unittest
 from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 
-from binancebot.backtest import ET, Bar, MinBar, Params, orb_trade, run, rsi_values, surge_trade, vwap_trade, vwma_trades
+from binancebot.backtest import ET, Bar, MinBar, Params, orb_trade, run, rsi_values, surge_trade, swing_setups, vwap_trade, vwma_trades
 from binancebot.data import keep_bar, tradfi_symbols
 from binancebot.sizing import SizeRule, position_size
 
@@ -124,6 +124,17 @@ class RsiTest(unittest.TestCase):
         r = rsi_values([10, 11, 10, 11, 10, 11], 2)
         self.assertIsNone(r[1])
         self.assertTrue(0 < r[5] < 100)
+
+
+class SwingTest(unittest.TestCase):
+    def test_higher_lows_highs(self):
+        t0 = datetime(2026, 9, 1, 9, 30, tzinfo=ET)
+        # 저 10 → 고 20 → 저 14 → 고 24 (n=1), 고점2 는 다음 봉이 끝나야 확정
+        hl = [(15, 12), (13, 10), (20, 15), (18, 14), (24, 18), (22, 19), (21, 18)]
+        bars = [(t0 + timedelta(minutes=15 * i), (h + l) / 2, h, l, (h + l) / 2) for i, (h, l) in enumerate(hl)]
+        out = swing_setups(bars, 1)
+        self.assertEqual([(o[1], o[2]) for o in out], [(14, 24)])
+        self.assertEqual(out[0][0], bars[6][0])
 
 
 class DataTest(unittest.TestCase):

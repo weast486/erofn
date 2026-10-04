@@ -103,6 +103,7 @@ class Params:
     swing_buy1: float = 0.5       # 1차 매수 = 저점2 + D x 값 (D = 고점2 - 저점2)
     swing_buy2: float = 0.25      # 2차 매수 (3/4 지점 = 고점2 에서 3/4 내려온 곳)
     swing_tp2: float = 0.5        # 전량 매도 = 고점2 + D x 값 (1차 매도는 고점2 에서 절반)
+    swing_split: bool = True      # False = 1차 매수가에 한 번 매수(2차 없음), 고점2 절반 매도 없이 전량 매도가에 한 번 매도
     swing_source: str = "rth"     # 패턴을 찾는 봉: rth = 정규장 / all = 받아 둔 봉 전부
     swing_min_d: float = 0.0      # D 가 고점2 의 몇 % 이상일 때만
     surge_entry: str = "stop"  # stop = 전날 종가에 역지정가 / next = 넘은 1분봉 다음 봉 시가 (보수적)
@@ -596,8 +597,9 @@ def swing_trades(symbol: str, mins: list[MinBar], p: Params) -> tuple[list[Trade
                 stats["skipped_below"] += 1
             else:
                 setup = {"l2": l2, "h2": h2, "m1": m1, "m2": m2, "t2": h2 + d * p.swing_tp2,
-                         "risk": (m1 - l2) + (m2 - l2), "f1": False, "f2": False}
-                tp1_done = False
+                         "risk": (m1 - l2) + (m2 - l2) if p.swing_split else (m1 - l2),
+                         "f1": False, "f2": not p.swing_split}
+                tp1_done = not p.swing_split
         if not is_rth(b.t):
             continue
         close_t = _close_t(b.t.date(), p)
@@ -630,8 +632,10 @@ def swing_trades(symbol: str, mins: list[MinBar], p: Params) -> tuple[list[Trade
                 close_legs(b, max(b.o, setup["t2"]), "target", fee_exit=p.maker_fee)
                 setup = None
                 continue
-            if tp1_done:
+            if tp1_done and p.swing_split:
                 continue  # 1차 매도 뒤에는 추가 매수 안 함
+            if not p.swing_split:
+                continue
         # 진입 대기 / 추가 매수
         if not legs and b.h > setup["h2"]:
             stats["cancel_high"] += 1

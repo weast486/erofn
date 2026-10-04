@@ -51,6 +51,7 @@ def main() -> None:
     bt.add_argument("--swing-buy1", type=float, default=0.5, help="swing: 1차 매수 = 저점2 + (고점2-저점2) x 값")
     bt.add_argument("--swing-buy2", type=float, default=0.25, help="swing: 2차 매수")
     bt.add_argument("--swing-tp2", type=float, default=0.5, help="swing: 전량 매도 = 고점2 + (고점2-저점2) x 값")
+    bt.add_argument("--swing-single", action="store_true", help="swing: 1차 매수가 한 번 매수, 전량 매도가 한 번 매도")
     bt.add_argument("--swing-source", choices=["rth", "all"], default="rth")
     bt.add_argument("--swing-min-d", type=float, default=0.0, help="swing: 고점2-저점2 가 고점2 의 %% 이상")
     bt.add_argument("--maker-fee", type=float, default=0.02, help="지정가 수수료 %%")
@@ -83,7 +84,7 @@ def main() -> None:
                    stop_pct=a.stop_pct, take_profit_pct=a.take_profit, surge_min_change=a.surge_min_change,
                    maker_fee=a.maker_fee, surge_entry=a.surge_entry,
                    swing_tf=a.swing_tf, swing_n=a.swing_n, swing_buy1=a.swing_buy1, swing_buy2=a.swing_buy2,
-                   swing_tp2=a.swing_tp2, swing_source=a.swing_source, swing_min_d=a.swing_min_d,
+                   swing_tp2=a.swing_tp2, swing_split=not a.swing_single, swing_source=a.swing_source, swing_min_d=a.swing_min_d,
                    vwma_tf=a.vwma_tf, vwma_len=a.vwma_len, vwma_slope_bars=a.vwma_slope_bars,
                    vwma_min_above=a.vwma_min_above, vwma_band=a.vwma_band, vwma_source=a.vwma_source,
                    vwma_stop_basis=a.vwma_stop_basis, vwma_target_r=a.vwma_target_r,

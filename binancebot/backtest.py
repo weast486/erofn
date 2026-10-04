@@ -26,6 +26,9 @@ ET = ZoneInfo("America/New_York")
 UTC = timezone.utc
 # 미국 증시 휴장일 (선물은 열려도 기초 주식이 안 움직이므로 거래 안 함)
 US_HOLIDAYS = {date(2026, m, d) for m, d in [(1, 1), (1, 19), (2, 16), (4, 3), (5, 25), (6, 19), (7, 3), (9, 7), (11, 26), (12, 25)]}
+# 2·3배(인버스 포함) 레버리지 ETF (고정 배율 진입 때 구분). SKDD·STXX 는 확인 못 해 보수적으로 포함
+LEVERAGED_ETFS = {"SOXL", "SOXS", "TQQQ", "SQQQ", "NVDL", "TSLL", "MUU", "MVLL", "SNXX", "SKUU", "SKDD", "STXX",
+                  "KORU", "TMF", "TZA", "TBT", "UVXY"}
 US_EARLY_CLOSE = {date(2025, 7, 3), date(2025, 11, 28), date(2025, 12, 24),
                   date(2026, 11, 27), date(2026, 12, 24)}  # 13:00 마감
 
@@ -135,6 +138,9 @@ class Params:
     f5_tp1: float = 2.0           # 절반 익절 %
     f5_tp2: float = 5.0           # 나머지 익절 %
     surge_entry: str = "stop"  # stop = 전날 종가에 역지정가 / next = 넘은 1분봉 다음 봉 시가 (보수적)
+    size_mode: str = "risk"  # risk = 손절 금액 기준(위험 %) / lev = 평가금액 x 고정 배율
+    lev_etf: float = 2.0     # size_mode=lev: 레버리지 ETF 배율
+    lev_stock: float = 5.0   # size_mode=lev: 일반 주식·1배 ETF 배율
     rule: SizeRule = field(default_factory=SizeRule)
 
 
@@ -357,7 +363,15 @@ def simulate(trades: list[Trade], p: Params, capital: float, filters: dict[str, 
         if len(open_) >= p.max_positions:
             continue
         step, mn = filters.get(t.symbol, (0.0, 0.0))
-        if t.size_risk:  # 분할 조각: 같은 셋업 전체가 손절되면 평가금액 x 위험% 를 잃도록
+        if p.size_mode == "lev":
+            base = t.symbol[:-4] if t.symbol.endswith("USDT") else t.symbol
+            lev = p.lev_etf if base in LEVERAGED_ETFS else p.lev_stock
+            room = equity * rule.max_leverage - sum(x.entry * x.qty for x in open_)
+            q = min(equity * lev * t.size_frac, max(room, 0.0)) / t.entry
+            qty = math.floor(q / step + 1e-9) * step if step > 0 else q
+            if qty * t.entry < mn:
+                qty = 0.0
+        elif t.size_risk:  # 분할 조각: 같은 셋업 전체가 손절되면 평가금액 x 위험% 를 잃도록
             per = t.size_risk + t.entry * (2 * rule.fee_pct + rule.slippage_pct) / 100
             q = equity * rule.risk_pct / 100 / per * t.size_frac
             room = equity * rule.max_leverage - sum(x.entry * x.qty for x in open_)

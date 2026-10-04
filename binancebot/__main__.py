@@ -80,6 +80,9 @@ def main() -> None:
     bt.add_argument("--f5-stop-pct", type=float, default=2.0)
     bt.add_argument("--f5-tp1", type=float, default=2.0)
     bt.add_argument("--f5-tp2", type=float, default=5.0)
+    bt.add_argument("--size-mode", choices=["risk", "lev"], default="risk", help="risk = 손절 금액 기준 / lev = 고정 배율")
+    bt.add_argument("--lev-etf", type=float, default=2.0, help="size-mode lev: 레버리지 ETF 배율")
+    bt.add_argument("--lev-stock", type=float, default=5.0, help="size-mode lev: 일반 주식 배율")
     bt.add_argument("--maker-fee", type=float, default=0.02, help="지정가 수수료 %%")
     bt.add_argument("--orb", type=int, default=15, help="시가 범위 분 (장 시작 뒤 N분)")
     bt.add_argument("--direction", choices=["both", "long", "short"], default="both")
@@ -109,6 +112,7 @@ def main() -> None:
                    strategy=a.strategy, vwap_dev=a.vwap_dev, vwap_start=a.vwap_start, buy_until=a.buy_until,
                    stop_pct=a.stop_pct, take_profit_pct=a.take_profit, surge_min_change=a.surge_min_change,
                    maker_fee=a.maker_fee, surge_entry=a.surge_entry,
+                   size_mode=a.size_mode, lev_etf=a.lev_etf, lev_stock=a.lev_stock,
                    f5_pattern=a.f5_pattern, f5_entry=a.f5_entry, f5_breakout_until=a.f5_breakout_until,
                    f5_b_support=a.f5_b_support, f5_b_until=a.f5_b_until, f5_min_body=a.f5_min_body,
                    f5_vol_mult=a.f5_vol_mult, f5_gap_min=a.f5_gap_min, f5_gap_max=a.f5_gap_max,

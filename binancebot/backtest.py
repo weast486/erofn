@@ -141,6 +141,18 @@ class Params:
     f5_stop_short: float = 0.0    # 숏 손절 % (0 = f5_stop_pct 와 같음)
     f5_side: str = "long"         # long / short / both (숏 = 첫 봉 음봉, 저가 하향 돌파)
     f5_split: bool = True         # False = tp1 에서 전량 매도 (한 번 매도)
+    # vbreak: VWMA 상승 추세(빠른선 > 중간선 > VWMA, VWMA 상승) 중 종가가 VWMA 를 하향 돌파하고 N봉 동안 회복 못 하면
+    #         VWMA 에 지정가 숏 (손절 = 돌파 봉 고가, 익절 = 손절 거리 x R). 롱은 반대로
+    vb_tf: int = 15
+    vb_len: int = 100           # VWMA 길이
+    vb_fast: int = 20           # 정배열 확인용 빠른선
+    vb_mid: int = 50            # 중간선
+    vb_ma: str = "sma"          # 빠른선·중간선 종류: sma / vwma
+    vb_wait: int = 3            # 돌파 봉 뒤 이 봉 수 동안 종가가 VWMA 아래면 지정가 주문
+    vb_target_r: float = 2.0    # 익절 = 손절 거리 x 값 (0 = 정리 시각까지)
+    vb_source: str = "rth"      # 이평선 계산 봉: rth = 정규장 / all = 받아 둔 봉 전부
+    vb_side: str = "short"      # short / long (반대: 하락 역배열 중 상향 돌파 → VWMA 지정가 롱) / both
+    vb_expire: int = 0          # 주문을 낸 뒤 이 봉 수 안에 체결 안 되면 취소 (0 = 회복·당일 끝까지)
     surge_entry: str = "stop"  # stop = 전날 종가에 역지정가 / next = 넘은 1분봉 다음 봉 시가 (보수적)
     size_mode: str = "risk"  # risk = 손절 금액 기준(위험 %) / lev = 평가금액 x 고정 배율
     lev_etf: float = 2.0     # size_mode=lev: 레버리지 ETF 배율
@@ -802,6 +814,128 @@ def flag_trades(symbol: str, mins: list[MinBar], p: Params) -> tuple[list[Trade]
     return trades, stats
 
 
+def vbreak_setups(bars, p: Params) -> dict[datetime, tuple[int, float, float, int]]:
+    """tf 분봉 [(시각, 시가, 고가, 저가, 종가, 거래량)] → {봉 시각: (방향, 지정가, 손절가, 셋업 번호)}.
+    그 봉 동안 걸어 둘 주문 (직전 완성 봉까지의 값으로 계산)."""
+    c = [b[4] for b in bars]
+    v = [b[5] for b in bars]
+
+    def ma(n: int, weighted: bool) -> list[float | None]:
+        out: list[float | None] = [None] * len(c)
+        sp = sv = 0.0
+        for i in range(len(c)):
+            w = v[i] if weighted else 1.0
+            sp += c[i] * w
+            sv += w
+            if i >= n:
+                wo = v[i - n] if weighted else 1.0
+                sp -= c[i - n] * wo
+                sv -= wo
+            if i >= n - 1 and sv > 0:
+                out[i] = sp / sv
+        return out
+    vw = ma(p.vb_len, True)
+    fast = ma(p.vb_fast, p.vb_ma == "vwma")
+    mid = ma(p.vb_mid, p.vb_ma == "vwma")
+    sides = [s for s in (-1, 1) if p.vb_side == "both" or (s == -1) == (p.vb_side == "short")]
+    out: dict[datetime, tuple[int, float, float, int]] = {}
+    active: list[list] = []  # [방향, 돌파 봉 번호, 손절가, 주문 낸 봉 번호 or None, 셋업 번호]
+    sid = 0
+    for i in range(1, len(bars)):
+        if vw[i] is None or vw[i - 1] is None:
+            continue
+        keep = []
+        for st in active:
+            s, j, stop, start, k = st
+            if (c[i] > vw[i]) if s == -1 else (c[i] < vw[i]):  # 회복 → 취소
+                continue
+            if start is None and i - j >= p.vb_wait:
+                st[3] = start = i
+            if start is not None and p.vb_expire and i - start >= p.vb_expire:
+                continue
+            keep.append(st)
+        active = keep
+        for s in sides:
+            if fast[i - 1] is None or mid[i - 1] is None or vw[i - 2 if i >= 2 else 0] is None:
+                continue
+            if s == -1:
+                trend = fast[i - 1] > mid[i - 1] > vw[i - 1] and vw[i - 1] > vw[i - 2]
+                cross = c[i - 1] >= vw[i - 1] and c[i] < vw[i]
+                stop = bars[i][2]
+            else:
+                trend = fast[i - 1] < mid[i - 1] < vw[i - 1] and vw[i - 1] < vw[i - 2]
+                cross = c[i - 1] <= vw[i - 1] and c[i] > vw[i]
+                stop = bars[i][3]
+            if trend and cross:
+                sid += 1
+                active.append([s, i, stop, i if p.vb_wait == 0 else None, sid])
+        if i + 1 < len(bars):
+            for s, j, stop, start, k in active:
+                if start is not None and ((vw[i] < stop) if s == -1 else (vw[i] > stop)):
+                    out.setdefault(bars[i + 1][0], (s, vw[i], stop, k))  # 같은 봉에 여러 셋업이면 먼저 것
+    return out
+
+
+def vbreak_trades(symbol: str, mins: list[MinBar], p: Params) -> tuple[list[Trade], dict]:
+    """VWMA 하향 돌파 뒤 회복 실패 → VWMA 되돌림 지정가 숏 (1분봉으로 체결·손절·익절 확인).
+    진입은 정규장 vwap_start~buy_until, exit_time 정리, 한 번에 한 포지션, 셋업마다 한 번."""
+    slip = p.rule.slippage_pct / 100
+    tf = p.vb_tf
+    groups: dict[datetime, list[MinBar]] = {}
+    for b in mins:
+        if p.vb_source == "rth" and not is_rth(b.t):
+            continue
+        k = b.t.replace(minute=b.t.minute - b.t.minute % tf, second=0, microsecond=0)
+        groups.setdefault(k, []).append(b)
+    bars = [(k, g[0].o, max(x.h for x in g), min(x.l for x in g), g[-1].c, sum(x.v for x in g))
+            for k, g in sorted(groups.items())]
+    orders = vbreak_setups(bars, p)
+    stats = {"setups": len({o[3] for o in orders.values()}), "entries": 0}
+    trades: list[Trade] = []
+    used: set[int] = set()
+    pos = None  # (방향, 진입 1분봉, 진입가, 손절, 익절)
+    for b in mins:
+        if not is_rth(b.t):
+            continue
+        d = b.t.date()
+        close_t = _close_t(d, p)
+        if pos:
+            side, eb, entry, stop, target = pos
+            reason = px = None
+            if b.t >= close_t or eb.t.date() != d:
+                reason, px = "time", b.o * (1 - side * slip)
+            elif (b.l <= stop) if side == 1 else (b.h >= stop):
+                reason = "stop"
+                px = (min(b.o, stop) if side == 1 else max(b.o, stop)) * (1 - side * slip)
+            elif target is not None and ((b.h >= target) if side == 1 else (b.l <= target)):
+                reason, px = "target", (max(b.o, target) if side == 1 else min(b.o, target))
+            if reason:
+                trades.append(Trade(symbol, eb.t.date(), side, eb.t, entry, stop, b.t, px, reason, fee_entry=p.maker_fee,
+                                    fee_exit=p.maker_fee if reason == "target" else None))
+                pos = None
+            continue
+        if b.t.time() < p.vwap_start or b.t.time() >= p.buy_until or b.t >= close_t:
+            continue
+        k = b.t.replace(minute=b.t.minute - b.t.minute % tf, second=0, microsecond=0)
+        if k not in orders:
+            continue
+        side, lvl, stop, sid = orders[k]
+        if sid in used or not ((b.h >= lvl) if side == -1 else (b.l <= lvl)):
+            continue
+        used.add(sid)
+        entry = max(b.o, lvl) if side == -1 else min(b.o, lvl)
+        if (stop <= entry) if side == -1 else (stop >= entry):  # 시가가 손절가를 넘어 갭 → 거래 안 함
+            continue
+        stats["entries"] += 1
+        risk = abs(entry - stop)
+        target = entry + side * risk * p.vb_target_r if p.vb_target_r > 0 else None
+        if (b.h >= stop) if side == -1 else (b.l <= stop):  # 진입 1분봉 안에서 손절가 → 보수적으로 손절
+            trades.append(Trade(symbol, d, side, b.t, entry, stop, b.t, stop * (1 - side * slip), "stop", fee_entry=p.maker_fee))
+            continue
+        pos = (side, b, entry, stop, target)
+    return trades, stats
+
+
 
 def first5_trades(symbol: str, mins: list[MinBar], p: Params) -> tuple[list[Trade], dict]:
     """첫 5분봉 돌파·눌림 매수. 손절 = 5분봉 종가가 첫 봉 저가 아래 or 매수가 -f5_stop_pct% 닿음, 익절 절반 tp1·나머지 tp2."""
@@ -984,6 +1118,16 @@ def run(data_dir: Path, p: Params, symbols: list[str] | None = None, capital: fl
             tr, st = flag_trades(sym, load_minutes(f), p)
             if verbose:
                 print(f"{sym}: 깃발형 신호 {st['setups']}개, 진입 {st['entries']}건")
+            for t in tr:
+                if (start and t.day < start) or (end and t.day > end):
+                    continue
+                apply_funding(t, funding)
+                trades.append(t)
+            continue
+        if p.strategy == "vbreak":
+            tr, st = vbreak_trades(sym, load_minutes(f), p)
+            if verbose:
+                print(f"{sym}: 셋업 {st['setups']}개, 진입 {st['entries']}건")
             for t in tr:
                 if (start and t.day < start) or (end and t.day > end):
                     continue

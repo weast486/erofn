@@ -5,7 +5,7 @@ import unittest
 from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 
-from binancebot.backtest import ET, Bar, MinBar, Params, flag_setups, orb_trade, run, first5_trades, rsi_values, surge_trade, swing_setups, vwap_trade, vwma_trades
+from binancebot.backtest import ET, Bar, MinBar, Params, flag_setups, orb_trade, run, first5_trades, rsi_values, vbreak_setups, surge_trade, swing_setups, vwap_trade, vwma_trades
 from binancebot.data import keep_bar, tradfi_symbols
 from binancebot.sizing import SizeRule, position_size
 
@@ -149,6 +149,22 @@ class FlagTest(unittest.TestCase):
         self.assertNotIn(bars[5][0], out)  # 깃발 2봉뿐
         self.assertEqual(flag_setups(bars, Params(flag_pole_bars=3, flag_pole_pct=5, flag_min=3, flag_retrace=0.4)), {})
         self.assertEqual(flag_setups(bars, Params(flag_pole_bars=3, flag_pole_pct=7, flag_min=3)), {})
+
+
+class VbreakTest(unittest.TestCase):
+    def test_short_after_failed_recovery(self):
+        t0 = datetime(2026, 9, 1, 9, 30, tzinfo=ET)
+        closes = [10, 11, 12, 13, 14, 15, 16, 13.5, 13.4, 13.3, 13.2, 13.2]
+        bars = [(t0 + timedelta(minutes=15 * i), c, c + 0.1, c - 0.1, c, 1.0) for i, c in enumerate(closes)]
+        bars[7] = (bars[7][0], 16, 16.2, 13.4, 13.5, 1.0)  # 하향 돌파 봉, 고가 16.2 = 손절
+        p = Params(vb_len=4, vb_fast=2, vb_mid=3, vb_wait=3)
+        out = vbreak_setups(bars, p)
+        self.assertNotIn(bars[10][0], out)  # 3봉이 다 지나기 전
+        side, lvl, stop, _ = out[bars[11][0]]
+        self.assertEqual((side, stop), (-1, 16.2))
+        self.assertAlmostEqual(lvl, (13.5 + 13.4 + 13.3 + 13.2) / 4)
+        bars[9] = (bars[9][0], 13.3, 15, 13.2, 14.9, 1.0)  # 회복 → 취소
+        self.assertEqual(vbreak_setups(bars, p), {})
 
 
 class First5Test(unittest.TestCase):

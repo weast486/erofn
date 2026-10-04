@@ -5,7 +5,7 @@ import unittest
 from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 
-from binancebot.backtest import ET, Bar, MinBar, Params, flag_setups, orb_trade, run, first5_trades, rsi_values, vbreak_setups, surge_trade, swing_setups, vwap_trade, vwma_trades
+from binancebot.backtest import ET, Bar, MinBar, Params, flag_setups, orb_trade, run, first5_trades, rsi_values, rsi_trades, vbreak_setups, surge_trade, swing_setups, vwap_trade, vwma_trades
 from binancebot.data import keep_bar, tradfi_symbols
 from binancebot.sizing import SizeRule, position_size
 
@@ -165,6 +165,20 @@ class VbreakTest(unittest.TestCase):
         self.assertAlmostEqual(lvl, (13.5 + 13.4 + 13.3 + 13.2) / 4)
         bars[9] = (bars[9][0], 13.3, 15, 13.2, 14.9, 1.0)  # 회복 → 취소
         self.assertEqual(vbreak_setups(bars, p), {})
+
+
+class RsiIntradayTest(unittest.TestCase):
+    def test_buy_oversold_sell_on_recovery(self):
+        t0 = datetime(2026, 9, 1, 9, 30, tzinfo=ET)
+        closes = [100 - i for i in range(10)] + [91 + 2 * i for i in range(10)]  # 계속 내리다 반등
+        mins = [MinBar(t0 + timedelta(minutes=i), c, c + 0.1, c - 0.1, c, 1.0) for i, c in enumerate(closes)]
+        p = Params(strategy="rsi", rsi_tf=1, rsi_period=3, rsi_buy=30, rsi_sell=50, stop_pct=0,
+                   vwap_start=time(9, 30), rule=SizeRule(2, 5, 0, 0))
+        trades, st = rsi_trades("X", mins, p)
+        self.assertEqual(trades[0].side, 1)
+        self.assertEqual(trades[0].reason, "signal")
+        self.assertEqual(trades[0].entry_t, t0 + timedelta(minutes=4))  # 3번째 하락 뒤(RSI 0) 다음 봉 시가
+        self.assertGreater(trades[0].exit, trades[0].entry - 5)
 
 
 class First5Test(unittest.TestCase):

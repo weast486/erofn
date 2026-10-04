@@ -153,6 +153,14 @@ class Params:
     vb_source: str = "rth"      # 이평선 계산 봉: rth = 정규장 / all = 받아 둔 봉 전부
     vb_side: str = "short"      # short / long (반대: 하락 역배열 중 상향 돌파 → VWMA 지정가 롱) / both
     vb_expire: int = 0          # 주문을 낸 뒤 이 봉 수 안에 체결 안 되면 취소 (0 = 회복·당일 끝까지)
+    # rsi: 장중 RSI 평균회귀 — 완성된 tf 분봉 RSI 가 buy 아래면 다음 봉 시가 매수, sell 이상이면 다음 봉 시가 매도
+    #      (숏은 100-buy 위에서 매도 → 100-sell 이하에서 환매), stop_pct 손절·take_profit_pct 익절(0 = 없음), exit_time 정리
+    rsi_tf: int = 5
+    rsi_period: int = 14
+    rsi_buy: float = 30.0
+    rsi_sell: float = 50.0
+    rsi_source: str = "rth"     # RSI 계산 봉: rth = 정규장 / all = 받아 둔 봉 전부
+    rsi_side: str = "long"      # long / short / both
     surge_entry: str = "stop"  # stop = 전날 종가에 역지정가 / next = 넘은 1분봉 다음 봉 시가 (보수적)
     size_mode: str = "risk"  # risk = 손절 금액 기준(위험 %) / lev = 평가금액 x 고정 배율
     lev_etf: float = 2.0     # size_mode=lev: 레버리지 ETF 배율
@@ -937,6 +945,72 @@ def vbreak_trades(symbol: str, mins: list[MinBar], p: Params) -> tuple[list[Trad
 
 
 
+def rsi_trades(symbol: str, mins: list[MinBar], p: Params) -> tuple[list[Trade], dict]:
+    """장중 RSI 평균회귀 (1분봉으로 손절·익절 확인). 신호는 완성된 tf 분봉 종가 RSI, 진입·청산은 다음 tf 봉 첫 1분봉 시가(테이커).
+    진입은 정규장 vwap_start~buy_until, 한 번에 한 포지션, exit_time 정리."""
+    slip = p.rule.slippage_pct / 100
+    bars = tf_bars(mins, p.rsi_tf, p.rsi_source)
+    rsi = rsi_values([b[4] for b in bars], p.rsi_period)
+    sides = [s for s in (1, -1) if p.rsi_side == "both" or (s == 1) == (p.rsi_side == "long")]
+    enter_at: dict[datetime, int] = {}   # tf 봉 시각 → 그 봉 시작에 진입할 방향
+    exit_at: dict[datetime, set[int]] = {}  # tf 봉 시각 → 그 봉 시작에 청산할 방향
+    for i in range(len(bars) - 1):
+        r = rsi[i]
+        if r is None:
+            continue
+        nxt = bars[i + 1][0]
+        for s in sides:
+            lo = p.rsi_buy if s == 1 else 100 - p.rsi_buy
+            hi = p.rsi_sell if s == 1 else 100 - p.rsi_sell
+            if (r < lo) if s == 1 else (r > lo):
+                enter_at.setdefault(nxt, s)
+            if (r >= hi) if s == 1 else (r <= hi):
+                exit_at.setdefault(nxt, set()).add(s)
+    stats = {"signals": len(enter_at), "entries": 0}
+    trades: list[Trade] = []
+    pos = None  # (방향, 진입 1분봉, 진입가, 손절, 익절)
+    tf = p.rsi_tf
+    for b in mins:
+        if not is_rth(b.t):
+            continue
+        d = b.t.date()
+        close_t = _close_t(d, p)
+        k = b.t.replace(minute=b.t.minute - b.t.minute % tf, second=0, microsecond=0)
+        first = b.t == k  # tf 봉의 첫 1분봉
+        if pos:
+            side, eb, entry, stop, target = pos
+            reason = px = None
+            if b.t >= close_t or eb.t.date() != d:
+                reason, px = "time", b.o * (1 - side * slip)
+            elif first and b.t != eb.t and side in exit_at.get(k, ()):
+                reason, px = "signal", b.o * (1 - side * slip)
+            elif stop is not None and ((b.l <= stop) if side == 1 else (b.h >= stop)):
+                reason = "stop"
+                px = (min(b.o, stop) if side == 1 else max(b.o, stop)) * (1 - side * slip)
+            elif target is not None and ((b.h >= target) if side == 1 else (b.l <= target)):
+                reason, px = "target", (max(b.o, target) if side == 1 else min(b.o, target))
+            if reason:
+                trades.append(Trade(symbol, eb.t.date(), side, eb.t, entry, stop if stop is not None else entry * (1 - side * 0.05),
+                                    b.t, px, reason, fee_exit=p.maker_fee if reason == "target" else None))
+                pos = None
+            else:
+                continue
+        if not first or k not in enter_at:
+            continue
+        if b.t.time() < p.vwap_start or b.t.time() >= p.buy_until or b.t >= close_t:
+            continue
+        side = enter_at[k]
+        entry = b.o * (1 + side * slip)
+        stop = entry * (1 - side * p.stop_pct / 100) if p.stop_pct > 0 else None
+        target = entry * (1 + side * p.take_profit_pct / 100) if p.take_profit_pct > 0 else None
+        stats["entries"] += 1
+        if stop is not None and ((b.l <= stop) if side == 1 else (b.h >= stop)):  # 진입 1분봉 안 손절 → 보수적으로 손절
+            trades.append(Trade(symbol, d, side, b.t, entry, stop, b.t, stop * (1 - side * slip), "stop"))
+            continue
+        pos = (side, b, entry, stop, target)
+    return trades, stats
+
+
 def first5_trades(symbol: str, mins: list[MinBar], p: Params) -> tuple[list[Trade], dict]:
     """첫 5분봉 돌파·눌림 매수. 손절 = 5분봉 종가가 첫 봉 저가 아래 or 매수가 -f5_stop_pct% 닿음, 익절 절반 tp1·나머지 tp2."""
     slip = p.rule.slippage_pct / 100
@@ -1118,6 +1192,16 @@ def run(data_dir: Path, p: Params, symbols: list[str] | None = None, capital: fl
             tr, st = flag_trades(sym, load_minutes(f), p)
             if verbose:
                 print(f"{sym}: 깃발형 신호 {st['setups']}개, 진입 {st['entries']}건")
+            for t in tr:
+                if (start and t.day < start) or (end and t.day > end):
+                    continue
+                apply_funding(t, funding)
+                trades.append(t)
+            continue
+        if p.strategy == "rsi":
+            tr, st = rsi_trades(sym, load_minutes(f), p)
+            if verbose:
+                print(f"{sym}: 신호 {st['signals']}개, 진입 {st['entries']}건")
             for t in tr:
                 if (start and t.day < start) or (end and t.day > end):
                     continue

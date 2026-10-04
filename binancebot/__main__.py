@@ -27,7 +27,7 @@ def main() -> None:
     bt.add_argument("--capital", type=float, default=1000.0, help="시작 금액 (USDT)")
     bt.add_argument("--start", type=date.fromisoformat)
     bt.add_argument("--end", type=date.fromisoformat)
-    bt.add_argument("--strategy", choices=["orb", "vwap", "surge", "vwma", "swing", "flag", "first5", "vbreak"], default="orb")
+    bt.add_argument("--strategy", choices=["orb", "vwap", "surge", "vwma", "swing", "flag", "first5", "vbreak", "rsi"], default="orb")
     bt.add_argument("--vwap-dev", type=float, default=2.0, help="vwap: VWAP 에서 벗어난 %% 에 지정가 진입")
     bt.add_argument("--vwap-start", type=time.fromisoformat, default=time(10, 0), help="vwap·vwma: 이 시각부터 진입")
     bt.add_argument("--buy-until", type=time.fromisoformat, default=time(15, 0), help="vwap·surge: 진입 마감 (미국 동부)")
@@ -55,6 +55,12 @@ def main() -> None:
     bt.add_argument("--swing-single", action="store_true", help="swing: 1차 매수가 한 번 매수, 전량 매도가 한 번 매도")
     bt.add_argument("--swing-source", choices=["rth", "all"], default="rth")
     bt.add_argument("--swing-min-d", type=float, default=0.0, help="swing: 고점2-저점2 가 고점2 의 %% 이상")
+    bt.add_argument("--rsi-tf", type=int, default=5, help="rsi: 분봉 단위")
+    bt.add_argument("--rsi-period", type=int, default=14)
+    bt.add_argument("--rsi-buy", type=float, default=30.0, help="rsi: 이 값 아래면 매수 (숏은 100-값 위)")
+    bt.add_argument("--rsi-sell", type=float, default=50.0, help="rsi: 이 값 이상이면 매도 (숏은 100-값 이하)")
+    bt.add_argument("--rsi-source", choices=["rth", "all"], default="rth")
+    bt.add_argument("--rsi-side", choices=["long", "short", "both"], default="long")
     bt.add_argument("--vb-tf", type=int, default=15, help="vbreak: 분봉 단위")
     bt.add_argument("--vb-len", type=int, default=100, help="vbreak: VWMA 길이")
     bt.add_argument("--vb-fast", type=int, default=20, help="vbreak: 정배열 빠른선")
@@ -142,6 +148,8 @@ def main() -> None:
                    flag_min=a.flag_min, flag_max=a.flag_max, flag_retrace=a.flag_retrace, flag_entry=a.flag_entry,
                    flag_stop=a.flag_stop, flag_target=a.flag_target, flag_target_r=a.flag_target_r,
                    flag_vol=a.flag_vol, flag_source=a.flag_source, flag_entry_bar=a.flag_entry_bar,
+                   rsi_tf=a.rsi_tf, rsi_period=a.rsi_period, rsi_buy=a.rsi_buy, rsi_sell=a.rsi_sell,
+                   rsi_source=a.rsi_source, rsi_side=a.rsi_side,
                    vb_tf=a.vb_tf, vb_len=a.vb_len, vb_fast=a.vb_fast, vb_mid=a.vb_mid, vb_ma=a.vb_ma,
                    vb_wait=a.vb_wait, vb_target_r=a.vb_target_r, vb_source=a.vb_source, vb_side=a.vb_side,
                    vb_expire=a.vb_expire,

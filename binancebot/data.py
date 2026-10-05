@@ -50,9 +50,9 @@ def tradfi_symbols(info: dict) -> list[dict]:
     return out
 
 
-def keep_bar(open_ms: int) -> bool:
+def keep_bar(open_ms: int, hours=KEEP_UTC_HOURS) -> bool:
     t = datetime.fromtimestamp(open_ms / 1000, tz=timezone.utc)
-    return t.weekday() < 5 and t.hour in KEEP_UTC_HOURS
+    return t.weekday() < 5 and t.hour in hours
 
 
 def last_saved_ms(path: Path) -> int | None:
@@ -70,7 +70,7 @@ def last_saved_ms(path: Path) -> int | None:
     return last
 
 
-def download_klines(session, symbol: str, start_ms: int, out: Path) -> int:
+def download_klines(session, symbol: str, start_ms: int, out: Path, hours=KEEP_UTC_HOURS) -> int:
     """start_ms 부터 지금까지 1분봉. 이미 받은 부분은 건너뜀. 저장한 봉 수 반환."""
     last = last_saved_ms(out)
     cur = (last + 60_000) if last else start_ms
@@ -89,7 +89,7 @@ def download_klines(session, symbol: str, start_ms: int, out: Path) -> int:
             for k in rows:
                 if int(k[6]) >= now:  # 아직 안 끝난 봉
                     continue
-                if keep_bar(int(k[0])):
+                if keep_bar(int(k[0]), hours):
                     w.writerow([k[0], k[1], k[2], k[3], k[4], k[5], k[7], k[8]])
                     n += 1
             nxt = int(rows[-1][0]) + 60_000
@@ -119,7 +119,7 @@ def download_funding(session, symbol: str, start_ms: int, out: Path) -> None:
 
 
 def download_all(out_dir: Path, symbols: list[str] | None = None, add: list[str] | None = None,
-                 since: str = "2026-01-01") -> list[Path]:
+                 since: str = "2026-01-01", hours=KEEP_UTC_HOURS) -> list[Path]:
     """add: TradFi 목록은 그대로 두고 이 종목(예 BTCUSDT ETHUSDT)만 since 부터 받아 따로 묶음(binance_extra_N.zip).
     symbols.json 에는 추가 종목 정보도 함께 저장."""
     import requests
@@ -164,7 +164,7 @@ def download_all(out_dir: Path, symbols: list[str] | None = None, add: list[str]
         start = int(s.get("onboardDate") or 0) or int(datetime(2026, 1, 1, tzinfo=timezone.utc).timestamp() * 1000)
         print(f"[{i}/{len(cand)}] {sym} 상장 {datetime.fromtimestamp(start / 1000, tz=timezone.utc):%Y-%m-%d}", flush=True)
         k = out_dir / f"{sym}_1m.csv.gz"
-        n = download_klines(session, sym, start, k)
+        n = download_klines(session, sym, start, k, hours)
         fr = out_dir / f"{sym}_funding.csv"
         download_funding(session, sym, start, fr)
         print(f"  1분봉 {n}개 추가", flush=True)

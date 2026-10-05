@@ -29,6 +29,8 @@ def main() -> None:
     dl.add_argument("--symbols", nargs="*")
     dl.add_argument("--add", nargs="*", help="TradFi 목록은 두고 이 종목만 추가로 받기 (예 BTCUSDT ETHUSDT)")
     dl.add_argument("--since", default="2026-01-01", help="--add 종목을 받을 시작 날짜")
+    dl.add_argument("--utc-hours", type=int, nargs=2, metavar=("시작", "끝"), default=None,
+                    help="받을 봉의 UTC 시각 범위 [시작, 끝) (기본 12 22 = 미국 정규장 앞뒤, 한국 장은 0 7)")
     bt = sub.add_parser("backtest", help="당일 단타 백테스트")
     bt.add_argument("--data", default="data/binance")
     bt.add_argument("--symbols", nargs="*")
@@ -156,7 +158,8 @@ def main() -> None:
         return
     if a.cmd == "download":
         from .data import download_all
-        download_all(Path(a.out), a.symbols, a.add, a.since)
+        download_all(Path(a.out), a.symbols, a.add, a.since,
+                     range(*a.utc_hours) if a.utc_hours else range(12, 22))
     else:
         from .backtest import Params, run
         p = Params(orb_minutes=a.orb, direction=a.direction, stop_mode=a.stop_mode, target_r=a.target_r,

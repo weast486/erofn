@@ -5,6 +5,11 @@
     python -m binancebot backtest --strategy vwap --vwap-dev 2 --stop-pct 2      # VWAP 되돌림
     python -m binancebot backtest --strategy flag --symbols SOXLUSDT --flag-pole-pct 3   # 15분봉 상승 깃발형
     python -m binancebot backtest --strategy surge --surge-min-change 10 --buy-until 09:35 --stop-pct 7 --take-profit 7 --exit-time 12:00
+
+자동매매 봇 (첫 5분봉 + 1분봉 FVG, 설정 .env.binance, 기본 드라이런):
+    python -m binancebot check        # 키·잔고·오늘 대상 종목 확인 (주문 없음)
+    python -m binancebot run          # 오늘 하루 매매
+    python -m binancebot loop         # 켜 둔 채 미국 거래일마다 반복
 """
 from __future__ import annotations
 
@@ -138,7 +143,15 @@ def main() -> None:
     bt.add_argument("--leverage", type=float, default=5.0, help="포지션 합계 / 평가금액 상한")
     bt.add_argument("--fee", type=float, default=0.05, help="한쪽 수수료 %%")
     bt.add_argument("--slippage", type=float, default=0.05, help="돌파·손절·정리 한쪽 슬리피지 %%")
+    for name, hlp in [("check", "봇: 키·잔고·오늘 대상 종목 확인 (주문 없음)"), ("run", "봇: 오늘 하루 매매"),
+                      ("loop", "봇: 켜 둔 채 미국 거래일마다 반복")]:
+        sp = sub.add_parser(name, help=hlp)
+        sp.add_argument("--env", default=".env.binance")
     a = ap.parse_args()
+    if a.cmd in ("check", "run", "loop"):
+        from .botmain import bot_main
+        bot_main(a.cmd, a.env)
+        return
     if a.cmd == "download":
         from .data import download_all
         download_all(Path(a.out), a.symbols, a.add, a.since)

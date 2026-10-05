@@ -25,12 +25,13 @@ from .sizing import SizeRule, position_size
 ET = ZoneInfo("America/New_York")
 UTC = timezone.utc
 # 미국 증시 휴장일 (선물은 열려도 기초 주식이 안 움직이므로 거래 안 함)
-US_HOLIDAYS = {date(2026, m, d) for m, d in [(1, 1), (1, 19), (2, 16), (4, 3), (5, 25), (6, 19), (7, 3), (9, 7), (11, 26), (12, 25)]}
+US_HOLIDAYS = ({date(2026, m, d) for m, d in [(1, 1), (1, 19), (2, 16), (4, 3), (5, 25), (6, 19), (7, 3), (9, 7), (11, 26), (12, 25)]}
+               | {date(2027, m, d) for m, d in [(1, 1), (1, 18), (2, 15), (3, 26), (5, 31), (6, 18), (7, 5), (9, 6), (11, 25), (12, 24)]})
 # 2·3배(인버스 포함) 레버리지 ETF (고정 배율 진입 때 구분). SKDD·STXX 는 확인 못 해 보수적으로 포함
 LEVERAGED_ETFS = {"SOXL", "SOXS", "TQQQ", "SQQQ", "NVDL", "TSLL", "MUU", "MVLL", "SNXX", "SKUU", "SKDD", "STXX",
                   "KORU", "TMF", "TZA", "TBT", "UVXY"}
 US_EARLY_CLOSE = {date(2025, 7, 3), date(2025, 11, 28), date(2025, 12, 24),
-                  date(2026, 11, 27), date(2026, 12, 24)}  # 13:00 마감
+                  date(2026, 11, 27), date(2026, 12, 24), date(2027, 11, 26)}  # 13:00 마감
 
 
 @dataclass
@@ -1199,6 +1200,29 @@ def first5_trades(symbol: str, mins: list[MinBar], p: Params) -> tuple[list[Trad
     return trades, dict(st)
 
 
+def fvg_at(a, m, b, h1: float, l1: float, loc: str = "zone", entry: str = "full", side_filter: str = "both",
+           min_gap: float = 0.0) -> list[tuple[int, float]]:
+    """1분봉 3개(a, m, b)가 만든 FVG 가 첫 5분봉 고가(h1) 위 / 저가(l1) 아래면 [(방향, 진입 지정가)]. 봇과 백테스트 공용.
+    상승 갭 = a 고가 < b 저가 (갭 a.h~b.l), 하락 갭 = b 고가 < a 저가 (갭 b.h~a.l).
+    loc: zone = 갭 전체가 고가 위(저가 아래) / mid = 가운데 봉 종가가 고가 위(저가 아래).
+    entry: edge = 갭 첫 닿음 / mid = 갭 가운데 / full = 갭을 다 메운 곳."""
+    out = []
+    for side in (1, -1):
+        if (side == 1 and side_filter == "short") or (side == -1 and side_filter == "long"):
+            continue
+        if side == 1:
+            lo, hi = a.h, b.l
+            ok = hi > lo and (lo >= h1 if loc == "zone" else m.c > h1)
+        else:
+            lo, hi = b.h, a.l
+            ok = hi > lo and (hi <= l1 if loc == "zone" else m.c < l1)
+        if not ok or (hi - lo) / b.c * 100 < min_gap:
+            continue
+        edge, full = (hi, lo) if side == 1 else (lo, hi)
+        out.append((side, {"edge": edge, "full": full, "mid": (lo + hi) / 2}[entry]))
+    return out
+
+
 def fvg_trades(symbol: str, mins: list[MinBar], p: Params) -> tuple[list[Trade], dict]:
     """첫 5분봉 고가·저가 기준 1분봉 FVG 되돌림 진입. 손절 = 롱은 첫 봉 저가, 숏은 첫 봉 고가 이탈. 하루 한 번."""
     slip = p.rule.slippage_pct / 100
@@ -1228,21 +1252,8 @@ def fvg_trades(symbol: str, mins: list[MinBar], p: Params) -> tuple[list[Trade],
                     entry, ei = (min(b.o, lvl) if side == 1 else max(b.o, lvl)), i
                     break
             if i >= 2 and (pend is None or p.fvg_pick == "latest"):
-                a, m = rest[i - 2], rest[i - 1]
-                for side in (1, -1):
-                    if (side == 1 and p.fvg_side == "short") or (side == -1 and p.fvg_side == "long"):
-                        continue
-                    if side == 1:
-                        lo, hi = a.h, b.l  # 상승 갭: 1번째 봉 고가 < 3번째 봉 저가
-                        ok = hi > lo and (lo >= h1 if p.fvg_loc == "zone" else m.c > h1)
-                    else:
-                        lo, hi = b.h, a.l  # 하락 갭: 3번째 봉 고가 < 1번째 봉 저가
-                        ok = hi > lo and (hi <= l1 if p.fvg_loc == "zone" else m.c < l1)
-                    if not ok or (hi - lo) / b.c * 100 < p.fvg_min_gap:
-                        continue
-                    edge, full = (hi, lo) if side == 1 else (lo, hi)
-                    lvl = {"edge": edge, "full": full, "mid": (lo + hi) / 2}[p.fvg_entry]
-                    pend = (side, lvl)
+                for found in fvg_at(rest[i - 2], rest[i - 1], b, h1, l1, p.fvg_loc, p.fvg_entry, p.fvg_side, p.fvg_min_gap):
+                    pend = found
                     st["fvg"] += 1
         if entry is None:
             continue

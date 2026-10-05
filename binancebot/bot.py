@@ -1,0 +1,426 @@
+"""바이낸스 미국 주식 선물 자동매매 — 첫 5분봉 + 1분봉 FVG (사용자 선택 기준, 2026-10-05 백테스트 +500%).
+
+규칙 (시각은 미국 동부):
+  1. 장 전: 바이낸스 주식 토큰(EQUITY) 중 전날 정규장 거래대금 상위 N(기본 10) + 추가 종목(BN_EXTRA_SYMBOLS)
+  2. 첫 5분봉(9:30~9:35) 고가·저가
+  3. 9:35 부터 1분봉 FVG(3봉 갭)가 고가 위에 생기면 롱, 저가 아래면 숏 — 종목마다 그날 첫 FVG 만
+  4. 가격이 갭을 다 메운 곳(롱 = 1번째 봉 고가)에 닿으면 그 가격 지정가(IOC)로 진입 — 하루 한 종목(가장 먼저 체결된 것)
+  5. 손절 = 롱은 첫 5분봉 저가, 숏은 고가 (거래소 STOP_MARKET + 봇이 가격 보고 한 번 더 확인)
+     익절 = 진입가 ± 손절 거리 x 2 (지정가, 가격 허용 범위 안에 들어오면 주문)
+  6. 9:30 + 350분(15:20)에 남은 주문 취소·시장가 정리
+수량 = 평가금액 x 레버리지(기본 2배) / 진입가. 기본은 드라이런(주문 없이 로그만).
+"""
+from __future__ import annotations
+
+import csv
+import json
+import logging
+import os
+import time as _time
+from dataclasses import asdict, dataclass, field
+from datetime import date, datetime, time, timedelta
+from pathlib import Path
+
+from tossbot.config import _bool, _get
+
+from .backtest import ET, US_EARLY_CLOSE, US_HOLIDAYS, MinBar, fvg_at
+from .client import BinanceClient, BinanceError, filters_of, fmt, round_step, round_tick
+
+log = logging.getLogger("binancebot")
+
+
+@dataclass
+class BotConfig:
+    api_key: str = ""
+    api_secret: str = ""
+    dry_run: bool = True          # true 면 주문 없이 로그만
+    leverage: float = 2.0         # 평가금액 x 이 배수만큼 진입
+    top_n: int = 10               # 전날 정규장 거래대금 상위 N
+    extra_symbols: str = ""       # 순위와 상관없이 늘 넣을 종목 (예 BTCUSDT,ETHUSDT — 백테스트 안 됨)
+    target_r: float = 2.0         # 익절 = 손절 거리 x R (0 = 익절 없음)
+    exit_minutes: int = 350       # 9:30 부터 N분 뒤 정리 (350 = 15:20)
+    side: str = "both"            # both / long / short
+    entry: str = "full"           # full = 갭 다 메움 / mid / edge
+    loc: str = "zone"             # zone = 갭 전체가 첫 봉 밖 / mid
+    poll_seconds: float = 1.0
+    dry_equity: float = 1000.0    # 드라이런인데 키가 없을 때 쓸 평가금액 (USDT)
+    state_dir: str = "state_binance"
+
+    @classmethod
+    def from_env(cls) -> "BotConfig":
+        def f(name, attr, typ=float):
+            return typ(_get(name, str(getattr(cls, attr))))
+
+        return cls(
+            api_key=os.environ.get("BINANCE_API_KEY", ""),
+            api_secret=os.environ.get("BINANCE_API_SECRET", ""),
+            dry_run=_bool(os.environ.get("BINANCE_DRY_RUN"), True),
+            leverage=f("BN_LEVERAGE", "leverage"),
+            top_n=f("BN_TOP_N", "top_n", int),
+            extra_symbols=_get("BN_EXTRA_SYMBOLS", cls.extra_symbols),
+            target_r=f("BN_TARGET_R", "target_r"),
+            exit_minutes=f("BN_EXIT_MINUTES", "exit_minutes", int),
+            side=_get("BN_SIDE", cls.side),
+            entry=_get("BN_ENTRY", cls.entry),
+            loc=_get("BN_LOC", cls.loc),
+            poll_seconds=f("BN_POLL_SECONDS", "poll_seconds"),
+            dry_equity=f("BN_DRY_EQUITY", "dry_equity"),
+            state_dir=_get("BN_STATE_DIR", cls.state_dir),
+        )
+
+    def describe(self) -> str:
+        extra = f" + {self.extra_symbols}" if self.extra_symbols else ""
+        return (f"전날 거래대금 상위 {self.top_n}{extra}, 첫 5분봉 + 1분봉 FVG({self.entry}) {self.side}, "
+                f"손절 첫 봉 반대편 / 익절 {self.target_r:g}R / 9:30+{self.exit_minutes}분 정리, "
+                f"평가금액 x {self.leverage:g}배, 하루 한 종목 ({'드라이런' if self.dry_run else '실제 주문'})")
+
+
+def trading_day(d: date) -> bool:
+    return d.weekday() < 5 and d not in US_HOLIDAYS
+
+
+def prev_trading_day(d: date) -> date:
+    d -= timedelta(days=1)
+    while not trading_day(d):
+        d -= timedelta(days=1)
+    return d
+
+
+def at(d: date, hh: int, mm: int, ss: int = 0) -> datetime:
+    return datetime.combine(d, time(hh, mm, ss), ET)
+
+
+def ms(t: datetime) -> int:
+    return int(t.timestamp() * 1000)
+
+
+def to_bars(rows: list[list], now: datetime | None = None) -> list[MinBar]:
+    """klines → MinBar (끝난 봉만)."""
+    out = []
+    for k in rows:
+        if now is not None and int(k[6]) >= ms(now):
+            continue
+        out.append(MinBar(datetime.fromtimestamp(int(k[0]) / 1000, ET), float(k[1]), float(k[2]), float(k[3]),
+                          float(k[4]), float(k[5])))
+    return out
+
+
+def first_fvg(bars: list[MinBar], h1: float, l1: float, cfg: BotConfig) -> tuple[int, float, datetime] | None:
+    """9:35 이후 봉들에서 그날 첫 FVG (방향, 진입가, 3번째 봉 시각)."""
+    for i in range(2, len(bars)):
+        found = fvg_at(bars[i - 2], bars[i - 1], bars[i], h1, l1, cfg.loc, cfg.entry, cfg.side)
+        if found:
+            return found[0][0], found[0][1], bars[i].t
+    return None
+
+
+@dataclass
+class DayState:
+    day: str
+    phase: str = "new"                 # new → watch → position → done
+    candidates: list = field(default_factory=list)
+    ranges: dict = field(default_factory=dict)     # 종목 → [고가, 저가]
+    signals: dict = field(default_factory=dict)    # 종목 → [방향, 진입가, FVG 시각]
+    dropped: list = field(default_factory=list)
+    position: dict = field(default_factory=dict)
+    result: dict = field(default_factory=dict)
+
+
+class FvgTrader:
+    def __init__(self, client: BinanceClient, cfg: BotConfig, now_fn=None, sleep_fn=_time.sleep):
+        self.c, self.cfg = client, cfg
+        self.now = now_fn or (lambda: datetime.now(ET))
+        self.sleep = sleep_fn
+        self.meta: dict[str, dict] = {}
+        Path(cfg.state_dir).mkdir(parents=True, exist_ok=True)
+
+    # ------------------------------------------------------------ 상태 파일
+    def _path(self, day: date) -> Path:
+        return Path(self.cfg.state_dir) / f"day_{day.isoformat()}.json"
+
+    def load(self, day: date) -> DayState:
+        p = self._path(day)
+        if p.exists():
+            return DayState(**json.loads(p.read_text(encoding="utf-8")))
+        return DayState(day.isoformat())
+
+    def save(self, st: DayState) -> None:
+        self._path(date.fromisoformat(st.day)).write_text(json.dumps(asdict(st), ensure_ascii=False, indent=1),
+                                                          encoding="utf-8")
+
+    # ------------------------------------------------------------ 준비
+    def load_meta(self) -> None:
+        info = self.c.exchange_info()
+        want = {s.strip().upper() for s in self.cfg.extra_symbols.split(",") if s.strip()}
+        self.meta = {s["symbol"]: s for s in info.get("symbols", [])
+                     if s.get("status") == "TRADING" and s.get("quoteAsset") == "USDT"
+                     and (s.get("underlyingType") == "EQUITY" or s["symbol"] in want)}
+
+    def candidates(self, day: date) -> list[str]:
+        """전날 정규장(9:30~마감) 거래대금 상위 N + 추가 종목."""
+        if not self.meta:
+            self.load_meta()
+        prev = prev_trading_day(day)
+        close = time(13, 0) if prev in US_EARLY_CLOSE else time(16, 0)
+        start, end = at(prev, 9, 30), datetime.combine(prev, close, ET)
+        n_min = int((end - start).total_seconds() // 60)
+        want = {s.strip().upper() for s in self.cfg.extra_symbols.split(",") if s.strip()}
+        qv = {}
+        for sym, m in self.meta.items():
+            if m.get("underlyingType") != "EQUITY":
+                continue
+            rows = self.c.klines(sym, ms(start), limit=n_min)
+            qv[sym] = sum(float(k[7]) for k in rows if int(k[0]) < ms(end))
+            self.sleep(0.05)
+        top = [s for s, v in sorted(qv.items(), key=lambda kv: -kv[1]) if v > 0][: self.cfg.top_n]
+        log.info("전날(%s) 거래대금 상위 %d: %s", prev, self.cfg.top_n,
+                 ", ".join(f"{s} {qv[s] / 1e6:,.0f}M" for s in top))
+        return top + sorted(want - set(top))
+
+    def equity(self) -> float:
+        if self.cfg.api_key and self.cfg.api_secret:
+            return self.c.equity()
+        return self.cfg.dry_equity
+
+    # ------------------------------------------------------------ 하루 실행
+    def wait_until(self, t: datetime) -> None:
+        while self.now() < t:
+            self.sleep(min(30.0, max(0.2, (t - self.now()).total_seconds())))
+
+    def run(self, day: date | None = None) -> DayState:
+        day = day or self.now().date()
+        st = self.load(day)
+        if not trading_day(day):
+            log.info("%s 은 미국 휴장일(주말·공휴일)이라 쉽니다", day)
+            return st
+        if day in US_EARLY_CLOSE:
+            log.info("%s 은 13시 조기 마감이라 쉽니다", day)
+            return st
+        if st.phase == "done":
+            log.info("%s 은 이미 끝났어요: %s", day, st.result)
+            return st
+        exit_t = at(day, 9, 30) + timedelta(minutes=self.cfg.exit_minutes)
+        if self.now() >= exit_t and st.phase != "position":
+            log.info("정리 시각(%s ET)이 지나 오늘은 쉽니다", exit_t.strftime("%H:%M"))
+            return st
+        log.info("설정: %s", self.cfg.describe())
+        if not self.meta:
+            self.load_meta()
+        if st.phase == "position":
+            return self.manage(st, exit_t)
+        if not st.candidates:
+            self.wait_until(at(day, 9, 15))
+            st.candidates = self.candidates(day)
+            st.phase = "watch"
+            self.save(st)
+        self.wait_until(at(day, 9, 35, 3))
+        for sym in st.candidates:
+            if sym in st.ranges:
+                continue
+            bars = [b for b in to_bars(self.c.klines(sym, ms(at(day, 9, 30)), limit=5), self.now())
+                    if b.t < at(day, 9, 35)]
+            if bars:
+                st.ranges[sym] = [max(b.h for b in bars), min(b.l for b in bars)]
+        log.info("첫 5분봉: %s", ", ".join(f"{s} {h:g}~{l:g}" for s, (h, l) in st.ranges.items()))
+        self.save(st)
+        return self.watch(st, day, exit_t)
+
+    def watch(self, st: DayState, day: date, exit_t: datetime) -> DayState:
+        last_scan = None
+        while self.now() < exit_t:
+            now = self.now()
+            minute = now.replace(second=0, microsecond=0)
+            if minute != last_scan and now.second >= 2:  # 1분봉이 끝날 때마다 FVG 찾기
+                last_scan = minute
+                for sym, (h1, l1) in st.ranges.items():
+                    if sym in st.signals or sym in st.dropped:
+                        continue
+                    bars = to_bars(self.c.klines(sym, ms(at(day, 9, 35)), limit=400), now)
+                    sig = first_fvg(bars, h1, l1, self.cfg)
+                    if sig:
+                        st.signals[sym] = [sig[0], sig[1], sig[2].strftime("%H:%M")]
+                        log.info("%s FVG %s (%s 봉) → %g 에 닿으면 진입, 손절 %g", sym, "롱" if sig[0] == 1 else "숏",
+                                 sig[2].strftime("%H:%M"), sig[1], l1 if sig[0] == 1 else h1)
+                        self.save(st)
+            if any(s not in st.dropped for s in st.signals):
+                px = self.c.prices()
+                for sym, (side, lvl, _) in list(st.signals.items()):
+                    if sym in st.dropped or sym not in px:
+                        continue
+                    h1, l1 = st.ranges[sym]
+                    stop, p = (l1 if side == 1 else h1), px[sym]
+                    if side * (p - stop) <= 0:
+                        st.dropped.append(sym)
+                        log.info("%s 진입 전에 손절선(%g)을 넘어 제외 (현재 %g)", sym, stop, p)
+                        self.save(st)
+                    elif side * (p - lvl) <= 0 and self.enter(st, sym, side, lvl, stop, p):
+                        return self.manage(st, exit_t)
+            self.sleep(self.cfg.poll_seconds)
+        st.phase = "done"
+        st.result = {"reason": "no_trade"}
+        log.info("오늘은 진입 없이 끝 (FVG %d개, 제외 %d개)", len(st.signals), len(st.dropped))
+        self.save(st)
+        return st
+
+    def enter(self, st: DayState, sym: str, side: int, lvl: float, stop: float, price: float) -> bool:
+        f = filters_of(self.meta.get(sym, {}))
+        eq = self.equity()
+        lvl_r = round_tick(lvl, f["tick"])
+        qty = round_step(eq * self.cfg.leverage / lvl_r, f["step"])
+        if qty <= 0 or qty * lvl_r < f["min_notional"]:
+            log.info("%s 수량이 최소 주문 금액보다 작아 제외 (평가금액 %.2f)", sym, eq)
+            st.dropped.append(sym)
+            return False
+        side_s = "BUY" if side == 1 else "SELL"
+        if self.cfg.dry_run:
+            filled, avg = qty, lvl_r
+            log.info("[드라이런] %s %s %s개 @ %g (현재가 %g, 평가금액 %.2f)", sym, side_s, fmt(qty), lvl_r, price, eq)
+        else:
+            try:
+                self.c.set_leverage(sym, max(1, round(self.cfg.leverage + 0.4999)))
+                r = self.c.order(symbol=sym, side=side_s, type="LIMIT", timeInForce="IOC", quantity=fmt(qty),
+                                 price=fmt(lvl_r), newOrderRespType="RESULT")
+            except BinanceError as exc:
+                log.error("%s 진입 주문 실패: %s (바이낸스 앱에서 TradFi 선물 이용 동의가 필요할 수 있어요)", sym, exc)
+                st.dropped.append(sym)
+                self.save(st)
+                return False
+            filled, avg = float(r.get("executedQty", 0)), float(r.get("avgPrice", 0) or lvl_r)
+            log.info("%s %s IOC %s개 @ %g → 체결 %s개 평균 %g (%s)", sym, side_s, fmt(qty), lvl_r, fmt(filled), avg,
+                     r.get("status"))
+            if filled <= 0:
+                return False  # 그 사이 가격이 비켜 감 → 계속 지켜봄
+        risk = abs(avg - stop)
+        tp = avg + side * risk * self.cfg.target_r if self.cfg.target_r > 0 else 0.0
+        st.position = {"symbol": sym, "side": side, "qty": filled, "entry": avg, "stop": round_tick(stop, f["tick"]),
+                       "tp": round_tick(tp, f["tick"]) if tp else 0.0, "entry_time": self.now().isoformat(),
+                       "equity": eq, "stop_order": "", "tp_placed": False}
+        st.phase = "position"
+        self.save(st)
+        if not self.cfg.dry_run:
+            try:
+                st.position["stop_order"] = self.c.stop_market(sym, "SELL" if side == 1 else "BUY", st.position["stop"])
+                log.info("%s 거래소 손절 주문 %g (%s)", sym, st.position["stop"], st.position["stop_order"])
+            except BinanceError as exc:
+                log.warning("%s 거래소 손절 주문 실패 (%s) → 봇이 가격을 보고 시장가로 손절합니다. 창을 닫지 마세요", sym, exc)
+            self.save(st)
+        log.info("%s 진입 %s %s개 @ %g, 손절 %g, 익절 %s", sym, "롱" if side == 1 else "숏", fmt(filled), avg,
+                 st.position["stop"], fmt(st.position["tp"]) if tp else "없음")
+        return True
+
+    def manage(self, st: DayState, exit_t: datetime) -> DayState:
+        pos = st.position
+        sym, side, stop, tp = pos["symbol"], pos["side"], pos["stop"], pos["tp"]
+        f = filters_of(self.meta.get(sym, {}))
+        close_side = "SELL" if side == 1 else "BUY"
+        last_check = None
+        while True:
+            now = self.now()
+            if now >= exit_t:
+                return self.close(st, "time")
+            p = self.c.prices().get(sym)
+            if not self.cfg.dry_run and (last_check is None or (now - last_check).total_seconds() >= 5):
+                last_check = now
+                amt, _ = self.c.position_amt(sym)
+                if amt == 0:  # 거래소 손절·익절로 이미 정리됨
+                    reason = "target" if tp and p is not None and abs(p - tp) < abs(p - stop) else "stop"
+                    return self.finish(st, reason, p or 0.0)
+            if p is not None:
+                if side * (p - stop) <= 0:
+                    return self.close(st, "stop")
+                if tp:
+                    if self.cfg.dry_run and side * (p - tp) >= 0:
+                        return self.finish(st, "target", tp)
+                    if not self.cfg.dry_run and not pos["tp_placed"] and side * (p - tp) >= 0:
+                        return self.close(st, "target")  # 익절 주문을 걸기 전에 익절가를 넘어 버림
+                    band = (f["pct_up"] if side == 1 else f["pct_down"]) or 0.05
+                    if not self.cfg.dry_run and not pos["tp_placed"] and abs(tp / p - 1) < band * 0.8:
+                        try:
+                            self.c.order(symbol=sym, side=close_side, type="LIMIT", timeInForce="GTC",
+                                         quantity=fmt(pos["qty"]), price=fmt(tp), reduceOnly="true")
+                            pos["tp_placed"] = True
+                            log.info("%s 익절 지정가 %g 주문", sym, tp)
+                            self.save(st)
+                        except BinanceError as exc:
+                            log.warning("%s 익절 주문 실패 (%s), 다시 시도", sym, exc)
+            self.sleep(self.cfg.poll_seconds)
+
+    def close(self, st: DayState, reason: str) -> DayState:
+        pos = st.position
+        sym = pos["symbol"]
+        price = self.c.prices().get(sym, 0.0)
+        if self.cfg.dry_run:
+            px = pos["stop"] if reason == "stop" else price
+            log.info("[드라이런] %s %s 정리 @ %g", sym, {"stop": "손절", "time": "시간", "target": "익절"}[reason], px)
+            return self.finish(st, reason, px)
+        self.c.cancel_all(sym)
+        amt, _ = self.c.position_amt(sym)
+        if amt != 0:
+            r = self.c.order(symbol=sym, side="SELL" if amt > 0 else "BUY", type="MARKET", quantity=fmt(abs(amt)),
+                             reduceOnly="true", newOrderRespType="RESULT")
+            price = float(r.get("avgPrice", 0) or price)
+            log.info("%s 시장가 정리 %s개 @ %g (%s)", sym, fmt(abs(amt)), price, reason)
+        return self.finish(st, reason, price)
+
+    def finish(self, st: DayState, reason: str, exit_px: float) -> DayState:
+        pos = st.position
+        if not self.cfg.dry_run:
+            self.c.cancel_all(pos["symbol"])
+        ret = pos["side"] * (exit_px / pos["entry"] - 1) * 100 if exit_px else 0.0
+        pnl = pos["side"] * (exit_px - pos["entry"]) * pos["qty"] if exit_px else 0.0
+        st.result = {"reason": reason, "exit": exit_px, "ret_pct": round(ret, 3), "pnl": round(pnl, 4),
+                     "exit_time": self.now().isoformat()}
+        st.phase = "done"
+        self.save(st)
+        log.info("%s 끝: %s @ %g, %+.2f%% (수수료 전 %+.2f USDT)", pos["symbol"],
+                 {"target": "익절", "stop": "손절", "time": "시간 정리"}[reason], exit_px, ret, pnl)
+        path = Path(self.cfg.state_dir) / "trades.csv"
+        new = not path.exists()
+        with open(path, "a", newline="", encoding="utf-8") as fh:
+            w = csv.writer(fh)
+            if new:
+                w.writerow(["day", "mode", "symbol", "side", "qty", "entry", "stop", "tp", "exit", "reason", "ret_pct", "pnl"])
+            w.writerow([st.day, "dry" if self.cfg.dry_run else "live", pos["symbol"], pos["side"], pos["qty"],
+                        pos["entry"], pos["stop"], pos["tp"], exit_px, reason, round(ret, 3), round(pnl, 4)])
+        return st
+
+
+# ---------------------------------------------------------------- 켜 둔 채로 거래일마다
+LOOP_START = (9, 10)  # 미국 동부 (한국 시간 22:10, 서머타임 끝나면 23:10)
+
+
+def next_start(now: datetime, last_run: str, exit_minutes: int = 350) -> datetime:
+    d = now
+    for _ in range(10):
+        day = d.date()
+        if trading_day(day) and day not in US_EARLY_CLOSE and day.isoformat() != last_run:
+            start = at(day, *LOOP_START)
+            if day != now.date() or now < start:
+                return start
+            if now < at(day, 9, 30) + timedelta(minutes=exit_minutes):
+                return now
+        d = datetime.combine(day + timedelta(days=1), time(0, 0), ET)
+    raise RuntimeError("다음 거래일을 못 찾음")
+
+
+def loop(make_trader, cfg: BotConfig, now_fn=None, sleep_fn=_time.sleep, retries: int = 20) -> None:
+    now_fn = now_fn or (lambda: datetime.now(ET))
+    last_run = ""
+    while True:
+        start = next_start(now_fn(), last_run, cfg.exit_minutes)
+        if start > now_fn():
+            log.info("다음 실행 %s (미국 동부) 까지 대기 — 이 창을 닫지 마세요", start.strftime("%m-%d %H:%M"))
+            while now_fn() < start:
+                sleep_fn(min(60.0, max(1.0, (start - now_fn()).total_seconds())))
+        day = now_fn().date()
+        last_run = day.isoformat()
+        for attempt in range(retries + 1):
+            try:
+                make_trader().run(day)
+                break
+            except Exception:  # noqa: BLE001
+                log.exception("실행 중 오류 (%d/%d)", attempt + 1, retries)
+                if attempt >= retries or now_fn() >= at(day, 9, 30) + timedelta(minutes=cfg.exit_minutes + 5):
+                    log.error("오늘은 더 시도하지 않음 — 바이낸스 앱에서 포지션·주문을 직접 확인하세요")
+                    break
+                sleep_fn(30)

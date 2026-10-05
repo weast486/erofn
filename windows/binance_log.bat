@@ -11,7 +11,7 @@ if exist "state_binance\bot.log" (
   echo ---- bot.log 마지막 30줄 ----
   powershell -NoProfile -Command "Get-Content -Encoding UTF8 -Tail 30 'state_binance\bot.log'"
 ) else (
-  echo 아직 기록이 없어요 (봇을 한 번도 실행하지 않았거나 장이 아직 안 열렸어요).
+  echo 아직 기록이 없어요. 봇을 한 번도 실행하지 않았거나 장이 아직 안 열렸어요.
 )
 explorer "state_binance"
 echo.

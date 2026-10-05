@@ -78,12 +78,14 @@ class BotTest(unittest.TestCase):
         self.assertEqual(st.candidates, ["AUSDT"])
         self.assertEqual(st.ranges["AUSDT"], [101, 99])
         self.assertEqual(st.signals["AUSDT"][:2], [1, 101.5])
-        self.assertEqual(st.position["entry"], 101.5)
-        self.assertAlmostEqual(st.position["qty"], round_step(2000 / 101.5, 0.001))
-        self.assertEqual((st.phase, st.result["reason"]), ("done", "target"))
-        self.assertAlmostEqual(st.result["exit"], 106.5)
+        pos = st.positions["AUSDT"]
+        self.assertEqual(pos["entry"], 101.5)
+        self.assertAlmostEqual(pos["qty"], round_step(2000 / 101.5, 0.001))
+        self.assertEqual((st.phase, pos["result"]["reason"]), ("done", "target"))
+        self.assertAlmostEqual(pos["result"]["exit"], 106.5)
+        self.assertEqual(st.result["trades"], 1)
         # 같은 날 다시 켜도 다시 매매하지 않음
-        self.assertEqual(trader.run(DAY).result["reason"], "target")
+        self.assertEqual(trader.run(DAY).result["trades"], 1)
 
     def test_short_stop_and_time_exit(self):
         first = [(100, 101, 99, 99.5)] * 5
@@ -91,15 +93,33 @@ class BotTest(unittest.TestCase):
         back = [(97.0, 98.7, 96.9, 98.6), (98.6, 101.5, 98.5, 101.4)]                   # 98.6 체결 → 101 넘어 손절
         trader, _ = self._setup(first + fvg + back + [(101.4, 101.5, 101.3, 101.4)] * 3)
         st = trader.run(DAY)
-        self.assertEqual(st.position["side"], -1)
-        self.assertEqual(st.result["reason"], "stop")
-        self.assertAlmostEqual(st.result["exit"], 101)
+        pos = st.positions["AUSDT"]
+        self.assertEqual(pos["side"], -1)
+        self.assertEqual(pos["result"]["reason"], "stop")
+        self.assertAlmostEqual(pos["result"]["exit"], 101)
 
     def test_no_fvg_no_trade(self):
         trader, clock = self._setup([(100, 101, 99, 100)] * 400)
         trader.cfg.exit_minutes = 40  # 테스트 시간을 줄임
         st = trader.run(DAY)
         self.assertEqual(st.result["reason"], "no_trade")
+
+
+class TwoTradesTest(unittest.TestCase):
+    def test_two_symbols_same_day_then_third_skipped(self):
+        first = [(100, 101, 99, 100.5)] * 5
+        fvg = [(101, 101.5, 100.8, 101.4), (101.4, 103, 101.3, 102.9), (102.9, 103.5, 102.2, 103.2)]
+        dip = [(103.2, 103.3, 102.0, 102.5), (102.5, 102.6, 101.3, 101.4)]
+        hold = [(101.4, 102, 101.4, 101.8)] * 30
+        rows = first + fvg + dip + hold
+        prev = lambda qv: day_bars(PREV, [(100, 100, 100, 100, qv)] * 390)
+        clock = Clock(datetime(2026, 9, 1, 9, 0, tzinfo=ET))
+        bars = {s: prev(qv) + day_bars(DAY, rows) for s, qv in [("AUSDT", 3000.0), ("BUSDT", 2000.0), ("CUSDT", 1000.0)]}
+        cfg = BotConfig(top_n=3, max_trades=2, state_dir=tempfile.mkdtemp(), exit_minutes=60)
+        st = FvgTrader(FakeClient(bars, clock), cfg, now_fn=clock.now, sleep_fn=clock.sleep).run(DAY)
+        self.assertEqual(sorted(st.positions), ["AUSDT", "BUSDT"])   # 같은 순간 닿으면 순위 순으로 2종목
+        self.assertTrue(all(p["result"]["reason"] == "time" for p in st.positions.values()))
+        self.assertEqual(st.result["trades"], 2)
 
 
 class FakeLive(FakeClient):
@@ -157,8 +177,8 @@ class LiveTest(unittest.TestCase):
         kinds = [o[0] for o in client.orders]
         self.assertEqual(kinds[:3], ["leverage", "LIMIT", "STOP"])
         self.assertIn(("LIMIT", "SELL", "106.5", "true"), client.orders)
-        self.assertEqual(st.result["reason"], "target")
-        self.assertAlmostEqual(st.position["qty"], round_step(1000 / 101.5, 0.001))
+        self.assertEqual(st.positions["AUSDT"]["result"]["reason"], "target")
+        self.assertAlmostEqual(st.positions["AUSDT"]["qty"], round_step(1000 / 101.5, 0.001))
 
 
 class HelperTest(unittest.TestCase):

@@ -1,14 +1,16 @@
 """바이낸스 미국 주식 선물 자동매매 — 첫 5분봉 + 1분봉 FVG (사용자 선택 기준, 2026-10-05 백테스트 +500%).
 
+백테스트 하루 2종목: 복리 +1717% (MDD -33%) / 고정 금액 +372% (MDD -22%).
+
 규칙 (시각은 미국 동부):
   1. 장 전: 바이낸스 주식 토큰(EQUITY) 중 전날 정규장 거래대금 상위 N(기본 10) + 추가 종목(BN_EXTRA_SYMBOLS)
   2. 첫 5분봉(9:30~9:35) 고가·저가
   3. 9:35 부터 1분봉 FVG(3봉 갭)가 고가 위에 생기면 롱, 저가 아래면 숏 — 종목마다 그날 첫 FVG 만
-  4. 가격이 갭을 다 메운 곳(롱 = 1번째 봉 고가)에 닿으면 그 가격 지정가(IOC)로 진입 — 하루 한 종목(가장 먼저 체결된 것)
+  4. 가격이 갭을 다 메운 곳(롱 = 1번째 봉 고가)에 닿으면 그 가격 지정가(IOC)로 진입 — 하루 최대 2종목(먼저 체결된 순)
   5. 손절 = 롱은 첫 5분봉 저가, 숏은 고가 (거래소 STOP_MARKET + 봇이 가격 보고 한 번 더 확인)
      익절 = 진입가 ± 손절 거리 x 2 (지정가, 가격 허용 범위 안에 들어오면 주문)
   6. 9:30 + 350분(15:20)에 남은 주문 취소·시장가 정리
-수량 = 평가금액 x 레버리지(기본 2배) / 진입가. 기본은 드라이런(주문 없이 로그만).
+수량 = 진입 때 평가금액 x 레버리지(기본 2배) / 진입가 (2종목이면 동시에 최대 4배). 기본은 드라이런(주문 없이 로그만).
 """
 from __future__ import annotations
 
@@ -34,7 +36,8 @@ class BotConfig:
     api_key: str = ""
     api_secret: str = ""
     dry_run: bool = True          # true 면 주문 없이 로그만
-    leverage: float = 2.0         # 평가금액 x 이 배수만큼 진입
+    leverage: float = 2.0         # 종목마다 평가금액 x 이 배수만큼 진입
+    max_trades: int = 2           # 하루 최대 종목 수 (먼저 체결된 순, 2종목이면 동시에 최대 4배)
     top_n: int = 10               # 전날 정규장 거래대금 상위 N
     extra_symbols: str = ""       # 순위와 상관없이 늘 넣을 종목 (예 BTCUSDT,ETHUSDT — 백테스트 안 됨)
     target_r: float = 2.0         # 익절 = 손절 거리 x R (0 = 익절 없음)
@@ -56,6 +59,7 @@ class BotConfig:
             api_secret=os.environ.get("BINANCE_API_SECRET", ""),
             dry_run=_bool(os.environ.get("BINANCE_DRY_RUN"), True),
             leverage=f("BN_LEVERAGE", "leverage"),
+            max_trades=f("BN_MAX_TRADES", "max_trades", int),
             top_n=f("BN_TOP_N", "top_n", int),
             extra_symbols=_get("BN_EXTRA_SYMBOLS", cls.extra_symbols),
             target_r=f("BN_TARGET_R", "target_r"),
@@ -72,7 +76,7 @@ class BotConfig:
         extra = f" + {self.extra_symbols}" if self.extra_symbols else ""
         return (f"전날 거래대금 상위 {self.top_n}{extra}, 첫 5분봉 + 1분봉 FVG({self.entry}) {self.side}, "
                 f"손절 첫 봉 반대편 / 익절 {self.target_r:g}R / 9:30+{self.exit_minutes}분 정리, "
-                f"평가금액 x {self.leverage:g}배, 하루 한 종목 ({'드라이런' if self.dry_run else '실제 주문'})")
+                f"종목당 평가금액 x {self.leverage:g}배, 하루 최대 {self.max_trades}종목 ({'드라이런' if self.dry_run else '실제 주문'})")
 
 
 def trading_day(d: date) -> bool:
@@ -122,7 +126,7 @@ class DayState:
     ranges: dict = field(default_factory=dict)     # 종목 → [고가, 저가]
     signals: dict = field(default_factory=dict)    # 종목 → [방향, 진입가, FVG 시각]
     dropped: list = field(default_factory=list)
-    position: dict = field(default_factory=dict)
+    positions: dict = field(default_factory=dict)  # 종목 → 진입·손절·익절·결과
     result: dict = field(default_factory=dict)
 
 
@@ -200,14 +204,12 @@ class FvgTrader:
             log.info("%s 은 이미 끝났어요: %s", day, st.result)
             return st
         exit_t = at(day, 9, 30) + timedelta(minutes=self.cfg.exit_minutes)
-        if self.now() >= exit_t and st.phase != "position":
+        if self.now() >= exit_t and not self.open_positions(st):
             log.info("정리 시각(%s ET)이 지나 오늘은 쉽니다", exit_t.strftime("%H:%M"))
             return st
         log.info("설정: %s", self.cfg.describe())
         if not self.meta:
             self.load_meta()
-        if st.phase == "position":
-            return self.manage(st, exit_t)
         if not st.candidates:
             self.wait_until(at(day, 9, 15))
             st.candidates = self.candidates(day)
@@ -215,25 +217,35 @@ class FvgTrader:
             self.save(st)
         self.wait_until(at(day, 9, 35, 3))
         for sym in st.candidates:
-            if sym in st.ranges:
+            if sym in st.ranges or self.now() >= exit_t:
                 continue
             bars = [b for b in to_bars(self.c.klines(sym, ms(at(day, 9, 30)), limit=5), self.now())
                     if b.t < at(day, 9, 35)]
             if bars:
                 st.ranges[sym] = [max(b.h for b in bars), min(b.l for b in bars)]
-        log.info("첫 5분봉: %s", ", ".join(f"{s} {h:g}~{l:g}" for s, (h, l) in st.ranges.items()))
+        if st.ranges:
+            log.info("첫 5분봉: %s", ", ".join(f"{s} {h:g}~{l:g}" for s, (h, l) in st.ranges.items()))
         self.save(st)
-        return self.watch(st, day, exit_t)
+        return self.trade_day(st, day, exit_t)
 
-    def watch(self, st: DayState, day: date, exit_t: datetime) -> DayState:
+    @staticmethod
+    def open_positions(st: DayState) -> list[dict]:
+        return [p for p in st.positions.values() if not p.get("result")]
+
+    def trade_day(self, st: DayState, day: date, exit_t: datetime) -> DayState:
+        """FVG 찾기 → 닿으면 진입 (하루 max_trades 종목까지) → 보유 종목 손절·익절 관리 → 정리 시각에 모두 정리."""
         last_scan = None
-        while self.now() < exit_t:
+        while True:
             now = self.now()
-            minute = now.replace(second=0, microsecond=0)
-            if minute != last_scan and now.second >= 2:  # 1분봉이 끝날 때마다 FVG 찾기
-                last_scan = minute
+            if now >= exit_t:
+                for pos in self.open_positions(st):
+                    self.close(st, pos, "time")
+                break
+            slots = len(st.positions) < self.cfg.max_trades
+            if slots and now.replace(second=0, microsecond=0) != last_scan and now.second >= 2:
+                last_scan = now.replace(second=0, microsecond=0)  # 1분봉이 끝날 때마다 FVG 찾기
                 for sym, (h1, l1) in st.ranges.items():
-                    if sym in st.signals or sym in st.dropped:
+                    if sym in st.signals or sym in st.dropped or sym in st.positions:
                         continue
                     bars = to_bars(self.c.klines(sym, ms(at(day, 9, 35)), limit=400), now)
                     sig = first_fvg(bars, h1, l1, self.cfg)
@@ -242,10 +254,18 @@ class FvgTrader:
                         log.info("%s FVG %s (%s 봉) → %g 에 닿으면 진입, 손절 %g", sym, "롱" if sig[0] == 1 else "숏",
                                  sig[2].strftime("%H:%M"), sig[1], l1 if sig[0] == 1 else h1)
                         self.save(st)
-            if any(s not in st.dropped for s in st.signals):
+            waiting = slots and any(s not in st.dropped and s not in st.positions for s in st.signals)
+            if not waiting and not self.open_positions(st):
+                if not slots:
+                    break  # 오늘 몫을 다 쓰고 모두 정리됨
+            if waiting or self.open_positions(st):
                 px = self.c.prices()
+                for pos in self.open_positions(st):
+                    self.step(st, pos, px.get(pos["symbol"]), now)
                 for sym, (side, lvl, _) in list(st.signals.items()):
-                    if sym in st.dropped or sym not in px:
+                    if len(st.positions) >= self.cfg.max_trades:
+                        break
+                    if sym in st.dropped or sym in st.positions or sym not in px:
                         continue
                     h1, l1 = st.ranges[sym]
                     stop, p = (l1 if side == 1 else h1), px[sym]
@@ -253,12 +273,14 @@ class FvgTrader:
                         st.dropped.append(sym)
                         log.info("%s 진입 전에 손절선(%g)을 넘어 제외 (현재 %g)", sym, stop, p)
                         self.save(st)
-                    elif side * (p - lvl) <= 0 and self.enter(st, sym, side, lvl, stop, p):
-                        return self.manage(st, exit_t)
+                    elif side * (p - lvl) <= 0:
+                        self.enter(st, sym, side, lvl, stop, p)
             self.sleep(self.cfg.poll_seconds)
         st.phase = "done"
-        st.result = {"reason": "no_trade"}
-        log.info("오늘은 진입 없이 끝 (FVG %d개, 제외 %d개)", len(st.signals), len(st.dropped))
+        done = [p for p in st.positions.values() if p.get("result")]
+        st.result = {"trades": len(done), "pnl": round(sum(p["result"]["pnl"] for p in done), 4),
+                     "symbols": [p["symbol"] for p in done]} if done else {"reason": "no_trade"}
+        log.info("오늘 끝: %s (FVG %d개, 제외 %d개)", st.result, len(st.signals), len(st.dropped))
         self.save(st)
         return st
 
@@ -292,67 +314,70 @@ class FvgTrader:
                 return False  # 그 사이 가격이 비켜 감 → 계속 지켜봄
         risk = abs(avg - stop)
         tp = avg + side * risk * self.cfg.target_r if self.cfg.target_r > 0 else 0.0
-        st.position = {"symbol": sym, "side": side, "qty": filled, "entry": avg, "stop": round_tick(stop, f["tick"]),
-                       "tp": round_tick(tp, f["tick"]) if tp else 0.0, "entry_time": self.now().isoformat(),
-                       "equity": eq, "stop_order": "", "tp_placed": False}
+        pos = {"symbol": sym, "side": side, "qty": filled, "entry": avg, "stop": round_tick(stop, f["tick"]),
+               "tp": round_tick(tp, f["tick"]) if tp else 0.0, "entry_time": self.now().isoformat(),
+               "equity": eq, "stop_order": "", "tp_placed": False, "result": {}}
+        st.positions[sym] = pos
         st.phase = "position"
         self.save(st)
         if not self.cfg.dry_run:
             try:
-                st.position["stop_order"] = self.c.stop_market(sym, "SELL" if side == 1 else "BUY", st.position["stop"])
-                log.info("%s 거래소 손절 주문 %g (%s)", sym, st.position["stop"], st.position["stop_order"])
+                pos["stop_order"] = self.c.stop_market(sym, "SELL" if side == 1 else "BUY", pos["stop"])
+                log.info("%s 거래소 손절 주문 %g (%s)", sym, pos["stop"], pos["stop_order"])
             except BinanceError as exc:
                 log.warning("%s 거래소 손절 주문 실패 (%s) → 봇이 가격을 보고 시장가로 손절합니다. 창을 닫지 마세요", sym, exc)
             self.save(st)
-        log.info("%s 진입 %s %s개 @ %g, 손절 %g, 익절 %s", sym, "롱" if side == 1 else "숏", fmt(filled), avg,
-                 st.position["stop"], fmt(st.position["tp"]) if tp else "없음")
+        log.info("%s 진입 %s %s개 @ %g, 손절 %g, 익절 %s (오늘 %d/%d번째)", sym, "롱" if side == 1 else "숏",
+                 fmt(filled), avg, pos["stop"], fmt(pos["tp"]) if tp else "없음", len(st.positions), self.cfg.max_trades)
         return True
 
-    def manage(self, st: DayState, exit_t: datetime) -> DayState:
-        pos = st.position
+    def step(self, st: DayState, pos: dict, p: float | None, now: datetime) -> None:
+        """보유 종목 하나 확인: 거래소에서 정리됐는지(5초마다), 손절선, 익절가."""
         sym, side, stop, tp = pos["symbol"], pos["side"], pos["stop"], pos["tp"]
-        f = filters_of(self.meta.get(sym, {}))
-        close_side = "SELL" if side == 1 else "BUY"
-        last_check = None
-        while True:
-            now = self.now()
-            if now >= exit_t:
-                return self.close(st, "time")
-            p = self.c.prices().get(sym)
-            if not self.cfg.dry_run and (last_check is None or (now - last_check).total_seconds() >= 5):
-                last_check = now
+        if not self.cfg.dry_run:
+            last = pos.get("checked")
+            if last is None or (now - datetime.fromisoformat(last)).total_seconds() >= 5:
+                pos["checked"] = now.isoformat()
                 amt, _ = self.c.position_amt(sym)
                 if amt == 0:  # 거래소 손절·익절로 이미 정리됨
                     reason = "target" if tp and p is not None and abs(p - tp) < abs(p - stop) else "stop"
-                    return self.finish(st, reason, p or 0.0)
-            if p is not None:
-                if side * (p - stop) <= 0:
-                    return self.close(st, "stop")
-                if tp:
-                    if self.cfg.dry_run and side * (p - tp) >= 0:
-                        return self.finish(st, "target", tp)
-                    if not self.cfg.dry_run and not pos["tp_placed"] and side * (p - tp) >= 0:
-                        return self.close(st, "target")  # 익절 주문을 걸기 전에 익절가를 넘어 버림
-                    band = (f["pct_up"] if side == 1 else f["pct_down"]) or 0.05
-                    if not self.cfg.dry_run and not pos["tp_placed"] and abs(tp / p - 1) < band * 0.8:
-                        try:
-                            self.c.order(symbol=sym, side=close_side, type="LIMIT", timeInForce="GTC",
-                                         quantity=fmt(pos["qty"]), price=fmt(tp), reduceOnly="true")
-                            pos["tp_placed"] = True
-                            log.info("%s 익절 지정가 %g 주문", sym, tp)
-                            self.save(st)
-                        except BinanceError as exc:
-                            log.warning("%s 익절 주문 실패 (%s), 다시 시도", sym, exc)
-            self.sleep(self.cfg.poll_seconds)
+                    self.finish(st, pos, reason, (tp if reason == "target" else stop) if p is None else p)
+                    return
+        if p is None:
+            return
+        if side * (p - stop) <= 0:
+            self.close(st, pos, "stop")
+            return
+        if not tp:
+            return
+        if self.cfg.dry_run:
+            if side * (p - tp) >= 0:
+                self.finish(st, pos, "target", tp)
+            return
+        if not pos["tp_placed"]:
+            if side * (p - tp) >= 0:
+                self.close(st, pos, "target")  # 익절 주문을 걸기 전에 익절가를 넘어 버림
+                return
+            f = filters_of(self.meta.get(sym, {}))
+            band = (f["pct_up"] if side == 1 else f["pct_down"]) or 0.05
+            if abs(tp / p - 1) < band * 0.8:  # 지정가 허용 범위(현재가 ±2% 등) 안에 들어오면 익절 주문
+                try:
+                    self.c.order(symbol=sym, side="SELL" if side == 1 else "BUY", type="LIMIT", timeInForce="GTC",
+                                 quantity=fmt(pos["qty"]), price=fmt(tp), reduceOnly="true")
+                    pos["tp_placed"] = True
+                    log.info("%s 익절 지정가 %g 주문", sym, tp)
+                    self.save(st)
+                except BinanceError as exc:
+                    log.warning("%s 익절 주문 실패 (%s), 다시 시도", sym, exc)
 
-    def close(self, st: DayState, reason: str) -> DayState:
-        pos = st.position
+    def close(self, st: DayState, pos: dict, reason: str) -> None:
         sym = pos["symbol"]
         price = self.c.prices().get(sym, 0.0)
         if self.cfg.dry_run:
             px = pos["stop"] if reason == "stop" else price
             log.info("[드라이런] %s %s 정리 @ %g", sym, {"stop": "손절", "time": "시간", "target": "익절"}[reason], px)
-            return self.finish(st, reason, px)
+            self.finish(st, pos, reason, px)
+            return
         self.c.cancel_all(sym)
         amt, _ = self.c.position_amt(sym)
         if amt != 0:
@@ -360,17 +385,15 @@ class FvgTrader:
                              reduceOnly="true", newOrderRespType="RESULT")
             price = float(r.get("avgPrice", 0) or price)
             log.info("%s 시장가 정리 %s개 @ %g (%s)", sym, fmt(abs(amt)), price, reason)
-        return self.finish(st, reason, price)
+        self.finish(st, pos, reason, price)
 
-    def finish(self, st: DayState, reason: str, exit_px: float) -> DayState:
-        pos = st.position
+    def finish(self, st: DayState, pos: dict, reason: str, exit_px: float) -> None:
         if not self.cfg.dry_run:
             self.c.cancel_all(pos["symbol"])
         ret = pos["side"] * (exit_px / pos["entry"] - 1) * 100 if exit_px else 0.0
         pnl = pos["side"] * (exit_px - pos["entry"]) * pos["qty"] if exit_px else 0.0
-        st.result = {"reason": reason, "exit": exit_px, "ret_pct": round(ret, 3), "pnl": round(pnl, 4),
-                     "exit_time": self.now().isoformat()}
-        st.phase = "done"
+        pos["result"] = {"reason": reason, "exit": exit_px, "ret_pct": round(ret, 3), "pnl": round(pnl, 4),
+                         "exit_time": self.now().isoformat()}
         self.save(st)
         log.info("%s 끝: %s @ %g, %+.2f%% (수수료 전 %+.2f USDT)", pos["symbol"],
                  {"target": "익절", "stop": "손절", "time": "시간 정리"}[reason], exit_px, ret, pnl)
@@ -382,7 +405,6 @@ class FvgTrader:
                 w.writerow(["day", "mode", "symbol", "side", "qty", "entry", "stop", "tp", "exit", "reason", "ret_pct", "pnl"])
             w.writerow([st.day, "dry" if self.cfg.dry_run else "live", pos["symbol"], pos["side"], pos["qty"],
                         pos["entry"], pos["stop"], pos["tp"], exit_px, reason, round(ret, 3), round(pnl, 4)])
-        return st
 
 
 # ---------------------------------------------------------------- 켜 둔 채로 거래일마다

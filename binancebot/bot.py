@@ -43,6 +43,7 @@ class BotConfig:
     max_trades: int = 2           # 하루 최대 종목 수 (먼저 체결된 순, 2종목이면 동시에 최대 4배)
     top_n: int = 10               # 전날 정규장 거래대금 상위 N
     extra_symbols: str = ""       # 순위와 상관없이 늘 넣을 종목 (예 BTCUSDT,ETHUSDT — 백테스트 안 됨)
+    exclude: str = "SOXSUSDT,SQQQUSDT,SKDDUSDT"  # 순위에서 뺄 종목: 롱 짝(SOXL·TQQQ·SKUU)이 있는 인버스 ETF
     target_r: float = 2.0         # 익절 = 손절 거리 x R (0 = 익절 없음)
     exit_minutes: int = 350       # 9:30 부터 N분 뒤 정리 (350 = 15:20)
     side: str = "both"            # both / long / short
@@ -66,6 +67,7 @@ class BotConfig:
             max_trades=f("BN_MAX_TRADES", "max_trades", int),
             top_n=f("BN_TOP_N", "top_n", int),
             extra_symbols=_get("BN_EXTRA_SYMBOLS", cls.extra_symbols),
+            exclude=os.environ.get("BN_EXCLUDE", cls.exclude),
             target_r=f("BN_TARGET_R", "target_r"),
             exit_minutes=f("BN_EXIT_MINUTES", "exit_minutes", int),
             side=_get("BN_SIDE", cls.side),
@@ -175,8 +177,9 @@ class FvgTrader:
         n_min = int((end - start).total_seconds() // 60)
         want = {s.strip().upper() for s in self.cfg.extra_symbols.split(",") if s.strip()}
         qv = {}
+        skip = {s.strip().upper() for s in self.cfg.exclude.split(",") if s.strip()}
         for sym, m in self.meta.items():
-            if m.get("underlyingType") != "EQUITY":
+            if m.get("underlyingType") != "EQUITY" or sym in skip:
                 continue
             try:
                 rows = self.c.klines(sym, ms(start), limit=n_min)

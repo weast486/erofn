@@ -249,3 +249,15 @@ class RetryTest(unittest.TestCase):
             s.request.side_effect = [busy, ok]
             with self.assertRaises(BinanceError):
                 c._req("POST", "/fapi/v1/order", {"symbol": "AUSDT"})
+
+
+class ExcludeTest(unittest.TestCase):
+    def test_inverse_etf_excluded_from_ranking(self):
+        clock = Clock(datetime(2026, 9, 1, 9, 0, tzinfo=ET))
+        prev = lambda qv: day_bars(PREV, [(100, 100, 100, 100, qv)] * 390)
+        bars = {"SOXSUSDT": prev(9000.0), "AUSDT": prev(100.0), "BUSDT": prev(50.0)}
+        t = FvgTrader(FakeClient(bars, clock), BotConfig(top_n=2, state_dir=tempfile.mkdtemp()),
+                      now_fn=clock.now, sleep_fn=clock.sleep)
+        self.assertEqual(t.candidates(DAY), ["AUSDT", "BUSDT"])
+        t.cfg.exclude = ""
+        self.assertEqual(t.candidates(DAY), ["SOXSUSDT", "AUSDT"])

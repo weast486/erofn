@@ -11,6 +11,7 @@ foreach ($it in $items) {
     $lnk = $shell.CreateShortcut((Join-Path $desktop ($it[0] + '.lnk')))
     $lnk.TargetPath = Join-Path $here $it[1]
     $lnk.WorkingDirectory = Split-Path -Parent $here
+    $lnk.IconLocation = (Join-Path $here 'toss_bot.ico') + ',0'
     $lnk.Save()
     Write-Host ('만들었습니다: ' + $it[0])
 }

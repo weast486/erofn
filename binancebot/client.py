@@ -61,7 +61,7 @@ class BinanceClient:
         self.offset_ms = 0
 
     # ------------------------------------------------------------ 기본 요청
-    def _req(self, method: str, path: str, params: dict | None = None, signed: bool = False, tries: int = 3):
+    def _req(self, method: str, path: str, params: dict | None = None, signed: bool = False, tries: int = 5):
         params = {k: v for k, v in (params or {}).items() if v is not None}
         for i in range(tries):
             q = dict(params)
@@ -97,8 +97,12 @@ class BinanceClient:
                 if code == -1021 and i < tries - 1:  # 시각 차이 → 맞추고 다시
                     self.sync_time()
                     continue
-                if r.status_code >= 500 and i < tries - 1:
-                    time.sleep(1 + i)
+                # 서버 응답 지연(408, -1007 시간 초과, -1001 연결 끊김)·5xx: 조회(GET)만 다시 시도.
+                # 주문(POST)은 다시 보내면 두 번 체결될 수 있어서 그대로 오류로 올림
+                busy = r.status_code == 408 or code in (-1007, -1001) or r.status_code >= 500
+                if busy and method == "GET" and i < tries - 1:
+                    log.warning("바이낸스 서버 응답 지연 (%s %s), %d초 뒤 다시", r.status_code, code, 2 * (i + 1))
+                    time.sleep(2 * (i + 1))
                     continue
                 raise BinanceError(r.status_code, code, body.get("msg", "") if isinstance(body, dict) else str(body))
             return body

@@ -225,3 +225,27 @@ class HelperTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RetryTest(unittest.TestCase):
+    def test_get_retries_on_408_but_post_does_not(self):
+        from unittest import mock
+        from binancebot.client import BinanceClient, BinanceError
+
+        class R:
+            def __init__(self, status, body):
+                self.status_code, self._b, self.headers, self.text = status, body, {}, ""
+
+            def json(self):
+                return self._b
+
+        busy = R(408, {"code": -1007, "msg": "Timeout waiting for response from backend server."})
+        ok = R(200, [[1, "1", "1", "1", "1", "1", 2, "5"]])
+        s = mock.Mock()
+        s.request.side_effect = [busy, ok]
+        c = BinanceClient(session=s)
+        with mock.patch("binancebot.client.time.sleep"):
+            self.assertEqual(len(c.klines("AUSDT", 0)), 1)
+            s.request.side_effect = [busy, ok]
+            with self.assertRaises(BinanceError):
+                c._req("POST", "/fapi/v1/order", {"symbol": "AUSDT"})

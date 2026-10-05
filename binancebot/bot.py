@@ -178,7 +178,11 @@ class FvgTrader:
         for sym, m in self.meta.items():
             if m.get("underlyingType") != "EQUITY":
                 continue
-            rows = self.c.klines(sym, ms(start), limit=n_min)
+            try:
+                rows = self.c.klines(sym, ms(start), limit=n_min)
+            except BinanceError as exc:  # 한 종목 조회가 계속 실패해도 나머지로 순위 계산
+                log.warning("%s 전날 1분봉 조회 실패, 순위에서 빠짐 (%s)", sym, exc)
+                continue
             qv[sym] = sum(float(k[7]) for k in rows if int(k[0]) < ms(end))
             self.sleep(0.05)
         top = [s for s, v in sorted(qv.items(), key=lambda kv: -kv[1]) if v > 0][: self.cfg.top_n]
@@ -333,10 +337,16 @@ class FvgTrader:
                 r = self.c.order(symbol=sym, side=side_s, type="LIMIT", timeInForce="IOC", quantity=fmt(qty),
                                  price=fmt(lvl_r), newOrderRespType="RESULT")
             except BinanceError as exc:
-                log.error("%s 진입 주문 실패: %s (바이낸스 앱에서 TradFi 선물 이용 동의가 필요할 수 있어요)", sym, exc)
-                st.dropped.append(sym)
-                self.save(st)
-                return False
+                if exc.code in (-1007, -1001) or exc.status == 408:  # 보냈는지 모름 → 실제 포지션으로 확인
+                    self.sleep(2)
+                    amt, ep = self.c.position_amt(sym)
+                    log.warning("%s 진입 주문 응답 지연 (%s) → 포지션 확인 %s개", sym, exc, fmt(abs(amt)))
+                    r = {"executedQty": str(abs(amt)), "avgPrice": str(ep or lvl_r), "status": "확인"}
+                else:
+                    log.error("%s 진입 주문 실패: %s (바이낸스 앱에서 TradFi 선물 이용 동의가 필요할 수 있어요)", sym, exc)
+                    st.dropped.append(sym)
+                    self.save(st)
+                    return False
             filled, avg = float(r.get("executedQty", 0)), float(r.get("avgPrice", 0) or lvl_r)
             log.info("%s %s IOC %s개 @ %g → 체결 %s개 평균 %g (%s)", sym, side_s, fmt(qty), lvl_r, fmt(filled), avg,
                      r.get("status"))
@@ -410,11 +420,20 @@ class FvgTrader:
             return
         self.c.cancel_all(sym)
         amt, _ = self.c.position_amt(sym)
+        for _ in range(3):  # 응답 지연으로 실패해도 포지션이 남아 있으면 다시 정리 (reduceOnly 라 두 번 팔리지 않음)
+            if amt == 0:
+                break
+            try:
+                r = self.c.order(symbol=sym, side="SELL" if amt > 0 else "BUY", type="MARKET", quantity=fmt(abs(amt)),
+                                 reduceOnly="true", newOrderRespType="RESULT")
+                price = float(r.get("avgPrice", 0) or price)
+                log.info("%s 시장가 정리 %s개 @ %g (%s)", sym, fmt(abs(amt)), price, reason)
+            except BinanceError as exc:
+                log.warning("%s 시장가 정리 주문 오류 (%s), 포지션 다시 확인", sym, exc)
+                self.sleep(2)
+            amt, _ = self.c.position_amt(sym)
         if amt != 0:
-            r = self.c.order(symbol=sym, side="SELL" if amt > 0 else "BUY", type="MARKET", quantity=fmt(abs(amt)),
-                             reduceOnly="true", newOrderRespType="RESULT")
-            price = float(r.get("avgPrice", 0) or price)
-            log.info("%s 시장가 정리 %s개 @ %g (%s)", sym, fmt(abs(amt)), price, reason)
+            log.error("%s 포지션이 아직 %s개 남아 있어요 — 바이낸스 앱에서 직접 정리해 주세요", sym, fmt(abs(amt)))
         self.finish(st, pos, reason, price)
 
     def finish(self, st: DayState, pos: dict, reason: str, exit_px: float) -> None:

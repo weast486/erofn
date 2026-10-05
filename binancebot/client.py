@@ -144,6 +144,13 @@ class BinanceClient:
     def set_leverage(self, symbol: str, leverage: int) -> None:
         self._req("POST", "/fapi/v1/leverage", {"symbol": symbol, "leverage": int(leverage)}, signed=True)
 
+    def set_margin_type(self, symbol: str, margin: str = "CROSSED") -> None:
+        try:
+            self._req("POST", "/fapi/v1/marginType", {"symbol": symbol, "marginType": margin}, signed=True)
+        except BinanceError as exc:
+            if exc.code != -4046:  # -4046 = 이미 그 방식
+                raise
+
     def order(self, **params) -> dict:
         return self._req("POST", "/fapi/v1/order", params, signed=True)
 

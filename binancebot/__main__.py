@@ -10,6 +10,7 @@
     python -m binancebot check        # 키·잔고·오늘 대상 종목 확인 (주문 없음)
     python -m binancebot run          # 오늘 하루 매매
     python -m binancebot loop         # 켜 둔 채 미국 거래일마다 반복
+    python -m binancebot update-settings  # .env.binance 를 최신 설정으로 (API 키 유지, .bak 백업)
 """
 from __future__ import annotations
 
@@ -144,11 +145,12 @@ def main() -> None:
     bt.add_argument("--fee", type=float, default=0.05, help="한쪽 수수료 %%")
     bt.add_argument("--slippage", type=float, default=0.05, help="돌파·손절·정리 한쪽 슬리피지 %%")
     for name, hlp in [("check", "봇: 키·잔고·오늘 대상 종목 확인 (주문 없음)"), ("run", "봇: 오늘 하루 매매"),
-                      ("loop", "봇: 켜 둔 채 미국 거래일마다 반복")]:
+                      ("loop", "봇: 켜 둔 채 미국 거래일마다 반복"),
+                      ("update-settings", "봇: .env.binance 를 최신 설정으로 (API 키 유지)")]:
         sp = sub.add_parser(name, help=hlp)
         sp.add_argument("--env", default=".env.binance")
     a = ap.parse_args()
-    if a.cmd in ("check", "run", "loop"):
+    if a.cmd in ("check", "run", "loop", "update-settings"):
         from .botmain import bot_main
         bot_main(a.cmd, a.env)
         return

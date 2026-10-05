@@ -1,6 +1,6 @@
 """바이낸스 미국 주식 선물 자동매매 — 첫 5분봉 + 1분봉 FVG (사용자 선택 기준, 2026-10-05 백테스트 +500%).
 
-백테스트 하루 2종목: 복리 +1717% (MDD -33%) / 고정 금액 +372% (MDD -22%).
+백테스트 하루 2종목 x 5배(2026-06~09, 1000달러): 67,673달러, 강제청산 없음, MDD -69%, 하루 최악 -52%.
 
 규칙 (시각은 미국 동부):
   1. 장 전: 바이낸스 주식 토큰(EQUITY) 중 전날 정규장 거래대금 상위 N(기본 10) + 추가 종목(BN_EXTRA_SYMBOLS)
@@ -11,7 +11,8 @@
   5. 손절 = 롱은 첫 5분봉 저가, 숏은 고가 (거래소 STOP_MARKET + 봇이 가격 보고 한 번 더 확인)
      익절 = 진입가 ± 손절 거리 x 2 (지정가, 가격 허용 범위 안에 들어오면 주문)
   6. 9:30 + 350분(15:20)에 남은 주문 취소·시장가 정리
-수량 = 진입 때 평가금액 x 레버리지(기본 2배) / 진입가 (2종목이면 동시에 최대 4배). 기본은 드라이런(주문 없이 로그만).
+수량 = 진입 때 평가금액 x 5배 / 진입가 (2종목이면 동시에 최대 10배). 교차 마진, 바이낸스 레버리지 설정 20
+(5배씩 두 종목의 증거금이 모자라지 않게). 기본은 드라이런(주문 없이 로그만).
 """
 from __future__ import annotations
 
@@ -37,7 +38,8 @@ class BotConfig:
     api_key: str = ""
     api_secret: str = ""
     dry_run: bool = True          # true 면 주문 없이 로그만
-    leverage: float = 2.0         # 종목마다 평가금액 x 이 배수만큼 진입
+    leverage: float = 5.0         # 종목마다 평가금액 x 이 배수만큼 진입 (2종목이면 합계 최대 10배)
+    exchange_leverage: int = 20   # 바이낸스 레버리지 설정값 (증거금 계산용; 교차 마진이라 청산 위험은 실제 진입 금액이 결정)
     max_trades: int = 2           # 하루 최대 종목 수 (먼저 체결된 순, 2종목이면 동시에 최대 4배)
     top_n: int = 10               # 전날 정규장 거래대금 상위 N
     extra_symbols: str = ""       # 순위와 상관없이 늘 넣을 종목 (예 BTCUSDT,ETHUSDT — 백테스트 안 됨)
@@ -60,6 +62,7 @@ class BotConfig:
             api_secret=os.environ.get("BINANCE_API_SECRET", ""),
             dry_run=_bool(os.environ.get("BINANCE_DRY_RUN"), True),
             leverage=f("BN_LEVERAGE", "leverage"),
+            exchange_leverage=f("BN_EXCHANGE_LEVERAGE", "exchange_leverage", int),
             max_trades=f("BN_MAX_TRADES", "max_trades", int),
             top_n=f("BN_TOP_N", "top_n", int),
             extra_symbols=_get("BN_EXTRA_SYMBOLS", cls.extra_symbols),
@@ -325,7 +328,8 @@ class FvgTrader:
             log.info("[드라이런] %s %s %s개 @ %g (현재가 %g, 평가금액 %.2f)", sym, side_s, fmt(qty), lvl_r, price, eq)
         else:
             try:
-                self.c.set_leverage(sym, max(1, round(self.cfg.leverage + 0.4999)))
+                self.c.set_margin_type(sym, "CROSSED")  # 교차 마진 (격리면 증거금만큼만 버텨 5% 남짓 움직임에 청산될 수 있음)
+                self.c.set_leverage(sym, max(self.cfg.exchange_leverage, round(self.cfg.leverage + 0.4999)))
                 r = self.c.order(symbol=sym, side=side_s, type="LIMIT", timeInForce="IOC", quantity=fmt(qty),
                                  price=fmt(lvl_r), newOrderRespType="RESULT")
             except BinanceError as exc:

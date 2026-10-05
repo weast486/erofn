@@ -147,7 +147,7 @@ def _read_env(path: Path) -> dict[str, str]:
     return out
 
 
-def update_settings(env_path: Path, example_path: Path) -> list[tuple[str, str, str]]:
+def update_settings(env_path: Path, example_path: Path, keep: tuple = KEEP_KEYS) -> list[tuple[str, str, str]]:
     """예시 파일(최신 추천 전략)로 .env.kiwoom 을 다시 쓴다. 키·모의투자·드라이런·경로는 기존 값 유지.
     기존 파일은 .bak 으로 남긴다. (바뀐 항목, 이전 값, 새 값) 목록을 돌려줌 (키 값은 숨김)."""
     old = _read_env(env_path)
@@ -158,7 +158,7 @@ def update_settings(env_path: Path, example_path: Path) -> list[tuple[str, str, 
         if s and not s.startswith("#") and "=" in s:
             k, v = s.split("=", 1)
             k, v = k.strip(), v.strip()
-            if k in KEEP_KEYS and k in old:
+            if k in keep and k in old:
                 v = old[k]
             elif old.get(k, None) != v:
                 changes.append((k, old.get(k, "(없음)"), v))

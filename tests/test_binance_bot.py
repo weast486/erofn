@@ -87,7 +87,7 @@ class BotTest(unittest.TestCase):
         self.assertEqual(st.signals["AUSDT"][:2], [1, 101.5])
         pos = st.positions["AUSDT"]
         self.assertEqual(pos["entry"], 101.5)
-        self.assertAlmostEqual(pos["qty"], round_step(2000 / 101.5, 0.001))
+        self.assertAlmostEqual(pos["qty"], round_step(5000 / 101.5, 0.001))
         self.assertEqual((st.phase, pos["result"]["reason"]), ("done", "target"))
         self.assertAlmostEqual(pos["result"]["exit"], 106.5)
         self.assertEqual(st.result["trades"], 1)
@@ -157,6 +157,9 @@ class FakeLive(FakeClient):
     def equity(self):
         return 500.0
 
+    def set_margin_type(self, symbol, margin="CROSSED"):
+        self.orders.append(("margin", margin))
+
     def set_leverage(self, symbol, leverage):
         self.orders.append(("leverage", leverage))
 
@@ -200,10 +203,11 @@ class LiveTest(unittest.TestCase):
         cfg = BotConfig(top_n=1, state_dir=tempfile.mkdtemp(), dry_run=False, api_key="k", api_secret="s")
         st = FvgTrader(client, cfg, now_fn=clock.now, sleep_fn=clock.sleep).run(DAY)
         kinds = [o[0] for o in client.orders]
-        self.assertEqual(kinds[:3], ["leverage", "LIMIT", "STOP"])
+        self.assertEqual(kinds[:4], ["margin", "leverage", "LIMIT", "STOP"])
+        self.assertEqual(client.orders[1], ("leverage", 20))   # 5배 두 종목 증거금용 설정
         self.assertIn(("LIMIT", "SELL", "106.5", "true"), client.orders)
         self.assertEqual(st.positions["AUSDT"]["result"]["reason"], "target")
-        self.assertAlmostEqual(st.positions["AUSDT"]["qty"], round_step(1000 / 101.5, 0.001))
+        self.assertAlmostEqual(st.positions["AUSDT"]["qty"], round_step(2500 / 101.5, 0.001))
 
 
 class HelperTest(unittest.TestCase):

@@ -51,7 +51,20 @@ def check(trader: FvgTrader, cfg: BotConfig) -> None:
     print("확인 끝 (주문은 보내지 않았어요)")
 
 
+KEEP = ("BINANCE_API_KEY", "BINANCE_API_SECRET", "BN_STATE_DIR")
+
+
 def bot_main(cmd: str, env: str) -> None:
+    if cmd == "update-settings":
+        from kiwoombot.__main__ import update_settings
+
+        changes = update_settings(Path(env), Path(".env.binance.example"), KEEP)
+        print(f"{env} 를 최신 설정으로 바꿨어요 (이전 파일: {Path(env).name}.bak, API 키는 그대로).")
+        for k, before, after in changes:
+            print(f"  {k}: {before} → {after}")
+        if not changes:
+            print("  바뀐 항목 없음 (이미 최신)")
+        return
     load_dotenv(env)
     cfg = BotConfig.from_env()
     setup_logging(cfg.state_dir)
@@ -75,6 +88,8 @@ def bot_main(cmd: str, env: str) -> None:
     if lock is None:
         print("바이낸스 봇이 이미 켜져 있어요. 먼저 켠 창이 그대로 돌고 있으니 이 창은 닫아도 됩니다.")
         return
+    if not cfg.dry_run:
+        logging.getLogger("binancebot").warning("실제 주문 모드: %s", cfg.describe())
     if cmd == "loop":
         loop(make, cfg)
     else:

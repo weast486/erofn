@@ -161,6 +161,15 @@ class Params:
     rsi_sell: float = 50.0
     rsi_source: str = "rth"     # RSI 계산 봉: rth = 정규장 / all = 받아 둔 봉 전부
     rsi_side: str = "long"      # long / short / both
+    # boll: 장중 볼린저밴드 (boll_trades 참고), 손절·익절은 stop_pct·take_profit_pct
+    boll_tf: int = 5
+    boll_len: int = 20
+    boll_k: float = 2.0
+    boll_mode: str = "reversion"   # reversion = 밴드 밖에서 되돌림 / breakout = 밴드 돌파 추종
+    boll_exit: str = "mid"         # reversion 청산: mid = 중심선 / upper = 반대편 밴드
+    boll_side: str = "long"        # long / short / both
+    boll_source: str = "rth"
+    boll_min_width: float = 0.0    # 밴드 폭(상단-하단)/중심선 % 하한 (0 = 조건 없음)
     surge_entry: str = "stop"  # stop = 전날 종가에 역지정가 / next = 넘은 1분봉 다음 봉 시가 (보수적)
     size_mode: str = "risk"  # risk = 손절 금액 기준(위험 %) / lev = 평가금액 x 고정 배율
     lev_etf: float = 2.0     # size_mode=lev: 레버리지 ETF 배율
@@ -948,7 +957,6 @@ def vbreak_trades(symbol: str, mins: list[MinBar], p: Params) -> tuple[list[Trad
 def rsi_trades(symbol: str, mins: list[MinBar], p: Params) -> tuple[list[Trade], dict]:
     """장중 RSI 평균회귀 (1분봉으로 손절·익절 확인). 신호는 완성된 tf 분봉 종가 RSI, 진입·청산은 다음 tf 봉 첫 1분봉 시가(테이커).
     진입은 정규장 vwap_start~buy_until, 한 번에 한 포지션, exit_time 정리."""
-    slip = p.rule.slippage_pct / 100
     bars = tf_bars(mins, p.rsi_tf, p.rsi_source)
     rsi = rsi_values([b[4] for b in bars], p.rsi_period)
     sides = [s for s in (1, -1) if p.rsi_side == "both" or (s == 1) == (p.rsi_side == "long")]
@@ -966,10 +974,51 @@ def rsi_trades(symbol: str, mins: list[MinBar], p: Params) -> tuple[list[Trade],
                 enter_at.setdefault(nxt, s)
             if (r >= hi) if s == 1 else (r <= hi):
                 exit_at.setdefault(nxt, set()).add(s)
+    return signal_trades(symbol, mins, p, p.rsi_tf, enter_at, exit_at)
+
+
+def boll_trades(symbol: str, mins: list[MinBar], p: Params) -> tuple[list[Trade], dict]:
+    """장중 볼린저밴드. 신호는 완성된 tf 분봉 종가, 진입·청산은 다음 tf 봉 첫 1분봉 시가.
+    reversion: 종가가 하단 아래면 롱 → 종가가 중심선(boll_exit=mid) 또는 상단(upper) 이상이면 청산 (숏은 반대)
+    breakout: 종가가 상단 위면 롱 → 종가가 중심선 아래면 청산 (숏은 반대)"""
+    bars = tf_bars(mins, p.boll_tf, p.boll_source)
+    c = [b[4] for b in bars]
+    n, k = p.boll_len, p.boll_k
+    sides = [s for s in (1, -1) if p.boll_side == "both" or (s == 1) == (p.boll_side == "long")]
+    enter_at: dict[datetime, int] = {}
+    exit_at: dict[datetime, set[int]] = {}
+    for i in range(n - 1, len(bars) - 1):
+        w = c[i - n + 1:i + 1]
+        mid = sum(w) / n
+        sd = (sum((x - mid) ** 2 for x in w) / n) ** 0.5
+        up, lo = mid + k * sd, mid - k * sd
+        if p.boll_min_width > 0 and (up - lo) / mid * 100 < p.boll_min_width:
+            width_ok = False
+        else:
+            width_ok = True
+        nxt = bars[i + 1][0]
+        x = c[i]
+        for s in sides:
+            if p.boll_mode == "reversion":
+                ent = (x < lo) if s == 1 else (x > up)
+                tgt = (mid if p.boll_exit == "mid" else up) if s == 1 else (mid if p.boll_exit == "mid" else lo)
+                ext = (x >= tgt) if s == 1 else (x <= tgt)
+            else:
+                ent = (x > up) if s == 1 else (x < lo)
+                ext = (x < mid) if s == 1 else (x > mid)
+            if ent and width_ok:
+                enter_at.setdefault(nxt, s)
+            if ext:
+                exit_at.setdefault(nxt, set()).add(s)
+    return signal_trades(symbol, mins, p, p.boll_tf, enter_at, exit_at)
+
+
+def signal_trades(symbol: str, mins: list[MinBar], p: Params, tf: int, enter_at: dict, exit_at: dict) -> tuple[list[Trade], dict]:
+    """tf 봉 시작 시각별 진입·청산 신호로 1분봉 매매. stop_pct 손절·take_profit_pct 익절(0 = 없음), exit_time 정리."""
+    slip = p.rule.slippage_pct / 100
     stats = {"signals": len(enter_at), "entries": 0}
     trades: list[Trade] = []
     pos = None  # (방향, 진입 1분봉, 진입가, 손절, 익절)
-    tf = p.rsi_tf
     for b in mins:
         if not is_rth(b.t):
             continue
@@ -1198,8 +1247,8 @@ def run(data_dir: Path, p: Params, symbols: list[str] | None = None, capital: fl
                 apply_funding(t, funding)
                 trades.append(t)
             continue
-        if p.strategy == "rsi":
-            tr, st = rsi_trades(sym, load_minutes(f), p)
+        if p.strategy in ("rsi", "boll"):
+            tr, st = (rsi_trades if p.strategy == "rsi" else boll_trades)(sym, load_minutes(f), p)
             if verbose:
                 print(f"{sym}: 신호 {st['signals']}개, 진입 {st['entries']}건")
             for t in tr:

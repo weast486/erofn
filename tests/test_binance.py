@@ -5,7 +5,7 @@ import unittest
 from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 
-from binancebot.backtest import ET, Bar, MinBar, Params, flag_setups, orb_trade, run, first5_trades, rsi_values, rsi_trades, vbreak_setups, surge_trade, swing_setups, vwap_trade, vwma_trades
+from binancebot.backtest import ET, Bar, MinBar, Params, flag_setups, orb_trade, run, first5_trades, rsi_values, rsi_trades, boll_trades, vbreak_setups, surge_trade, swing_setups, vwap_trade, vwma_trades
 from binancebot.data import keep_bar, tradfi_symbols
 from binancebot.sizing import SizeRule, position_size
 
@@ -179,6 +179,20 @@ class RsiIntradayTest(unittest.TestCase):
         self.assertEqual(trades[0].reason, "signal")
         self.assertEqual(trades[0].entry_t, t0 + timedelta(minutes=4))  # 3번째 하락 뒤(RSI 0) 다음 봉 시가
         self.assertGreater(trades[0].exit, trades[0].entry - 5)
+
+
+class BollTest(unittest.TestCase):
+    def test_reversion_long_exit_mid(self):
+        t0 = datetime(2026, 9, 1, 9, 30, tzinfo=ET)
+        closes = [100, 101] * 5 + [95, 96, 99, 101, 101]  # 하단 아래로 급락 → 중심선 회복
+        mins = [MinBar(t0 + timedelta(minutes=i), c, c + 0.1, c - 0.1, c, 1.0) for i, c in enumerate(closes)]
+        p = Params(strategy="boll", boll_tf=1, boll_len=10, boll_k=2, stop_pct=0, vwap_start=time(9, 30), rule=SizeRule(2, 5, 0, 0))
+        trades, _ = boll_trades("X", mins, p)
+        self.assertEqual((trades[0].side, trades[0].reason), (1, "signal"))
+        self.assertEqual(trades[0].entry_t, t0 + timedelta(minutes=11))
+        self.assertAlmostEqual(trades[0].entry, 96)
+        p.boll_mode = "breakout"
+        self.assertEqual(boll_trades("X", mins, p)[0], [])
 
 
 class First5Test(unittest.TestCase):

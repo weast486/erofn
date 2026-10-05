@@ -27,7 +27,7 @@ def main() -> None:
     bt.add_argument("--capital", type=float, default=1000.0, help="시작 금액 (USDT)")
     bt.add_argument("--start", type=date.fromisoformat)
     bt.add_argument("--end", type=date.fromisoformat)
-    bt.add_argument("--strategy", choices=["orb", "vwap", "surge", "vwma", "swing", "flag", "first5", "vbreak", "rsi"], default="orb")
+    bt.add_argument("--strategy", choices=["orb", "vwap", "surge", "vwma", "swing", "flag", "first5", "vbreak", "rsi", "boll"], default="orb")
     bt.add_argument("--vwap-dev", type=float, default=2.0, help="vwap: VWAP 에서 벗어난 %% 에 지정가 진입")
     bt.add_argument("--vwap-start", type=time.fromisoformat, default=time(10, 0), help="vwap·vwma: 이 시각부터 진입")
     bt.add_argument("--buy-until", type=time.fromisoformat, default=time(15, 0), help="vwap·surge: 진입 마감 (미국 동부)")
@@ -61,6 +61,14 @@ def main() -> None:
     bt.add_argument("--rsi-sell", type=float, default=50.0, help="rsi: 이 값 이상이면 매도 (숏은 100-값 이하)")
     bt.add_argument("--rsi-source", choices=["rth", "all"], default="rth")
     bt.add_argument("--rsi-side", choices=["long", "short", "both"], default="long")
+    bt.add_argument("--boll-tf", type=int, default=5, help="boll: 분봉 단위")
+    bt.add_argument("--boll-len", type=int, default=20)
+    bt.add_argument("--boll-k", type=float, default=2.0, help="boll: 표준편차 배수")
+    bt.add_argument("--boll-mode", choices=["reversion", "breakout"], default="reversion")
+    bt.add_argument("--boll-exit", choices=["mid", "upper"], default="mid", help="boll reversion: 중심선 / 반대편 밴드에서 청산")
+    bt.add_argument("--boll-side", choices=["long", "short", "both"], default="long")
+    bt.add_argument("--boll-source", choices=["rth", "all"], default="rth")
+    bt.add_argument("--boll-min-width", type=float, default=0.0, help="boll: 밴드 폭 %% 하한")
     bt.add_argument("--vb-tf", type=int, default=15, help="vbreak: 분봉 단위")
     bt.add_argument("--vb-len", type=int, default=100, help="vbreak: VWMA 길이")
     bt.add_argument("--vb-fast", type=int, default=20, help="vbreak: 정배열 빠른선")
@@ -150,6 +158,8 @@ def main() -> None:
                    flag_vol=a.flag_vol, flag_source=a.flag_source, flag_entry_bar=a.flag_entry_bar,
                    rsi_tf=a.rsi_tf, rsi_period=a.rsi_period, rsi_buy=a.rsi_buy, rsi_sell=a.rsi_sell,
                    rsi_source=a.rsi_source, rsi_side=a.rsi_side,
+                   boll_tf=a.boll_tf, boll_len=a.boll_len, boll_k=a.boll_k, boll_mode=a.boll_mode,
+                   boll_exit=a.boll_exit, boll_side=a.boll_side, boll_source=a.boll_source, boll_min_width=a.boll_min_width,
                    vb_tf=a.vb_tf, vb_len=a.vb_len, vb_fast=a.vb_fast, vb_mid=a.vb_mid, vb_ma=a.vb_ma,
                    vb_wait=a.vb_wait, vb_target_r=a.vb_target_r, vb_source=a.vb_source, vb_side=a.vb_side,
                    vb_expire=a.vb_expire,

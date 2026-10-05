@@ -118,7 +118,10 @@ def download_funding(session, symbol: str, start_ms: int, out: Path) -> None:
             w.writerow([r["fundingTime"], r["fundingRate"], r.get("markPrice", "")])
 
 
-def download_all(out_dir: Path, symbols: list[str] | None = None) -> list[Path]:
+def download_all(out_dir: Path, symbols: list[str] | None = None, add: list[str] | None = None,
+                 since: str = "2026-01-01") -> list[Path]:
+    """add: TradFi 목록은 그대로 두고 이 종목(예 BTCUSDT ETHUSDT)만 since 부터 받아 따로 묶음(binance_extra_N.zip).
+    symbols.json 에는 추가 종목 정보도 함께 저장."""
     import requests
 
     from tossbot.backtest import split_zip
@@ -127,6 +130,26 @@ def download_all(out_dir: Path, symbols: list[str] | None = None) -> list[Path]:
     session = requests.Session()
     info = _get(session, "/fapi/v1/exchangeInfo")
     cand = tradfi_symbols(info)
+    if add:
+        want = {s.upper() for s in add}
+        extra = [s for s in info["symbols"] if s["symbol"] in want]
+        sj = out_dir / "symbols.json"
+        old = json.loads(sj.read_text(encoding="utf-8")) if sj.exists() else {"symbols": cand}
+        keep = [s for s in old["symbols"] if s["symbol"] not in want]
+        sj.write_text(json.dumps(dict(old, symbols=keep + extra), ensure_ascii=False, indent=1), encoding="utf-8")
+        start0 = int(datetime.fromisoformat(since).replace(tzinfo=timezone.utc).timestamp() * 1000)
+        files = [sj]
+        for s in extra:
+            sym = s["symbol"]
+            start = max(start0, int(s.get("onboardDate") or 0))
+            print(f"{sym} {datetime.fromtimestamp(start / 1000, tz=timezone.utc):%Y-%m-%d} 부터", flush=True)
+            k, fr = out_dir / f"{sym}_1m.csv.gz", out_dir / f"{sym}_funding.csv"
+            print(f"  1분봉 {download_klines(session, sym, start, k)}개 추가", flush=True)
+            download_funding(session, sym, start, fr)
+            files += [k, fr]
+        parts = split_zip([f for f in files if f.exists()], out_dir.parent / (out_dir.name + "_extra"))
+        print(f"완료. 묶음 파일 {len(parts)}개: " + ", ".join(str(p) for p in parts))
+        return parts
     if symbols:
         want = {s.upper() for s in symbols}
         cand = [s for s in info["symbols"] if s["symbol"] in want]

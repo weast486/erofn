@@ -5,7 +5,7 @@ import unittest
 from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 
-from binancebot.backtest import ET, Bar, MinBar, Params, flag_setups, orb_trade, run, first5_trades, rsi_values, rsi_trades, boll_trades, vbreak_setups, surge_trade, swing_setups, vwap_trade, vwma_trades
+from binancebot.backtest import ET, Bar, MinBar, Params, flag_setups, orb_trade, run, first5_trades, fvg_trades, one_per_day, Trade, rsi_values, rsi_trades, boll_trades, vbreak_setups, surge_trade, swing_setups, vwap_trade, vwma_trades
 from binancebot.data import keep_bar, tradfi_symbols
 from binancebot.sizing import SizeRule, position_size
 
@@ -262,3 +262,34 @@ class RunTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class FvgTest(unittest.TestCase):
+    def _mins(self, pxs):
+        t0 = datetime(2026, 9, 1, 9, 30, tzinfo=ET)
+        return [MinBar(t0 + timedelta(minutes=i), o, h, l, c, 100) for i, (o, h, l, c) in enumerate(pxs)]
+
+    def test_long_fvg_above_high_fill_and_stop(self):
+        first = [(100, 101, 99, 100.5)] * 5                       # 첫 5분봉 고가 101 · 저가 99
+        fvg = [(101, 101.5, 100.8, 101.4), (101.4, 103, 101.3, 102.9), (102.9, 103.5, 102.2, 103.2)]  # 1번째 고가 101.5 < 3번째 저가 102.2
+        after = [(103.2, 103.3, 102.0, 102.1), (102.1, 102.2, 98.5, 98.6)]  # 102.2 에 체결 → 99 이탈 손절
+        p = Params(strategy="fvg", rule=SizeRule(2, 5, 0, 0))
+        trades, st = fvg_trades("X", self._mins(first + fvg + after), p)
+        self.assertEqual(len(trades), 1)
+        t = trades[0]
+        self.assertEqual((t.side, t.reason), (1, "stop"))
+        self.assertAlmostEqual(t.entry, 102.2)
+        self.assertAlmostEqual(t.exit, 99)
+        p.fvg_entry = "full"                                       # 101.5 까지 안 내려오면 체결 없음
+        self.assertEqual(fvg_trades("X", self._mins(first + fvg + after[:1]), p)[0], [])
+
+    def test_short_target_and_one_per_day(self):
+        first = [(100, 101, 99, 99.5)] * 5
+        fvg = [(99, 98.8, 98.5, 98.6), (98.6, 98.6, 97, 97.1), (97.1, 97.8, 96.8, 97.0)]   # 1번째 저가 98.5 > 3번째 고가 97.8
+        after = [(97.0, 98.0, 96.9, 97.9), (97.9, 97.9, 90, 90.5)]  # 97.8 숏 → 위험 3.2, 1R 익절 94.6
+        p = Params(strategy="fvg", fvg_target_r=1, rule=SizeRule(2, 5, 0, 0))
+        trades, _ = fvg_trades("X", self._mins(first + fvg + after), p)
+        self.assertEqual((trades[0].side, trades[0].reason), (-1, "target"))
+        self.assertAlmostEqual(trades[0].exit, 94.6)
+        b = Trade("Y", trades[0].day, 1, trades[0].entry_t + timedelta(minutes=1), 1, 0.9, trades[0].exit_t, 1, "time")
+        self.assertEqual([t.symbol for t in one_per_day([b, trades[0]])], ["X"])

@@ -170,6 +170,16 @@ class Params:
     boll_side: str = "long"        # long / short / both
     boll_source: str = "rth"
     boll_min_width: float = 0.0    # 밴드 폭(상단-하단)/중심선 % 하한 (0 = 조건 없음)
+    # fvg: 첫 5분봉(9:30~9:35) 고가·저가 → 1분봉 FVG(3봉 갭)가 고가 위면 롱, 저가 아래면 숏, 갭 되돌림 지정가 진입
+    fvg_loc: str = "zone"          # zone = 갭 전체가 고가 위(저가 아래) / mid = 가운데 봉 종가가 고가 위(저가 아래)
+    fvg_entry: str = "edge"        # edge = 갭 첫 닿음(3번째 봉 저가) / mid = 갭 가운데 / full = 갭 다 메움(1번째 봉 고가)
+    fvg_pick: str = "latest"       # first = 그날 첫 FVG 만 / latest = 체결 전 새 FVG 가 나오면 그것으로 바꿈
+    fvg_target_r: float = 0.0      # 익절 = 위험(진입가-첫 봉 반대편) x R (0 = 없음, 정리 시각까지)
+    fvg_min_gap: float = 0.0       # 갭 크기 / 가격 % 하한
+    fvg_side: str = "both"         # long / short / both
+    fvg_minutes: int = 350         # 9:30 부터 N분 뒤 모두 정리 (350 = 15:20)
+    fvg_stop_mode: str = "touch"   # touch = 첫 봉 반대편 닿으면 / close = 1분봉 종가가 넘으면
+    fvg_one_per_day: bool = True   # 하루 한 종목 (모든 종목 중 가장 먼저 체결된 것)
     surge_entry: str = "stop"  # stop = 전날 종가에 역지정가 / next = 넘은 1분봉 다음 봉 시가 (보수적)
     size_mode: str = "risk"  # risk = 손절 금액 기준(위험 %) / lev = 평가금액 x 고정 배율
     lev_etf: float = 2.0     # size_mode=lev: 레버리지 ETF 배율
@@ -1189,6 +1199,94 @@ def first5_trades(symbol: str, mins: list[MinBar], p: Params) -> tuple[list[Trad
     return trades, dict(st)
 
 
+def fvg_trades(symbol: str, mins: list[MinBar], p: Params) -> tuple[list[Trade], dict]:
+    """첫 5분봉 고가·저가 기준 1분봉 FVG 되돌림 진입. 손절 = 롱은 첫 봉 저가, 숏은 첫 봉 고가 이탈. 하루 한 번."""
+    slip = p.rule.slippage_pct / 100
+    days: dict[date, list[MinBar]] = defaultdict(list)
+    for b in mins:
+        if is_rth(b.t):
+            days[b.t.date()].append(b)
+    trades: list[Trade] = []
+    st = Counter()
+    for d in sorted(days):
+        bars = days[d]
+        if bars[0].t.time() != time(9, 30):
+            continue
+        first = [b for b in bars if b.t.time() < time(9, 35)]
+        h1, l1 = max(b.h for b in first), min(b.l for b in first)
+        rest = [b for b in bars if b.t.time() >= time(9, 35)]
+        close_t = datetime.combine(d, time(9, 30), ET) + timedelta(minutes=p.fvg_minutes)
+        st["days"] += 1
+        pend = None  # (side, 진입가)
+        entry = None
+        for i, b in enumerate(rest):
+            if b.t >= close_t:
+                break
+            if pend is not None:  # 앞 봉까지 생긴 FVG 의 지정가 체결 확인
+                side, lvl = pend
+                if (b.l <= lvl) if side == 1 else (b.h >= lvl):
+                    entry, ei = (min(b.o, lvl) if side == 1 else max(b.o, lvl)), i
+                    break
+            if i >= 2 and (pend is None or p.fvg_pick == "latest"):
+                a, m = rest[i - 2], rest[i - 1]
+                for side in (1, -1):
+                    if (side == 1 and p.fvg_side == "short") or (side == -1 and p.fvg_side == "long"):
+                        continue
+                    if side == 1:
+                        lo, hi = a.h, b.l  # 상승 갭: 1번째 봉 고가 < 3번째 봉 저가
+                        ok = hi > lo and (lo >= h1 if p.fvg_loc == "zone" else m.c > h1)
+                    else:
+                        lo, hi = b.h, a.l  # 하락 갭: 3번째 봉 고가 < 1번째 봉 저가
+                        ok = hi > lo and (hi <= l1 if p.fvg_loc == "zone" else m.c < l1)
+                    if not ok or (hi - lo) / b.c * 100 < p.fvg_min_gap:
+                        continue
+                    edge, full = (hi, lo) if side == 1 else (lo, hi)
+                    lvl = {"edge": edge, "full": full, "mid": (lo + hi) / 2}[p.fvg_entry]
+                    pend = (side, lvl)
+                    st["fvg"] += 1
+        if entry is None:
+            continue
+        side = pend[0]
+        stop = l1 if side == 1 else h1
+        risk = abs(entry - stop)
+        tgt = entry + side * risk * p.fvg_target_r if p.fvg_target_r > 0 else None
+        eb = rest[ei]
+        st["entries"] += 1
+
+        def done(b, px, reason, maker=False):
+            trades.append(Trade(symbol, d, side, eb.t, entry, stop, b.t, px, reason,
+                                fee_entry=p.maker_fee, fee_exit=p.maker_fee if maker else None))
+
+        for j, b in enumerate(rest[ei:]):
+            if j > 0 and b.t >= close_t:
+                done(b, b.o * (1 - side * slip), "time")
+                break
+            if p.fvg_stop_mode == "touch":
+                hit = (b.l < stop) if side == 1 else (b.h > stop)
+                px = (min(b.o, stop) if side == 1 else max(b.o, stop)) if j > 0 else stop
+            else:
+                hit = (b.c < stop) if side == 1 else (b.c > stop)
+                px = b.c
+            if hit:
+                done(b, px * (1 - side * slip), "stop")
+                break
+            if tgt is not None and j > 0 and ((b.h >= tgt) if side == 1 else (b.l <= tgt)):
+                done(b, max(b.o, tgt) if side == 1 else min(b.o, tgt), "target", True)
+                break
+        else:
+            last = rest[-1]
+            done(last, last.c * (1 - side * slip), "time")
+    return trades, dict(st)
+
+
+def one_per_day(trades: list[Trade], order: dict | None = None) -> list[Trade]:
+    """하루 한 종목: 진입이 가장 빠른 거래만 (같은 분이면 order[(날짜, 종목)] 작은 순, 없으면 종목 이름 순)."""
+    best: dict[date, Trade] = {}
+    for t in sorted(trades, key=lambda t: (t.entry_t, (order or {}).get((t.day, t.symbol), 10**9), t.symbol)):
+        best.setdefault(t.day, t)
+    return sorted(best.values(), key=lambda t: t.entry_t)
+
+
 def make_trade(sym: str, d: date, bars: list[Bar], p: Params, prev_close: float | None, prev_change: float | None) -> Trade | None:
     slip = p.rule.slippage_pct
     if p.strategy == "vwap":
@@ -1257,6 +1355,16 @@ def run(data_dir: Path, p: Params, symbols: list[str] | None = None, capital: fl
                 apply_funding(t, funding)
                 trades.append(t)
             continue
+        if p.strategy == "fvg":
+            tr, st = fvg_trades(sym, load_minutes(f), p)
+            if verbose:
+                print(f"{sym}: FVG {st.get('fvg', 0)}개, 진입 {st.get('entries', 0)}건")
+            for t in tr:
+                if (start and t.day < start) or (end and t.day > end):
+                    continue
+                apply_funding(t, funding)
+                trades.append(t)
+            continue
         if p.strategy == "vbreak":
             tr, st = vbreak_trades(sym, load_minutes(f), p)
             if verbose:
@@ -1290,6 +1398,8 @@ def run(data_dir: Path, p: Params, symbols: list[str] | None = None, capital: fl
             if t:
                 apply_funding(t, funding)
                 trades.append(t)
+    if p.strategy == "fvg" and p.fvg_one_per_day:
+        trades = one_per_day(trades)
     done, eod = simulate(trades, p, capital, filters)
     return summarize(done, eod, capital, verbose)
 

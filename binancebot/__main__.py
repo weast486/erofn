@@ -21,13 +21,15 @@ def main() -> None:
     dl = sub.add_parser("download", help="TradFi 무기한 선물 1분봉·펀딩비 받기")
     dl.add_argument("--out", default="data/binance")
     dl.add_argument("--symbols", nargs="*")
+    dl.add_argument("--add", nargs="*", help="TradFi 목록은 두고 이 종목만 추가로 받기 (예 BTCUSDT ETHUSDT)")
+    dl.add_argument("--since", default="2026-01-01", help="--add 종목을 받을 시작 날짜")
     bt = sub.add_parser("backtest", help="당일 단타 백테스트")
     bt.add_argument("--data", default="data/binance")
     bt.add_argument("--symbols", nargs="*")
     bt.add_argument("--capital", type=float, default=1000.0, help="시작 금액 (USDT)")
     bt.add_argument("--start", type=date.fromisoformat)
     bt.add_argument("--end", type=date.fromisoformat)
-    bt.add_argument("--strategy", choices=["orb", "vwap", "surge", "vwma", "swing", "flag", "first5", "vbreak", "rsi", "boll"], default="orb")
+    bt.add_argument("--strategy", choices=["orb", "vwap", "surge", "vwma", "swing", "flag", "first5", "vbreak", "rsi", "boll", "fvg"], default="orb")
     bt.add_argument("--vwap-dev", type=float, default=2.0, help="vwap: VWAP 에서 벗어난 %% 에 지정가 진입")
     bt.add_argument("--vwap-start", type=time.fromisoformat, default=time(10, 0), help="vwap·vwma: 이 시각부터 진입")
     bt.add_argument("--buy-until", type=time.fromisoformat, default=time(15, 0), help="vwap·surge: 진입 마감 (미국 동부)")
@@ -69,6 +71,15 @@ def main() -> None:
     bt.add_argument("--boll-side", choices=["long", "short", "both"], default="long")
     bt.add_argument("--boll-source", choices=["rth", "all"], default="rth")
     bt.add_argument("--boll-min-width", type=float, default=0.0, help="boll: 밴드 폭 %% 하한")
+    bt.add_argument("--fvg-loc", choices=["zone", "mid"], default="zone", help="fvg: 갭 전체가 첫 봉 고가 위 / 가운데 봉 종가가 위")
+    bt.add_argument("--fvg-entry", choices=["edge", "mid", "full"], default="edge", help="fvg: 갭 첫 닿음 / 가운데 / 다 메움")
+    bt.add_argument("--fvg-pick", choices=["first", "latest"], default="latest")
+    bt.add_argument("--fvg-target-r", type=float, default=0.0, help="fvg: 익절 = 위험 x R (0 = 없음)")
+    bt.add_argument("--fvg-min-gap", type=float, default=0.0, help="fvg: 갭 크기 %% 하한")
+    bt.add_argument("--fvg-side", choices=["long", "short", "both"], default="both")
+    bt.add_argument("--fvg-minutes", type=int, default=350, help="fvg: 9:30 부터 N분 뒤 모두 정리")
+    bt.add_argument("--fvg-stop-mode", choices=["touch", "close"], default="touch")
+    bt.add_argument("--fvg-all-symbols", action="store_true", help="fvg: 하루 한 종목 제한 없이 모두")
     bt.add_argument("--vb-tf", type=int, default=15, help="vbreak: 분봉 단위")
     bt.add_argument("--vb-len", type=int, default=100, help="vbreak: VWMA 길이")
     bt.add_argument("--vb-fast", type=int, default=20, help="vbreak: 정배열 빠른선")
@@ -130,7 +141,7 @@ def main() -> None:
     a = ap.parse_args()
     if a.cmd == "download":
         from .data import download_all
-        download_all(Path(a.out), a.symbols)
+        download_all(Path(a.out), a.symbols, a.add, a.since)
     else:
         from .backtest import Params, run
         p = Params(orb_minutes=a.orb, direction=a.direction, stop_mode=a.stop_mode, target_r=a.target_r,
@@ -160,6 +171,9 @@ def main() -> None:
                    rsi_source=a.rsi_source, rsi_side=a.rsi_side,
                    boll_tf=a.boll_tf, boll_len=a.boll_len, boll_k=a.boll_k, boll_mode=a.boll_mode,
                    boll_exit=a.boll_exit, boll_side=a.boll_side, boll_source=a.boll_source, boll_min_width=a.boll_min_width,
+                   fvg_loc=a.fvg_loc, fvg_entry=a.fvg_entry, fvg_pick=a.fvg_pick, fvg_target_r=a.fvg_target_r,
+                   fvg_min_gap=a.fvg_min_gap, fvg_side=a.fvg_side, fvg_minutes=a.fvg_minutes,
+                   fvg_stop_mode=a.fvg_stop_mode, fvg_one_per_day=not a.fvg_all_symbols,
                    vb_tf=a.vb_tf, vb_len=a.vb_len, vb_fast=a.vb_fast, vb_mid=a.vb_mid, vb_ma=a.vb_ma,
                    vb_wait=a.vb_wait, vb_target_r=a.vb_target_r, vb_source=a.vb_source, vb_side=a.vb_side,
                    vb_expire=a.vb_expire,

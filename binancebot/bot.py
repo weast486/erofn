@@ -6,7 +6,8 @@
   1. 장 전: 바이낸스 주식 토큰(EQUITY) 중 전날 정규장 거래대금 상위 N(기본 10) + 추가 종목(BN_EXTRA_SYMBOLS)
   2. 첫 5분봉(9:30~9:35) 고가·저가
   3. 9:35 부터 1분봉 FVG(3봉 갭)가 고가 위에 생기면 롱, 저가 아래면 숏 — 종목마다 그날 첫 FVG 만
-  4. 가격이 갭을 다 메운 곳(롱 = 1번째 봉 고가)에 닿으면 그 가격 지정가(IOC)로 진입 — 하루 최대 2종목(먼저 체결된 순)
+  4. 가격이 갭을 다 메운 곳(롱 = 1번째 봉 고가)에 닿으면 그 가격 지정가(IOC)로 진입 — 하루 최대 2종목(먼저 닿은 순,
+     같은 순간이면 ADR = 20일 평균 변동폭 높은 순)
   5. 손절 = 롱은 첫 5분봉 저가, 숏은 고가 (거래소 STOP_MARKET + 봇이 가격 보고 한 번 더 확인)
      익절 = 진입가 ± 손절 거리 x 2 (지정가, 가격 허용 범위 안에 들어오면 주문)
   6. 9:30 + 350분(15:20)에 남은 주문 취소·시장가 정리
@@ -125,6 +126,7 @@ class DayState:
     candidates: list = field(default_factory=list)
     ranges: dict = field(default_factory=dict)     # 종목 → [고가, 저가]
     signals: dict = field(default_factory=dict)    # 종목 → [방향, 진입가, FVG 시각]
+    adr: dict = field(default_factory=dict)        # 종목 → 전날까지 20거래일 정규장 (고가/저가-1)% 평균
     dropped: list = field(default_factory=list)
     positions: dict = field(default_factory=dict)  # 종목 → 진입·손절·익절·결과
     result: dict = field(default_factory=dict)
@@ -181,6 +183,27 @@ class FvgTrader:
                  ", ".join(f"{s} {qv[s] / 1e6:,.0f}M" for s in top))
         return top + sorted(want - set(top))
 
+    def adr(self, day: date, symbols: list[str], n: int = 20) -> dict[str, float]:
+        """ADR = 전날까지 n 거래일 정규장 (고가/저가 - 1)% 평균 (30분봉으로 계산, 정규장 9:30~16:00 이 30분 단위로 맞음)."""
+        start = at(day - timedelta(days=int(n * 1.6) + 7), 9, 30)
+        out = {}
+        for sym in symbols:
+            hl: dict[date, list[float]] = {}
+            for k in self.c.klines(sym, ms(start), limit=1500, interval="30m"):
+                t = datetime.fromtimestamp(int(k[0]) / 1000, ET)
+                d = t.date()
+                close = time(13, 0) if d in US_EARLY_CLOSE else time(16, 0)
+                if d >= day or not trading_day(d) or not (time(9, 30) <= t.time() < close):
+                    continue
+                h, l = hl.get(d, [0.0, float("inf")])
+                hl[d] = [max(h, float(k[2])), min(l, float(k[3]))]
+            days = sorted(hl)[-n:]
+            if len(days) >= 5:
+                out[sym] = sum((hl[d][0] / hl[d][1] - 1) * 100 for d in days) / len(days)
+            self.sleep(0.05)
+        log.info("ADR(20일 평균 변동폭): %s", ", ".join(f"{s} {v:.1f}%" for s, v in sorted(out.items(), key=lambda kv: -kv[1])))
+        return out
+
     def equity(self) -> float:
         if self.cfg.api_key and self.cfg.api_secret:
             return self.c.equity()
@@ -213,6 +236,7 @@ class FvgTrader:
         if not st.candidates:
             self.wait_until(at(day, 9, 15))
             st.candidates = self.candidates(day)
+            st.adr = self.adr(day, st.candidates)
             st.phase = "watch"
             self.save(st)
         self.wait_until(at(day, 9, 35, 3))
@@ -262,7 +286,9 @@ class FvgTrader:
                 px = self.c.prices()
                 for pos in self.open_positions(st):
                     self.step(st, pos, px.get(pos["symbol"]), now)
-                for sym, (side, lvl, _) in list(st.signals.items()):
+                # 같은 순간 여러 종목이 닿으면 ADR(평균 변동폭) 높은 순 (백테스트: 순위 순보다 1종목 +500→+820%)
+                order = sorted(st.signals.items(), key=lambda kv: -st.adr.get(kv[0], 0.0))
+                for sym, (side, lvl, _) in order:
                     if len(st.positions) >= self.cfg.max_trades:
                         break
                     if sym in st.dropped or sym in st.positions or sym not in px:

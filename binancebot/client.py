@@ -113,8 +113,8 @@ class BinanceClient:
     def exchange_info(self) -> dict:
         return self._req("GET", "/fapi/v1/exchangeInfo")
 
-    def klines(self, symbol: str, start_ms: int, limit: int = 500) -> list[list]:
-        return self._req("GET", "/fapi/v1/klines", {"symbol": symbol, "interval": "1m", "startTime": start_ms, "limit": limit})
+    def klines(self, symbol: str, start_ms: int, limit: int = 500, interval: str = "1m") -> list[list]:
+        return self._req("GET", "/fapi/v1/klines", {"symbol": symbol, "interval": interval, "startTime": start_ms, "limit": limit})
 
     def prices(self) -> dict[str, float]:
         return {r["symbol"]: float(r["price"]) for r in self._req("GET", "/fapi/v1/ticker/price")}

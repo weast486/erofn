@@ -28,8 +28,15 @@ class FakeClient:
         return {"symbols": [{"symbol": s, "status": "TRADING", "quoteAsset": "USDT", "underlyingType": "EQUITY",
                              "filters": f} for s in self.bars]}
 
-    def klines(self, symbol, start_ms, limit=500):
-        return [r for r in self.bars[symbol] if r[0] >= start_ms][:limit]
+    def klines(self, symbol, start_ms, limit=500, interval="1m"):
+        rows = [r for r in self.bars[symbol] if r[0] >= start_ms]
+        if interval == "30m":  # 1분봉 30개씩 묶음
+            out = []
+            for i in range(0, len(rows), 30):
+                g = rows[i:i + 30]
+                out.append([g[0][0], g[0][1], max(r[2] for r in g), min(r[3] for r in g), g[-1][4], 1.0, g[-1][6], 0.0])
+            return out[:limit]
+        return rows[:limit]
 
     def prices(self):
         now = int(self.clock.t.timestamp() * 1000)
@@ -117,9 +124,27 @@ class TwoTradesTest(unittest.TestCase):
         bars = {s: prev(qv) + day_bars(DAY, rows) for s, qv in [("AUSDT", 3000.0), ("BUSDT", 2000.0), ("CUSDT", 1000.0)]}
         cfg = BotConfig(top_n=3, max_trades=2, state_dir=tempfile.mkdtemp(), exit_minutes=60)
         st = FvgTrader(FakeClient(bars, clock), cfg, now_fn=clock.now, sleep_fn=clock.sleep).run(DAY)
-        self.assertEqual(sorted(st.positions), ["AUSDT", "BUSDT"])   # 같은 순간 닿으면 순위 순으로 2종목
+        self.assertEqual(sorted(st.positions), ["AUSDT", "BUSDT"])   # ADR 정보가 없으면 순위 순으로 2종목
         self.assertTrue(all(p["result"]["reason"] == "time" for p in st.positions.values()))
         self.assertEqual(st.result["trades"], 2)
+
+
+class AdrTest(unittest.TestCase):
+    def test_adr_breaks_ties(self):
+        first = [(100, 101, 99, 100.5)] * 5
+        fvg = [(101, 101.5, 100.8, 101.4), (101.4, 103, 101.3, 102.9), (102.9, 103.5, 102.2, 103.2)]
+        dip = [(103.2, 103.3, 102.0, 102.5), (102.5, 102.6, 101.3, 101.4)]
+        rows = first + fvg + dip + [(101.4, 102, 101.4, 101.8)] * 30
+        hist = lambda rng: sum((day_bars(date(2026, 8, d), [(100, 100 + rng, 100, 100, 1000.0 * (10 - rng))] * 390)
+                                for d in (24, 25, 26, 27, 28, 31)), [])
+        clock = Clock(datetime(2026, 9, 1, 9, 0, tzinfo=ET))
+        # A 는 거래대금 1위지만 변동폭 1%, C 는 거래대금 3위지만 변동폭 5%
+        bars = {s: hist(r) + day_bars(DAY, rows) for s, r in [("AUSDT", 1), ("BUSDT", 3), ("CUSDT", 5)]}
+        cfg = BotConfig(top_n=3, max_trades=1, state_dir=tempfile.mkdtemp(), exit_minutes=60)
+        st = FvgTrader(FakeClient(bars, clock), cfg, now_fn=clock.now, sleep_fn=clock.sleep).run(DAY)
+        self.assertEqual(st.candidates, ["AUSDT", "BUSDT", "CUSDT"])
+        self.assertAlmostEqual(st.adr["CUSDT"], 5.0)
+        self.assertEqual(list(st.positions), ["CUSDT"])
 
 
 class FakeLive(FakeClient):

@@ -1,6 +1,7 @@
 """미국 주식 '전날 급등 → 다음 날' 검증용 데이터 받기 (토스증권 Open API, 조회만·주문 없음).
 
     python scripts/download_us_surge.py [--start 2023-01-01] [--min-change 5] [--symbols AAPL TSLA] [--no-zip]
+    python scripts/download_us_surge.py --extra-days reports/first5_us_days.csv   (목록의 종목·날짜 1분봉도 받기)
 
 대상: data/binance/symbols.json 의 underlyingType == "EQUITY" 종목(baseAsset). 토스에 없는 티커는 건너뜀.
 저장 (data/us_surge):
@@ -110,6 +111,7 @@ def main() -> None:
     ap.add_argument("--env", default=str(ROOT / ".env"))
     ap.add_argument("--interval", type=float, default=0.12, help="요청 사이 쉬는 시간(초)")
     ap.add_argument("--no-zip", action="store_true")
+    ap.add_argument("--extra-days", help="symbol,date 목록 csv: 이벤트 외에 이 날들의 1분봉도 받고 따로 묶음(us_first5_N.zip)")
     a = ap.parse_args()
 
     from tossbot.backtest import split_zip
@@ -190,7 +192,14 @@ def main() -> None:
     # 4) 이벤트 날 1분봉
     empty_path = OUT / "minute" / "_empty.txt"  # 요청했지만 분봉이 없던 날 (다시 요청 안 함)
     empty = set(empty_path.read_text(encoding="utf-8").split()) if empty_path.exists() else set()
-    todo = [e for e in events if not (OUT / "minute" / f"{e[0]}_{e[1]}.csv").exists() and f"{e[0]}_{e[1]}" not in empty]
+    extra: list[list] = []
+    if a.extra_days:
+        keys = {(e[0], e[1]) for e in events}
+        with open(ROOT / a.extra_days if not Path(a.extra_days).is_absolute() else a.extra_days, encoding="utf-8") as f:
+            extra = [[r["symbol"], r["date"]] for r in csv.DictReader(f)
+                     if (r["symbol"], r["date"]) not in keys and r["symbol"] in symbols]
+        print(f"추가 목록 {len(extra)}건", flush=True)
+    todo = [e for e in events + extra if not (OUT / "minute" / f"{e[0]}_{e[1]}.csv").exists() and f"{e[0]}_{e[1]}" not in empty]
     print(f"1분봉 받을 이벤트 {len(todo)}건 (이미 받음 {len(events) - len(todo)}건)", flush=True)
     errors: dict[str, str] = {}
     for n, e in enumerate(todo, 1):
@@ -223,7 +232,7 @@ def main() -> None:
         if n % 100 == 0 or n == len(todo):
             print(f"  1분봉 {n} / {len(todo)}", flush=True)
 
-    fixed = fix_split_scale(events)
+    fixed = fix_split_scale(events + extra)
     if fixed:
         print(f"분할이 반영 안 된 1분봉 {fixed}개를 일봉 기준으로 맞춤 → {OUT / 'rescaled.csv'}", flush=True)
 
@@ -243,7 +252,15 @@ def main() -> None:
         w.writerows(miss)
     print(f"못 받은 이벤트 {len(miss)}건 → {OUT / 'missing.csv'}", flush=True)
 
-    if not a.no_zip:
+    if extra:
+        left = sum(not (OUT / "minute" / f"{e[0]}_{e[1]}.csv").exists() for e in extra)
+        print(f"추가 목록 못 받음 {left}건 (분봉 없는 날 포함)", flush=True)
+    if not a.no_zip and extra:
+        files = [OUT / "rescaled.csv"] + sorted((OUT / "daily").glob("*.csv"))
+        files += [p for e in extra if (p := OUT / "minute" / f"{e[0]}_{e[1]}.csv").exists()]
+        parts = split_zip(files, OUT.parent / "us_first5")
+        print(f"묶음 파일 {len(parts)}개: {parts[0]} ~ {parts[-1].name}")
+    elif not a.no_zip:
         keys = {f"{e[0]}_{e[1]}" for e in events}
         files = [OUT / "days.csv", OUT / "missing.csv", OUT / "symbols.csv", OUT / "rescaled.csv"]
         files += sorted((OUT / "daily").glob("*.csv"))

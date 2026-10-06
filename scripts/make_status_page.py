@@ -136,7 +136,7 @@ def toss_section(links: bool = False) -> tuple[str, str]:
     unreal_pct = unreal / cost_sum * 100 if cost_sum else 0.0
     realized = sum((float(h["exit_price"]) - float(h["entry_price"])) * int(h.get("quantity", 0)) for h in history)
 
-    reasons = {"STOP_LOSS": "손절", "TAKE_PROFIT": "익절", "RSI_EXIT": "RSI 매도", "MAX_HOLD": "보유 기간 끝"}
+    reasons = {"STOP_LOSS": "손절", "TAKE_PROFIT": "익절", "RSI_EXIT": "RSI 매도", "MAX_HOLD": "보유 기간 끝", "MANUAL": "직접 매도"}
     hist_rows = [
         f'<tr><th scope="row">{chart_link(links, "/chart/toss/%s/%s" % (h["symbol"], str(h.get("opened_at", ""))[:10]), esc(h["name"]))}<small>{esc(h["symbol"])}</small></th>'
         f'<td><span class="tag">{"RSI" if h.get("kind") == "rsi" else "신고가"}</span></td>'

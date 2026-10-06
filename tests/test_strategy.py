@@ -210,6 +210,19 @@ class StrategyTest(unittest.TestCase):
         self.tick(MON, 10, 0)
         self.assertEqual(list(self.strategy.state.positions), ["000001"])
 
+    def test_manual_sell_only_that_symbol(self):
+        s = self.strategy
+        self.client.prices["000001"] = self.client.prices["000002"] = 10_000
+        self.tick(MON, 10, 0)
+        self.assertEqual(sorted(s.state.positions), ["000001", "000002"])
+        self.assertFalse(s.manual_sell("999999"))  # 보유하지 않은 종목
+        self.assertTrue(s.manual_sell("000001"))
+        s.sync_orders()
+        self.assertEqual(list(s.state.positions), ["000002"])
+        self.assertEqual(s.state.history[-1]["reason"], "MANUAL")
+        self.tick(MON, 10, 1)
+        self.assertNotIn("000001", s.state.positions)  # 판 날에는 다시 사지 않음
+
     def test_no_buy_after_1520(self):
         self.client.prices["000001"] = 10_000
         self.tick(MON, 15, 20)

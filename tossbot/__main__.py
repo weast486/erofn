@@ -6,6 +6,7 @@
     python -m tossbot status       # 봇 보유 포지션 및 매매 이력
     python -m tossbot run          # 자동매매 상주 실행
     python -m tossbot liquidate    # 봇 보유 종목 즉시 전량 매도 (비상용)
+    python -m tossbot sell 종목코드  # 봇 보유 종목 중 그 종목만 즉시 시장가 매도 (봇이 켜져 있으면 봇에게 맡김)
 """
 from __future__ import annotations
 
@@ -135,6 +136,70 @@ def cmd_liquidate(cfg: Config, _c, strategy: PullbackStrategy) -> None:
     cmd_status(cfg, _c, strategy)
 
 
+ALIVE_FILE = "bot_alive.txt"  # 켜져 있는 봇이 돌 때마다 고쳐 쓰는 파일 (sell 명령이 봇이 켜져 있는지 아는 용도)
+SELL_PREFIX = "sell_request_"  # sell 명령이 남기는 요청 파일: sell_request_종목코드.txt
+
+
+def sell_requests(cfg: Config) -> list[Path]:
+    return sorted(Path(cfg.state_dir).glob(f"{SELL_PREFIX}*.txt"))
+
+
+def handle_sell_requests(cfg: Config, strategy: PullbackStrategy) -> None:
+    """켜져 있는 봇이 즉시 매도 요청 파일을 읽어 처리 (파일을 먼저 지워 한 번만 실행)."""
+    for path in sell_requests(cfg):
+        symbol = path.stem[len(SELL_PREFIX):]
+        try:
+            path.unlink()
+        except OSError:
+            continue
+        strategy.manual_sell(symbol)
+
+
+def cmd_sell(cfg: Config, client: TossClient, strategy: PullbackStrategy, wanted: list[str]) -> None:
+    """봇 보유 종목 중 고른 종목만 즉시 시장가 매도. 봇이 켜져 있으면 요청만 남기고 봇이 판다 (기록이 어긋나지 않게)."""
+    held = strategy.state.positions
+    symbols = []
+    for w in wanted:
+        hit = [p.symbol for p in held.values() if w in (p.symbol, p.name)]
+        if not hit:
+            print(f"{w}: 봇이 보유한 종목이 아닙니다. (보유: {', '.join(f'{p.symbol} {p.name}' for p in held.values()) or '없음'})")
+            continue
+        symbols += hit
+    if not symbols:
+        return
+    now = datetime.now(KST)
+    day = trading_day_from_api(client.get_market_calendar_kr(now.date().isoformat()))
+    if not (day.is_open and day.market_open <= now < day.market_close):
+        print("지금은 장중이 아니라 시장가 매도를 할 수 없습니다. 장중(09:00~15:30)에 다시 실행해 주세요.")
+        return
+    alive = Path(cfg.state_dir) / ALIVE_FILE
+    running = alive.exists() and time.time() - alive.stat().st_mtime < cfg.monitor_interval_seconds * 2 + 30
+    if running:
+        for s in symbols:
+            (Path(cfg.state_dir) / f"{SELL_PREFIX}{s}.txt").write_text(now.isoformat(), encoding="utf-8")
+        print(f"켜져 있는 봇에게 매도를 요청했습니다: {', '.join(symbols)} (최대 1~2분)")
+    else:
+        print("봇이 꺼져 있어 여기서 바로 매도합니다.")
+        strategy.sync_orders()
+        for s in symbols:
+            strategy.manual_sell(s)
+    for _ in range(60):  # 최대 2분 동안 결과 확인
+        if running:
+            strategy.state = strategy.store.load()
+        else:
+            strategy.sync_orders()
+        if not any(s in strategy.state.positions for s in symbols):
+            break
+        time.sleep(2)
+    for s in symbols:
+        if s in strategy.state.positions:
+            p = strategy.state.positions[s]
+            print(f"  {s} {p.name}: 아직 처리 중 (상태 {p.status}, 남은 {p.quantity}주) — 잠시 뒤 status 로 확인해 주세요")
+        else:
+            h = next((x for x in reversed(strategy.state.history) if x.get("symbol") == s), {})
+            print(f"  {s} {h.get('name', '')}: 매도 완료 {h.get('return_pct')}%")
+
+
 def cmd_run(cfg: Config, client: TossClient, strategy: PullbackStrategy) -> None:
     if cfg.strategy == "combo":
         log.info(
@@ -161,6 +226,10 @@ def cmd_run(cfg: Config, client: TossClient, strategy: PullbackStrategy) -> None
     while True:
         now = datetime.now(KST)
         try:
+            alive = Path(cfg.state_dir) / ALIVE_FILE
+            alive.parent.mkdir(parents=True, exist_ok=True)
+            alive.write_text(now.isoformat(), encoding="utf-8")
+            handle_sell_requests(cfg, strategy)
             if cached is None or cached.today != now.date():
                 cached = trading_day_from_api(client.get_market_calendar_kr(now.date().isoformat()))
                 log.info("%s 개장=%s", cached.today, cached.is_open)
@@ -171,12 +240,17 @@ def cmd_run(cfg: Config, client: TossClient, strategy: PullbackStrategy) -> None
             log.exception("tick 처리 중 오류")
 
         in_session = cached is not None and cached.is_open and cached.market_open <= now < cached.market_close
-        time.sleep(cfg.monitor_interval_seconds if in_session else 300)
+        wait_until = time.time() + (cfg.monitor_interval_seconds if in_session else 300)
+        while time.time() < wait_until:  # 쉬는 동안에도 즉시 매도 요청이 오면 바로 깨어남
+            if in_session and sell_requests(cfg):
+                break
+            time.sleep(2)
 
 
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(prog="tossbot", description="토스증권 자동매매 봇 (신고가 돌파 / 신고가+RSI / 눌림목)")
-    parser.add_argument("command", choices=["config", "check", "select", "status", "run", "liquidate"])
+    parser.add_argument("command", choices=["config", "check", "select", "status", "run", "liquidate", "sell"])
+    parser.add_argument("symbols", nargs="*", help="sell: 즉시 매도할 종목코드 (여러 개 가능)")
     parser.add_argument("--env", default=".env", help=".env 파일 경로")
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args(argv)
@@ -188,6 +262,13 @@ def main(argv: list[str] | None = None) -> None:
         return
     setup_logging(cfg, args.verbose)
     client, strategy = build(cfg)
+    if args.command == "sell":
+        if not args.symbols:
+            cmd_status(cfg, client, strategy)
+            print("사용법: python -m tossbot sell 종목코드")
+            return
+        cmd_sell(cfg, client, strategy, args.symbols)
+        return
     {
         "check": cmd_check,
         "select": cmd_select,

@@ -416,6 +416,18 @@ class PullbackStrategy:
                 continue  # 이미 시장가 매도 주문이 나가 있음
             self._sell_now(pos, reason)
 
+    def manual_sell(self, symbol: str) -> bool:
+        """사용자 요청 즉시 매도 (`python -m tossbot sell 종목코드`): 그 종목만 조건주문·대기 주문 정리 후 시장가 매도."""
+        pos = self.state.positions.get(symbol)
+        if pos is None:
+            log.warning("즉시 매도 요청 %s: 봇이 보유한 종목이 아님", symbol)
+            return False
+        if pos.status == "SELLING" and pos.sell_reason in ("MANUAL", "STOP_LOSS"):
+            return True  # 이미 시장가 매도 주문이 나가 있음
+        log.info("사용자 요청 즉시 매도 %s %s %d주", pos.symbol, pos.name, pos.quantity)
+        self._sell_now(pos, "MANUAL")
+        return True
+
     def _sell_now(self, pos: Position, reason: str) -> None:
         """조건주문·대기 주문을 정리하고 시장가로 매도."""
         if pos.buy_open and pos.buy_order_id:

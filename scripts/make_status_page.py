@@ -386,10 +386,14 @@ thead .num{font-family:var(--font)}
 .b-fill{display:block;height:100%;background:var(--muted);border-radius:5px}
 .b-val{text-align:right;color:var(--muted);font-variant-numeric:tabular-nums}
 .foot{color:var(--muted);font-size:12.5px;margin:0}
+.bar{display:flex;flex-wrap:wrap;align-items:center;gap:8px 14px;color:var(--muted);font-size:13px}
+.bar button{font:inherit;font-weight:600;color:var(--surface);background:var(--ink);border:0;border-radius:8px;padding:8px 16px;cursor:pointer}
+.bar button:hover{opacity:.85} .bar button:focus-visible{outline:2px solid var(--down);outline-offset:2px}
+.bar button[disabled]{opacity:.5;cursor:default}
 """
 
 
-def build() -> str:
+def build(toolbar: str = "") -> str:
     now = datetime.now().astimezone()
     blocks = [toss_section()[0], kiwoom_section()[0], binance_section()[0]]
     return (
@@ -398,7 +402,8 @@ def build() -> str:
         f'<style>{CSS}</style>\n'
         '<div class="wrap">'
         f'<header class="top"><h1>봇 매매현황</h1><p class="stamp">기준 시각 <b>{now.strftime("%Y-%m-%d %H:%M")}</b> (한국)</p></header>'
-        '<p class="legend">이 페이지는 만든 순간의 기록입니다. 수익은 <span class="up">빨강</span>, 손실은 <span class="down">파랑</span>으로 표시합니다.</p>'
+        + (toolbar or '<p class="legend">이 페이지는 만든 순간의 기록입니다.</p>')
+        + '<p class="legend">수익은 <span class="up">빨강</span>, 손실은 <span class="down">파랑</span>으로 표시합니다.</p>'
         + "".join(blocks)
         + '<p class="foot">봇이 PC에 남긴 상태 파일과 로그로 만들었습니다. 증권사 계좌 잔고와는 수수료·세금·체결 시점만큼 다를 수 있습니다.</p>'
         '</div>\n')

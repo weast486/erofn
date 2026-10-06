@@ -91,7 +91,7 @@ def short_dt(iso: str) -> str:
 
 
 # ------------------------------------------------------------------ 토스
-def toss_section(links: bool = False) -> tuple[str, str]:
+def toss_section(links: bool = False, sell: bool = False) -> tuple[str, str]:
     snap = read_json(ROOT / "state" / "매매현황.json") or {}
     state = read_json(ROOT / "state" / "state.json") or {}
     sl, tp = float(snap.get("stop_loss_pct") or 4.7), float(snap.get("take_profit_pct") or 20)
@@ -130,7 +130,9 @@ def toss_section(links: bool = False) -> tuple[str, str]:
             f'<td class="num">{qty}</td><td class="num">{won(entry)}</td><td class="num">{won(last)}</td>'
             f'<td class="num {tone(ret)}">{signed(ret, "%", 2)}</td>'
             f'<td class="num {tone(pnl)}">{signed(pnl)}</td>'
-            f'<td class="num">{int(p.get("hold_days", 0))}일</td><td class="gcell">{gauge}</td></tr>')
+            f'<td class="num">{int(p.get("hold_days", 0))}일</td><td class="gcell">{gauge}</td>'
+            + (f'<td><button type="button" class="sellbtn" data-sell="{esc(p["symbol"])}" data-name="{esc(p["name"])}" '
+               f'data-qty="{qty}">팔기</button></td>' if sell else '') + '</tr>')
 
     unreal = value_sum - cost_sum
     unreal_pct = unreal / cost_sum * 100 if cost_sum else 0.0
@@ -159,7 +161,8 @@ def toss_section(links: bool = False) -> tuple[str, str]:
         f'<h3>보유 종목</h3><p class="note">{esc(price_note)}. 막대는 손절선과 익절선 사이에서 지금 위치, 세로선이 매수가입니다.</p>'
         f'<div class="scroll"><table><thead><tr><th>종목</th><th>구분</th><th class="num">수량</th><th class="num">매수가</th>'
         f'<th class="num">현재가</th><th class="num">수익률</th><th class="num">평가손익</th><th class="num">보유</th>'
-        f'<th>손절 ↔ 익절</th></tr></thead><tbody>{"".join(rows) or empty_row(9, "보유 종목 없음")}</tbody></table></div>'
+        f'<th>손절 ↔ 익절</th>{"<th>즉시 매도</th>" if sell else ""}</tr></thead>'
+        f'<tbody>{"".join(rows) or empty_row(10 if sell else 9, "보유 종목 없음")}</tbody></table></div>'
         f'<h3>끝난 거래</h3><div class="scroll"><table><thead><tr><th>종목</th><th>구분</th><th class="num">수량</th>'
         f'<th class="num">매수가</th><th class="num">매도가</th><th class="num">수익률</th><th class="num">손익</th>'
         f'<th>사유</th><th class="num">매도 시각</th></tr></thead><tbody>{"".join(hist_rows) or empty_row(9, "아직 끝난 거래 없음")}</tbody></table></div>')
@@ -409,12 +412,16 @@ tbody th a:focus-visible{outline:2px solid var(--down);outline-offset:2px}
 .bar button{font:inherit;font-weight:600;color:var(--surface);background:var(--ink);border:0;border-radius:8px;padding:8px 16px;cursor:pointer}
 .bar button:hover{opacity:.85} .bar button:focus-visible{outline:2px solid var(--down);outline-offset:2px}
 .bar button[disabled]{opacity:.5;cursor:default}
+.sellbtn{font:inherit;font-size:12px;font-weight:600;color:var(--ink);background:transparent;border:1px solid var(--line);border-radius:6px;padding:4px 10px;cursor:pointer;white-space:nowrap}
+.sellbtn:hover{border-color:var(--ink)} .sellbtn:focus-visible{outline:2px solid var(--down);outline-offset:2px}
+.sellbtn[disabled]{opacity:.5;cursor:default}
 """
 
 
-def build(toolbar: str = "", links: bool = False) -> str:
+def build(toolbar: str = "", links: bool = False, sell: bool = False) -> str:
+    """sell=True 면 토스 보유 종목에 '팔기' 버튼을 넣는다 (status_server 가 이 PC 에서 연 페이지에만 켬)."""
     now = datetime.now().astimezone()
-    blocks = [toss_section(links)[0], kiwoom_section(links)[0], binance_section(links)[0]]
+    blocks = [toss_section(links, sell)[0], kiwoom_section(links)[0], binance_section(links)[0]]
     return (
         '<title>봇 매매현황</title>\n'
         '<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans+KR:wght@400;500;600;700&display=swap">\n'

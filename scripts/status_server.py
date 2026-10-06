@@ -6,13 +6,17 @@
 페이지의 '지금 업데이트' 버튼·새로고침(F5)·자동 갱신(60초)마다 다시 만든다 (Claude 를 거치지 않음).
 표의 종목 이름을 누르면 봉 차트에 진입·손절·익절·청산 지점을 보여 준다 (trade_chart.py, 세 봇 모두).
 토스 현재가는 최대 60초에 한 번만 다시 조회한다 (가격 조회만, 주문 없음).
+토스 보유 종목의 '팔기' 버튼은 확인 창을 거쳐 `python -m tossbot sell 종목코드` 를 실행한다 (실제 주문).
+  이 PC 에서 연 페이지에만 버튼이 보이고, 서버를 켤 때 만든 비밀 값이 맞아야만 실행된다 (--lan 으로 연 다른 기기는 불가).
 기본은 이 PC 에서만 열린다. --lan 을 주면 같은 와이파이의 다른 기기에서도 열린다 (비밀번호 없음 — 집 안에서만).
 이미 켜져 있으면 브라우저만 열고 끝난다.
 """
 from __future__ import annotations
 
 import argparse
+import os
 import re
+import secrets
 import socket
 import subprocess
 import sys
@@ -32,6 +36,9 @@ import trade_chart  # noqa: E402
 PRICE_EVERY = 60  # 토스 현재가를 다시 조회하는 최소 간격(초)
 AUTO_REFRESH = 60  # 페이지 자동 갱신 간격(초)
 _lock = threading.Lock()
+_sell_lock = threading.Lock()
+SELL_TOKEN = secrets.token_urlsafe(24)  # 서버를 켤 때마다 새로 만듦 — 이 PC 에서 연 페이지에만 심어 줌
+LOCAL = ("127.0.0.1", "::1", "::ffff:127.0.0.1")
 _last_price = [0.0, ""]  # [마지막 조회 시각, 결과 안내]
 
 
@@ -52,7 +59,27 @@ def refresh_prices() -> str:
     return note
 
 
-def render() -> bytes:
+def sell_toss(code: str) -> str:
+    """토스 봇의 한 종목 즉시 매도 명령을 실행하고 그 안내 문구를 돌려줌."""
+    if not _sell_lock.acquire(blocking=False):
+        return "다른 매도가 진행 중입니다. 잠시 뒤 다시 눌러 주세요."
+    try:
+        env = dict(os.environ, PYTHONIOENCODING="utf-8")
+        r = subprocess.run([sys.executable, "-m", "tossbot", "sell", code], cwd=str(ROOT), capture_output=True,
+                           timeout=200, env=env)
+        out = r.stdout.decode("utf-8", "replace")
+        out = "\n".join(ln for ln in out.splitlines() if not re.match(r"\d{4}-\d{2}-\d{2} \d", ln)).strip()  # 로그 줄은 뺌
+        if r.returncode != 0 and not out:
+            out = "매도 명령이 오류로 끝났습니다. 토스 앱과 logs\\tossbot.log 를 확인해 주세요."
+        print(f"{datetime.now():%H:%M:%S} 팔기 버튼 {code}: {out.splitlines()[-1] if out else ''}")
+        return out or "결과를 받지 못했습니다. 토스 앱에서 확인해 주세요."
+    except subprocess.TimeoutExpired:
+        return "응답이 늦습니다. 토스 앱에서 체결 여부를 확인해 주세요."
+    finally:
+        _sell_lock.release()
+
+
+def render(local: bool = False) -> bytes:
     with _lock:
         note = refresh_prices()
         toolbar = (
@@ -60,17 +87,25 @@ def render() -> bytes:
             f'<span>{AUTO_REFRESH}초마다 자동으로 새로 읽습니다.</span>'
             + (f'<span>{note}</span>' if note else '') + '</div>')
         try:
-            body = make_status_page.build(toolbar, links=True)
+            body = make_status_page.build(toolbar, links=True, sell=local)
         except Exception as exc:  # noqa: BLE001
             body = (f'<title>봇 매매현황</title><div style="font-family:sans-serif;padding:24px">'
                     f'<h1>페이지를 만들지 못했어요</h1><p>{type(exc).__name__}: {exc}</p>'
                     f'<p>잠시 뒤 새로고침해 보세요.</p></div>')
     script = (
         '<script>(function(){var b=document.getElementById("refresh");'
-        'function go(){if(b){b.disabled=true;b.textContent="읽는 중...";}location.reload();}'
+        'var busy=false;function go(){if(busy)return;if(b){b.disabled=true;b.textContent="읽는 중...";}location.reload();}'
         'if(b)b.addEventListener("click",go);'
         f'setTimeout(function(){{if(!document.hidden)go();else document.addEventListener("visibilitychange",go,{{once:true}});}},{AUTO_REFRESH * 1000});'
-        '})();</script>')
+        + ((
+            'document.addEventListener("click",function(e){var s=e.target.closest("button[data-sell]");if(!s||busy)return;'
+            'if(!confirm(s.dataset.name+" "+s.dataset.qty+"주를 지금 시장가로 팔까요?\\n\\n실제 주문이 나가며 취소할 수 없습니다."))return;'
+            'busy=true;s.disabled=true;s.textContent="파는 중...";'
+            f'fetch("/sell/toss/"+s.dataset.sell,{{method:"POST",headers:{{"X-Sell-Token":"{SELL_TOKEN}"}}}})'
+            '.then(function(r){return r.text();}).then(function(t){alert(t);busy=false;location.reload();})'
+            '.catch(function(){alert("서버에 연결하지 못했습니다. 토스 앱에서 확인해 주세요.");busy=false;location.reload();});});'
+        ) if local else '')
+        + '})();</script>')
     page = ('<!doctype html>\n<html lang="ko"><head><meta charset="utf-8">'
             '<meta name="viewport" content="width=device-width,initial-scale=1">'
             '<style>body{margin:0}</style></head><body>\n' + body + script + '</body></html>\n')
@@ -78,6 +113,28 @@ def render() -> bytes:
 
 
 class Handler(BaseHTTPRequestHandler):
+    def is_local(self) -> bool:
+        """이 PC 의 브라우저가 localhost 주소로 연 요청인지 (다른 기기·다른 사이트 경유 요청은 아님)."""
+        host = (self.headers.get("Host") or "").rsplit(":", 1)[0].strip("[]")
+        return self.client_address[0] in LOCAL and host in ("localhost", "127.0.0.1", "::1")
+
+    def do_POST(self):  # noqa: N802
+        m = re.fullmatch(r"/sell/toss/([0-9A-Z]{6})", self.path.split("?")[0])
+        if not m:
+            self.send_error(404)
+            return
+        token = self.headers.get("X-Sell-Token") or ""
+        if not (self.is_local() and secrets.compare_digest(token, SELL_TOKEN)):
+            self.send_error(403)
+            return
+        data = sell_toss(m.group(1)).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain; charset=utf-8")
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(data)
+
     def do_GET(self):  # noqa: N802
         path = self.path.split("?")[0]
         m = (re.fullmatch(r"/chart/(binance)/([A-Z0-9]{2,20})/(\d{4}-\d{2}-\d{2})/(day|night)", path)
@@ -86,7 +143,7 @@ class Handler(BaseHTTPRequestHandler):
         if m:  # 거래 차트: 봉 위에 진입·손절·익절·청산 지점
             data = trade_chart.page(*m.groups()).encode("utf-8")
         elif path in ("/", "/index.html"):
-            data = render()
+            data = render(self.is_local())
         else:
             self.send_error(404)
             return

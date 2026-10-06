@@ -1,7 +1,8 @@
 """세 봇(토스 스윙·키움 단타·바이낸스)의 매매현황을 한 페이지(HTML)로 만든다.
 
 봇이 남긴 상태 파일·로그만 읽는다 (API 조회·주문 없음, .env 는 드라이런 여부 한 줄만 확인).
-  python scripts/make_status_page.py [--out state/매매현황_페이지.html]
+  python scripts/make_status_page.py [--out state/매매현황_페이지.html] [--local]
+바탕화면 바로가기용: windows\\status_page.bat (토스 현재가 조회 → 페이지 만들기 → 브라우저로 열기)
 토스 현재가는 `windows\\export_trades.bat` 이 만든 state/매매현황.json 의 값을 쓴다.
 """
 from __future__ import annotations
@@ -406,10 +407,16 @@ def build() -> str:
 def main() -> None:
     ap = argparse.ArgumentParser(description="세 봇 매매현황 페이지 만들기")
     ap.add_argument("--out", default=str(ROOT / "state" / "매매현황_페이지.html"))
+    ap.add_argument("--local", action="store_true", help="PC 브라우저에서 바로 여는 완전한 HTML 문서로 저장")
     args = ap.parse_args()
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(build(), encoding="utf-8")
+    page = build()
+    if args.local:  # 아티팩트로 올릴 때는 게시 쪽에서 문서 틀을 씌우므로 본문만 저장
+        page = ('<!doctype html>\n<html lang="ko"><head><meta charset="utf-8">'
+                '<meta name="viewport" content="width=device-width,initial-scale=1">'
+                '<style>body{margin:0}</style></head><body>\n' + page + '</body></html>\n')
+    out.write_text(page, encoding="utf-8")
     print(f"만들었습니다: {out}")
 
 

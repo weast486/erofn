@@ -338,6 +338,10 @@ class BreakoutSettings:
     # 0 보다 크면 신고가 돌파폭(종가 / 직전 entry_days 일 최고값 - 1)이 이 % 이하인 종목만
     max_breakout_pct: float = 0.0
     breakout_basis: str = "close"  # 직전 최고값 기준: close = 종가 최고값 / high = 장중 고가 최고값
+    # 신고가 판정 기준: close = 종가 > 직전 N일 종가 최고값 (실전) / high = 종가 > 직전 N일 장중 고가 최고값 (꼬리까지 넘어야 함)
+    new_high_basis: str = "close"
+    # 첫 신고가(first_in_days) 판정에 쓰는 신고가: same = new_high_basis 와 같은 기준 / close = 종가 기준 신고가도 없어야 함
+    first_basis: str = "same"
     # 0 보다 크면 종목당 매수 금액 = 현재 평가금액 x 이 % (복리). 0 이면 slot_budget 고정. 1주 가격 상한은 slot_budget 그대로
     position_pct: float = 0.0
     # True 면 계단식: 종목당 금액 = max(slot_budget, 평가금액 10만원 단위 내림 x 10%). 110만원 → 11만원, 120만원 → 12만원
@@ -572,6 +576,13 @@ def run_breakout(
     # 종목별로 각 날이 종가 기준 entry_days 일 신고가였는지 미리 계산
     is_high: dict[str, list[bool]] = {sym: new_high_flags([x.close for x in ser.bars], b.entry_days)
                                       for sym, ser in series.items()}
+    first_high = is_high  # 첫 신고가 판정용
+    if b.new_high_basis == "high":
+        n = b.entry_days
+        close_high = is_high
+        is_high = {sym: [i >= n and ser.bars[i].close > max(x.high for x in ser.bars[i - n:i]) for i in range(len(ser.bars))]
+                   for sym, ser in series.items()}
+        first_high = close_high if b.first_basis == "close" else is_high
 
     cash = s.initial_cash
     positions: dict[str, Trade] = {}
@@ -698,7 +709,7 @@ def run_breakout(
                     ma_prev = sum(x.close for x in ser.bars[i - n:i]) / n
                     if not (ser.bars[i - 1].close <= ma_prev and ser.bars[i].close > ma_today):
                         continue
-                if b.first_in_days and (i < b.first_in_days or any(is_high[sym][i - b.first_in_days:i])):
+                if b.first_in_days and (i < b.first_in_days or any(first_high[sym][i - b.first_in_days:i])):
                     continue  # 최근 N거래일 안에 이미 신고가가 있었음 → 첫 신고가 아님
                 bar = ser.bars[i]
                 prev_high = max(x.close for x in ser.bars[i - b.entry_days:i])
@@ -750,7 +761,7 @@ def run_breakout(
                     size = (bar.close / bar.open - 1) if b.candle_measure == "body" else (bar.high / bar.low - 1)
                     if size * 100 < b.min_candle_pct:
                         continue
-                if b.first_in_days:
+                if b.first_in_days and not (b.new_high_basis == "high" and b.first_basis == "same"):
                     if i < b.entry_days + b.first_in_days:
                         continue
                     closes = [x.close for x in ser.bars[i - b.entry_days - b.first_in_days:i]]
@@ -4297,6 +4308,10 @@ def main(argv: list[str] | None = None) -> None:
                    help="breakout: 직전 고점 대비 돌파폭이 N%% 이하인 종목만 (0 = 없음)")
     r.add_argument("--breakout-basis", choices=["close", "high"], default="close",
                    help="breakout: --max-breakout 의 직전 고점 = 종가 최고값(close) / 장중 고가 최고값(high)")
+    r.add_argument("--new-high-basis", choices=["close", "high"], default="close",
+                   help="breakout·combo: 신고가 = 종가 > 직전 N일 종가 최고값(close, 실전) / 장중 고가 최고값(high)")
+    r.add_argument("--first-basis", choices=["same", "close"], default="same",
+                   help="breakout·combo: --new-high-basis high 일 때 첫 신고가 판정 기준 (same 고가 기준 / close 종가 기준 신고가도 없어야)")
     r.add_argument("--position-pct", type=float, default=0,
                    help="breakout: 종목당 매수 금액 = 현재 평가금액의 N%% (복리, 0 = 종목당 예산 고정)")
     r.add_argument("--step-sizing", action="store_true",
@@ -4718,6 +4733,7 @@ def main(argv: list[str] | None = None) -> None:
                               kelly_max_pct=args.kelly_max_pct, kelly_min_pct=args.kelly_min_pct, kelly_scale=args.kelly_scale,
                               reduced_slots=args.reduced_slots,
                               max_breakout_pct=args.max_breakout, breakout_basis=args.breakout_basis,
+                              new_high_basis=args.new_high_basis, first_basis=args.first_basis,
                               low_rise_days=int(args.max_rise_from_low[0]) if args.max_rise_from_low else 0,
                               max_rise_from_low_pct=args.max_rise_from_low[1] if args.max_rise_from_low else 0.0,
                               ma_resist_days=int(args.ma_resist[0]) if args.ma_resist else 0,
@@ -4751,7 +4767,8 @@ def main(argv: list[str] | None = None) -> None:
         # 신고가(실전 규칙, 종목당 예산 고정) + RSI(시총 상위 --top-universe, 기본 100) 를 한 계좌로
         cb = BreakoutSettings(stop_loss_pct=args.stop_loss or 4.7, take_profit_pct=args.take_profit or 20.0,
                               exit_on_low=False, first_in_days=args.first_in_days or 20,
-                              min_day_amount=args.min_day_amount or 2e10, skip_touched_limit_up=True)
+                              min_day_amount=args.min_day_amount or 2e10, skip_touched_limit_up=True,
+                              new_high_basis=args.new_high_basis, first_basis=args.first_basis)
         cr = RsiSettings(period=args.rsi_period, buy_below=args.rsi_buy, sell_above=args.rsi_sell, stop_loss_pct=10,
                          max_hold_days=args.max_hold or 20, max_price=args.max_price)
         cr.universe, _ = load_top_universe(args.marcap_dir, f"{min(args.years) - 1}-12-01", top_n=args.top_universe or 100)

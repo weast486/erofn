@@ -261,3 +261,103 @@ class ExcludeTest(unittest.TestCase):
         self.assertEqual(t.candidates(DAY), ["AUSDT", "BUSDT"])
         t.cfg.exclude = ""
         self.assertEqual(t.candidates(DAY), ["SOXSUSDT", "AUSDT"])
+
+
+NEXT = date(2026, 9, 2)
+
+
+def drop_day(close_low=True):
+    """시가 100 → 종가 88.1 (-11.9%). close_low=False 면 장중 80 까지 갔다가 89 로 회복(저가 근처 아님)."""
+    rows = [(100, 100.5, 99.5, 100, 5000.0)] * 300
+    if close_low:
+        return rows + [(95, 95, 90, 90, 5000.0)] * 80 + [(88.5, 88.6, 88, 88.1, 5000.0)] * 10
+    return rows + [(90, 90, 80, 81, 5000.0)] * 60 + [(88, 89.2, 88, 89, 5000.0)] * 30
+
+
+class OvernightTest(unittest.TestCase):
+    def _trader(self, client_cls=FakeClient, **cfg_kw):
+        flat = [(50, 50.1, 49.9, 50, 5000.0)] * 390
+        bars = {"AUSDT": day_bars(DAY, drop_day()) + day_bars(NEXT, [(92, 92.5, 91.5, 92, 5000.0)] * 30),
+                "BUSDT": day_bars(DAY, drop_day(False)) + day_bars(NEXT, [(89, 89, 89, 89, 5000.0)] * 30),
+                "CUSDT": day_bars(DAY, flat) + day_bars(NEXT, flat[:30])}
+        clock = Clock(datetime(2026, 9, 1, 15, 30, tzinfo=ET))
+        cfg = BotConfig(state_dir=tempfile.mkdtemp(), dry_equity=1000, on_enabled=True, **cfg_kw)
+        client = client_cls(bars, clock)
+        return FvgTrader(client, cfg, now_fn=clock.now, sleep_fn=clock.sleep), clock, client
+
+    def test_buys_only_big_drop_closing_near_low_then_sells_next_open(self):
+        trader, clock, _ = self._trader()
+        on = trader.overnight
+        on.enter_close(DAY)
+        st = on.load()
+        self.assertEqual(list(st["positions"]), ["AUSDT"])          # B 는 저가에서 회복, C 는 안 내림
+        pos = st["positions"]["AUSDT"]
+        self.assertAlmostEqual(pos["entry"], 88.1)
+        self.assertAlmostEqual(pos["qty"], round_step(1000 / 88.1, 0.001))
+        self.assertAlmostEqual(pos["stop"], 88.1 * 0.85, delta=0.01)
+        self.assertGreaterEqual(clock.t, datetime(2026, 9, 1, 15, 58, 30, tzinfo=ET))
+        on.enter_close(DAY)                                          # 같은 날 다시 불러도 또 사지 않음
+        self.assertEqual(len(on.load()["positions"]), 1)
+        clock.t = datetime(2026, 9, 2, 9, 10, tzinfo=ET)
+        on.exit_open(NEXT)
+        self.assertEqual(on.load()["positions"], {})
+        self.assertGreaterEqual(clock.t, datetime(2026, 9, 2, 9, 30, tzinfo=ET))
+        with open(f"{trader.cfg.state_dir}/trades.csv", encoding="utf-8") as fh:
+            last = fh.read().strip().splitlines()[-1].split(",")
+        self.assertEqual((last[2], last[9]), ("AUSDT", "night"))
+        self.assertAlmostEqual(float(last[8]), 92)
+
+    def test_disabled_or_too_late_does_nothing(self):
+        trader, clock, _ = self._trader()
+        trader.cfg.on_enabled = False
+        trader.overnight.enter_close(DAY)
+        self.assertEqual(trader.overnight.load()["positions"], {})
+        trader.cfg.on_enabled = True
+        clock.t = datetime(2026, 9, 1, 16, 5, tzinfo=ET)
+        trader.overnight.enter_close(DAY)
+        self.assertEqual(trader.overnight.load()["positions"], {})
+
+    def test_live_market_buy_with_stop_then_market_sell_or_already_stopped(self):
+        class Live(FakeLive):
+            def order(self, **p):
+                self.orders.append((p["type"], p["side"], p.get("quantity"), p.get("reduceOnly")))
+                if p["side"] == "BUY":
+                    self.amt = float(p["quantity"])
+                    return {"executedQty": p["quantity"], "avgPrice": "88.2"}
+                self.amt = 0.0
+                return {"avgPrice": "91.9"}
+
+            def position_amt(self, symbol):
+                return self.amt, 0.0
+
+        trader, clock, client = self._trader(Live, dry_run=False, api_key="k", api_secret="s", on_max=1)
+        on = trader.overnight
+        on.enter_close(DAY)
+        qty = fmt_qty = f"{round_step(500 / 88.1, 0.001):.3f}"
+        self.assertEqual([o[0] for o in client.orders], ["margin", "leverage", "MARKET", "STOP"])
+        self.assertEqual(client.orders[2], ("MARKET", "BUY", qty, None))
+        self.assertAlmostEqual(client.orders[3][2], 88.2 * 0.85, delta=0.01)   # 체결 평균가 기준 -15%
+        clock.t = datetime(2026, 9, 2, 9, 29, tzinfo=ET)
+        on.exit_open(NEXT)
+        self.assertIn(("cancel_all",), client.orders)
+        self.assertEqual(client.orders[-1], ("MARKET", "SELL", fmt_qty, "true"))
+        # 밤사이 손절로 이미 정리된 경우: 팔지 않고 기록만
+        trader2, clock2, client2 = self._trader(Live, dry_run=False, api_key="k", api_secret="s", on_max=1)
+        trader2.overnight.enter_close(DAY)
+        client2.amt = 0.0
+        clock2.t = datetime(2026, 9, 2, 9, 31, tzinfo=ET)
+        n = len(client2.orders)
+        trader2.overnight.exit_open(NEXT)
+        self.assertNotIn("SELL", [o[1] for o in client2.orders[n:] if len(o) > 1])
+        with open(f"{trader2.cfg.state_dir}/trades.csv", encoding="utf-8") as fh:
+            self.assertIn("night_stop", fh.read())
+
+    def test_loop_starts_on_early_close_day_and_until_close_when_enabled(self):
+        early = date(2026, 11, 27)
+        now = datetime(2026, 11, 27, 8, 0, tzinfo=ET)
+        self.assertEqual(next_start(now, "").date(), date(2026, 11, 30))                 # 끄면 조기 마감일은 건너뜀
+        self.assertEqual(next_start(now, "", overnight=True), datetime(2026, 11, 27, 9, 10, tzinfo=ET))
+        late = datetime(2026, 9, 1, 15, 40, tzinfo=ET)                                    # FVG 정리(15:20) 뒤에 켬
+        self.assertEqual(next_start(late, "").date(), NEXT)
+        self.assertEqual(next_start(late, "", overnight=True), late)
+        self.assertTrue(early.weekday() == 4)

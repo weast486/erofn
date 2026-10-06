@@ -232,7 +232,7 @@ def kiwoom_section() -> tuple[str, str]:
 
 
 # ------------------------------------------------------------------ 바이낸스
-BN_REASON = {"target": "익절", "stop": "손절", "time": "시간 정리"}
+BN_REASON = {"target": "익절", "stop": "손절", "time": "시간 정리", "night": "종가 매매 · 장 시작 정리", "night_stop": "종가 매매 · 손절"}
 BN_PHASE = {"new": "준비 중", "watch": "신호 감시 중", "position": "보유 중", "done": "끝"}
 
 
@@ -272,6 +272,13 @@ def binance_section() -> tuple[str, str]:
                 f'<td class="num">{esc(p.get("entry", "-"))}</td><td class="num">{esc(p.get("stop", "-"))}</td>'
                 f'<td class="num">{esc(p.get("tp", "-"))}</td></tr>')
 
+    night = (read_json(sdir / "overnight.json") or {}).get("positions") or {}
+    for sym, p in night.items():
+        open_rows.append(
+            f'<tr><th scope="row">{esc(sym.replace("USDT", ""))}<small>종가 매매 {esc(p.get("day", ""))}</small></th><td>롱</td>'
+            f'<td class="num">{esc(p.get("qty", "-"))}</td><td class="num">{esc(p.get("entry", "-"))}</td>'
+            f'<td class="num">{esc(p.get("stop", "-"))}</td><td class="num">다음 9:30</td></tr>')
+
     trade_rows, total, n = [], 0.0, 0
     try:
         with open(sdir / "trades.csv", newline="", encoding="utf-8") as fh:
@@ -294,7 +301,7 @@ def binance_section() -> tuple[str, str]:
     summary = (
         f'<dl class="facts">'
         f'<div><dt>오늘 상태</dt><dd>{esc(phase)}<small>{esc((latest or {}).get("day", "기록 없음"))}</small></dd></div>'
-        f'<div><dt>보유 포지션</dt><dd>{len(open_rows)}개<small>하루 최대 2종목</small></dd></div>'
+        f'<div><dt>보유 포지션</dt><dd>{len(open_rows)}개<small>낮 2종목 + 종가 2종목</small></dd></div>'
         f'<div><dt>거래</dt><dd>{n}건<small>기록 {len(days)}일</small></dd></div>'
         f'<div><dt>손익 (USDT)</dt><dd class="{tone(total)}">{signed(total, "", 2)}<small>수수료 전</small></dd></div>'
         f'</dl>')
@@ -309,7 +316,7 @@ def binance_section() -> tuple[str, str]:
         + f'<h3>거래 내역</h3><div class="scroll"><table><thead><tr><th class="num">날짜</th><th>종목</th><th>방향</th>'
           f'<th class="num">수량</th><th class="num">진입가</th><th class="num">청산가</th><th class="num">수익률</th>'
           f'<th class="num">손익</th><th>사유</th></tr></thead><tbody>{"".join(trade_rows) or empty_row(9, "아직 거래 없음")}</tbody></table></div>')
-    return bot_block("binance", "바이낸스 봇", "미국 주식 선물 · 첫 5분봉 + 1분봉 FVG · 종목당 5배, 하루 2종목",
+    return bot_block("binance", "바이낸스 봇", "미국 주식 선물 · 낮: 첫 5분봉 + 1분봉 FVG 5배 x 2종목 · 밤: 급락 종목 종가 매수 1배 x 2종목",
                      live, summary, body), ("실전" if live else "드라이런")
 
 

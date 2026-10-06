@@ -13,6 +13,8 @@
   6. 9:30 + 350분(15:20)에 남은 주문 취소·시장가 정리
 수량 = 진입 때 평가금액 x 5배 / 진입가 (2종목이면 동시에 최대 10배). 교차 마진, 바이낸스 레버리지 설정 20
 (5배씩 두 종목의 증거금이 모자라지 않게). 기본은 드라이런(주문 없이 로그만).
+  7. (BN_ON_ENABLED) 종가 매매: 15:58 에 장중 -10% 이하·저가 근처 마감 종목을 평가금액 x 1배씩 최대 2종목 매수,
+     비상 손절 -15%, 다음 거래일 9:30 시장가 정리 — overnight.py
 """
 from __future__ import annotations
 
@@ -52,6 +54,14 @@ class BotConfig:
     poll_seconds: float = 1.0
     dry_equity: float = 1000.0    # 드라이런인데 키가 없을 때 쓸 평가금액 (USDT)
     state_dir: str = "state_binance"
+    # 종가 매매(오버나이트, 롱만 — overnight.py): 장중 -on_drop% 이하 + 저가 근처 마감 종목을 15:58 에 사서 다음 거래일 9:30 에 팖
+    on_enabled: bool = False
+    on_leverage: float = 1.0      # 종목마다 평가금액 x 이 배수
+    on_max: int = 2               # 하루 최대 종목 수 (많이 내린 순)
+    on_drop: float = 10.0         # 장중 등락(현재가/시가-1) 이 -N% 이하
+    on_pos: float = 0.1           # 종가 위치 (현재가-저가)/(고가-저가) 가 이 값 미만 (0 = 저가)
+    on_stop: float = 15.0         # 거래소 비상 손절 = 매수가 -N%
+    on_min_qv: float = 1_000_000  # 오늘 정규장 거래대금(USDT) 하한
 
     @classmethod
     def from_env(cls) -> "BotConfig":
@@ -76,13 +86,23 @@ class BotConfig:
             poll_seconds=f("BN_POLL_SECONDS", "poll_seconds"),
             dry_equity=f("BN_DRY_EQUITY", "dry_equity"),
             state_dir=_get("BN_STATE_DIR", cls.state_dir),
+            on_enabled=_bool(os.environ.get("BN_ON_ENABLED"), False),
+            on_leverage=f("BN_ON_LEVERAGE", "on_leverage"),
+            on_max=f("BN_ON_MAX", "on_max", int),
+            on_drop=f("BN_ON_DROP", "on_drop"),
+            on_pos=f("BN_ON_POS", "on_pos"),
+            on_stop=f("BN_ON_STOP", "on_stop"),
+            on_min_qv=f("BN_ON_MIN_QV", "on_min_qv"),
         )
 
     def describe(self) -> str:
         extra = f" + {self.extra_symbols}" if self.extra_symbols else ""
         return (f"전날 거래대금 상위 {self.top_n}{extra}, 첫 5분봉 + 1분봉 FVG({self.entry}) {self.side}, "
                 f"손절 첫 봉 반대편 / 익절 {self.target_r:g}R / 9:30+{self.exit_minutes}분 정리, "
-                f"종목당 평가금액 x {self.leverage:g}배, 하루 최대 {self.max_trades}종목 ({'드라이런' if self.dry_run else '실제 주문'})")
+                f"종목당 평가금액 x {self.leverage:g}배, 하루 최대 {self.max_trades}종목"
+                + (f" + 종가 매매(장중 -{self.on_drop:g}%↓·저가 근처 마감 {self.on_max}종목 x {self.on_leverage:g}배, "
+                   f"손절 -{self.on_stop:g}%, 다음 거래일 9:30 정리)" if self.on_enabled else "")
+                + f" ({'드라이런' if self.dry_run else '실제 주문'})")
 
 
 def trading_day(d: date) -> bool:
@@ -144,6 +164,9 @@ class FvgTrader:
         self.sleep = sleep_fn
         self.meta: dict[str, dict] = {}
         Path(cfg.state_dir).mkdir(parents=True, exist_ok=True)
+        from .overnight import Overnight
+
+        self.overnight = Overnight(self)
 
     # ------------------------------------------------------------ 상태 파일
     def _path(self, day: date) -> Path:
@@ -225,7 +248,15 @@ class FvgTrader:
             self.sleep(min(30.0, max(0.2, (t - self.now()).total_seconds())))
 
     def run(self, day: date | None = None) -> DayState:
+        """하루 전체: (9:30 종가 매매 정리) → 낮 FVG 매매 → (15:58 종가 매수)."""
         day = day or self.now().date()
+        st = self.run_fvg(day)
+        if trading_day(day):
+            self.overnight.exit_open(day)   # FVG 쪽이 9:30 전에 끝났거나 쉬는 날(조기 마감 등)이어도 정리
+            self.overnight.enter_close(day)
+        return st
+
+    def run_fvg(self, day: date) -> DayState:
         st = self.load(day)
         if not trading_day(day):
             log.info("%s 은 미국 휴장일(주말·공휴일)이라 쉽니다", day)
@@ -249,6 +280,7 @@ class FvgTrader:
             st.adr = self.adr(day, st.candidates)
             st.phase = "watch"
             self.save(st)
+        self.overnight.exit_open(day)  # 전날 종가에 산 종목은 9:30 에 정리 (없으면 아무것도 안 함)
         self.wait_until(at(day, 9, 35, 3))
         for sym in st.candidates:
             if sym in st.ranges or self.now() >= exit_t:
@@ -463,15 +495,22 @@ class FvgTrader:
 LOOP_START = (9, 10)  # 미국 동부 (한국 시간 22:10, 서머타임 끝나면 23:10)
 
 
-def next_start(now: datetime, last_run: str, exit_minutes: int = 350) -> datetime:
+def day_end(day: date, exit_minutes: int, overnight: bool) -> datetime:
+    """이 시각 전이면 오늘 run 을 시작(재시도)할 만함. 종가 매매를 켜면 15:57 (종가 매수 전)까지."""
+    end = at(day, 9, 30) + timedelta(minutes=exit_minutes)
+    return max(end, at(day, 15, 57)) if overnight and day not in US_EARLY_CLOSE else end
+
+
+def next_start(now: datetime, last_run: str, exit_minutes: int = 350, overnight: bool = False) -> datetime:
+    """overnight(종가 매매)를 켜면 13시 조기 마감일에도 시작한다 (전날 산 종목을 9:30 에 정리해야 해서)."""
     d = now
     for _ in range(10):
         day = d.date()
-        if trading_day(day) and day not in US_EARLY_CLOSE and day.isoformat() != last_run:
+        if trading_day(day) and (overnight or day not in US_EARLY_CLOSE) and day.isoformat() != last_run:
             start = at(day, *LOOP_START)
             if day != now.date() or now < start:
                 return start
-            if now < at(day, 9, 30) + timedelta(minutes=exit_minutes):
+            if now < day_end(day, exit_minutes, overnight):
                 return now
         d = datetime.combine(day + timedelta(days=1), time(0, 0), ET)
     raise RuntimeError("다음 거래일을 못 찾음")
@@ -481,7 +520,7 @@ def loop(make_trader, cfg: BotConfig, now_fn=None, sleep_fn=_time.sleep, retries
     now_fn = now_fn or (lambda: datetime.now(ET))
     last_run = ""
     while True:
-        start = next_start(now_fn(), last_run, cfg.exit_minutes)
+        start = next_start(now_fn(), last_run, cfg.exit_minutes, cfg.on_enabled)
         if start > now_fn():
             log.info("다음 실행 %s (미국 동부) 까지 대기 — 이 창을 닫지 마세요", start.strftime("%m-%d %H:%M"))
             while now_fn() < start:
@@ -494,7 +533,7 @@ def loop(make_trader, cfg: BotConfig, now_fn=None, sleep_fn=_time.sleep, retries
                 break
             except Exception:  # noqa: BLE001
                 log.exception("실행 중 오류 (%d/%d)", attempt + 1, retries)
-                if attempt >= retries or now_fn() >= at(day, 9, 30) + timedelta(minutes=cfg.exit_minutes + 5):
+                if attempt >= retries or now_fn() >= day_end(day, cfg.exit_minutes, cfg.on_enabled) + timedelta(minutes=5):
                     log.error("오늘은 더 시도하지 않음 — 바이낸스 앱에서 포지션·주문을 직접 확인하세요")
                     break
                 sleep_fn(30)

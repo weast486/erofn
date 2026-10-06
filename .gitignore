@@ -10,3 +10,5 @@ backtest_results/
 state_kiwoom/
 .env.binance
 state_binance/
+.env.bak
+.env.*.bak

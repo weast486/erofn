@@ -401,6 +401,12 @@ class FvgTrader:
                 log.info("%s 거래소 손절 주문 %g (%s)", sym, pos["stop"], pos["stop_order"])
             except BinanceError as exc:
                 log.warning("%s 거래소 손절 주문 실패 (%s) → 봇이 가격을 보고 시장가로 손절합니다. 창을 닫지 마세요", sym, exc)
+            real, _ = self.real_fill(sym, side_s, order_id=r.get("orderId"))
+            if real > 0 and real != avg:  # 주문 응답의 평균가가 비어 있거나 주문가와 다르게 체결됨
+                log.info("%s 실제 체결 평균가 %g (주문가 %g) 로 기록", sym, real, lvl_r)
+                avg = real
+                tp = avg + side * abs(avg - stop) * self.cfg.target_r if self.cfg.target_r > 0 else 0.0
+                pos["entry"], pos["tp"] = avg, round_tick(tp, f["tick"]) if tp else 0.0
             self.save(st)
         log.info("%s 진입 %s %s개 @ %g, 손절 %g, 익절 %s (오늘 %d/%d번째)", sym, "롱" if side == 1 else "숏",
                  fmt(filled), avg, pos["stop"], fmt(pos["tp"]) if tp else "없음", len(st.positions), self.cfg.max_trades)
@@ -414,9 +420,8 @@ class FvgTrader:
             if last is None or (now - datetime.fromisoformat(last)).total_seconds() >= 5:
                 pos["checked"] = now.isoformat()
                 amt, _ = self.c.position_amt(sym)
-                if amt == 0:  # 거래소 손절·익절로 이미 정리됨
-                    reason = "target" if tp and p is not None and abs(p - tp) < abs(p - stop) else "stop"
-                    self.finish(st, pos, reason, (tp if reason == "target" else stop) if p is None else p)
+                if amt == 0:  # 거래소 손절·익절로 이미 정리됨 → 어느 쪽인지는 실제 체결가로 판단 (finish)
+                    self.finish(st, pos, "", stop if p is None else p)
                     return
         if p is None:
             return
@@ -471,9 +476,35 @@ class FvgTrader:
             log.error("%s 포지션이 아직 %s개 남아 있어요 — 바이낸스 앱에서 직접 정리해 주세요", sym, fmt(abs(amt)))
         self.finish(st, pos, reason, price)
 
+    def real_fill(self, sym: str, side_s: str, since: datetime | None = None, order_id=None) -> tuple[float, float]:
+        """바이낸스 체결 내역으로 본 실제 평균 체결가와 수량 (side_s = BUY / SELL). 못 구하면 (0, 0).
+        주문 하나(order_id) 또는 since 이후 그 방향 체결 전부. 봇 시계가 거래소보다 늦을 수 있어 30초 여유."""
+        fn = getattr(self.c, "fills", None)
+        if self.cfg.dry_run or fn is None or (order_id is None and since is None):
+            return 0.0, 0.0
+        for _ in range(3):  # 체결 직후에는 내역이 조금 늦게 보일 수 있음
+            try:
+                rows = fn(sym, start_ms=ms(since) - 30_000 if since else None, order_id=order_id)
+            except BinanceError as exc:
+                log.warning("%s 체결 내역 조회 실패 (%s) → 주문가·현재가로 기록", sym, exc)
+                return 0.0, 0.0
+            rows = [x for x in rows if x.get("side") == side_s]
+            qty = sum(float(x["qty"]) for x in rows)
+            if qty > 0:
+                return sum(float(x["price"]) * float(x["qty"]) for x in rows) / qty, qty
+            self.sleep(0.5)
+        return 0.0, 0.0
+
     def finish(self, st: DayState, pos: dict, reason: str, exit_px: float) -> None:
+        """reason 이 비어 있으면(거래소 주문으로 정리됨) 청산가가 익절가·손절가 중 어디에 가까운지로 정한다."""
         if not self.cfg.dry_run:
             self.c.cancel_all(pos["symbol"])
+            real, _ = self.real_fill(pos["symbol"], "SELL" if pos["side"] == 1 else "BUY",
+                                     since=datetime.fromisoformat(pos["entry_time"]))
+            if real > 0:
+                exit_px = real
+        if not reason:
+            reason = "target" if pos["tp"] and abs(exit_px - pos["tp"]) < abs(exit_px - pos["stop"]) else "stop"
         ret = pos["side"] * (exit_px / pos["entry"] - 1) * 100 if exit_px else 0.0
         pnl = pos["side"] * (exit_px - pos["entry"]) * pos["qty"] if exit_px else 0.0
         pos["result"] = {"reason": reason, "exit": exit_px, "ret_pct": round(ret, 3), "pnl": round(pnl, 4),

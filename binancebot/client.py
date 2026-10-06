@@ -145,6 +145,15 @@ class BinanceClient:
                 return float(p.get("positionAmt", 0)), float(p.get("entryPrice", 0))
         return 0.0, 0.0
 
+    def fills(self, symbol: str, start_ms: int | None = None, order_id=None) -> list[dict]:
+        """내 체결 내역 (userTrades): 조각마다 side·price·qty·time·orderId·commission."""
+        params = {"symbol": symbol, "limit": 200}
+        if order_id:
+            params["orderId"] = order_id
+        if start_ms:
+            params["startTime"] = int(start_ms)
+        return self._req("GET", "/fapi/v1/userTrades", params, signed=True)
+
     def set_leverage(self, symbol: str, leverage: int) -> None:
         self._req("POST", "/fapi/v1/leverage", {"symbol": symbol, "leverage": int(leverage)}, signed=True)
 

@@ -210,6 +210,36 @@ class LiveTest(unittest.TestCase):
         self.assertAlmostEqual(st.positions["AUSDT"]["qty"], round_step(2500 / 101.5, 0.001))
 
 
+    def test_records_real_fill_prices(self):
+        """진입가·청산가는 주문가·현재가가 아니라 바이낸스 체결 내역의 평균가로 기록."""
+        first = [(100, 101, 99, 100.5)] * 5
+        fvg = [(101, 101.5, 100.8, 101.4), (101.4, 103, 101.3, 102.9), (102.9, 103.5, 102.2, 103.2)]
+        after = [(103.2, 103.3, 102.0, 102.5), (102.5, 102.6, 101.3, 101.4)]
+        up = [(101.4, 105, 101.4, 105)] * 2 + [(105, 107, 105, 107)] * 3
+        clock = Clock(datetime(2026, 9, 1, 9, 0, tzinfo=ET))
+        prev = day_bars(PREV, [(100, 100, 100, 100, 5000.0)] * 390)
+        client = FakeLive({"AUSDT": prev + day_bars(DAY, first + fvg + after + up)}, clock)
+        info = client.exchange_info()
+        info["symbols"][0]["filters"].append({"filterType": "PERCENT_PRICE", "multiplierUp": "1.02", "multiplierDown": "0.98"})
+        client.exchange_info = lambda: info
+
+        def fills(symbol, start_ms=None, order_id=None):  # 매수는 두 조각 평균 101.4, 익절은 실제 익절가에 체결
+            buy = [{"side": "BUY", "price": "101.3", "qty": "10"}, {"side": "BUY", "price": "101.5", "qty": "10"}]
+            tp = client.tp
+            return buy if client.amt else buy + [{"side": "SELL", "price": str(tp), "qty": "20"}]
+
+        client.fills = fills
+        place = client.order
+        client.order = lambda **p: dict(place(**p), orderId=1)  # 실제 응답처럼 주문번호가 온다
+        cfg = BotConfig(top_n=1, state_dir=tempfile.mkdtemp(), dry_run=False, api_key="k", api_secret="s")
+        st = FvgTrader(client, cfg, now_fn=clock.now, sleep_fn=clock.sleep).run(DAY)
+        pos = st.positions["AUSDT"]
+        self.assertAlmostEqual(pos["entry"], 101.4)
+        self.assertAlmostEqual(pos["tp"], 101.4 + 2 * (101.4 - 99))   # 익절가도 실제 진입가 기준
+        self.assertEqual(pos["result"]["reason"], "target")
+        self.assertAlmostEqual(pos["result"]["exit"], pos["tp"])       # 현재가(107)가 아니라 체결가
+
+
 class HelperTest(unittest.TestCase):
     def test_days_and_rounding(self):
         self.assertEqual(prev_trading_day(date(2026, 9, 8)), date(2026, 9, 4))  # 9/7 노동절

@@ -87,6 +87,12 @@ class Overnight:
                 amt, _ = self.c.position_amt(sym)
                 if amt > 0:
                     log.error("%s 포지션이 아직 %s개 남아 있어요 — 바이낸스 앱에서 직접 정리해 주세요", sym, fmt(amt))
+        if not self.cfg.dry_run and pos.get("entry_time"):
+            from datetime import datetime
+
+            real, _ = self.t.real_fill(sym, "SELL", since=datetime.fromisoformat(pos["entry_time"]))
+            if real > 0:  # 손절가·현재가 대신 실제 체결 평균가로 기록
+                price = real
         ret = (price / pos["entry"] - 1) * 100 if price else 0.0
         pnl = (price - pos["entry"]) * pos["qty"] if price else 0.0
         log.info("%s 종가 매매 끝: %s @ %g, %+.2f%% (수수료 전 %+.2f USDT)", sym,
@@ -201,6 +207,9 @@ class Overnight:
             if filled <= 0:
                 log.info("%s 종가 매수 체결 없음", sym)
                 return False
+            real, _ = self.t.real_fill(sym, "BUY", order_id=r.get("orderId"))
+            if real > 0:  # 주문 응답의 평균가 대신 실제 체결 평균가로 기록
+                avg = real
         stop = round_tick(avg * (1 - cfg.on_stop / 100), f["tick"])
         pos = {"symbol": sym, "day": day.isoformat(), "qty": filled, "entry": avg, "stop": stop,
                "entry_time": self.t.now().isoformat(), "equity": eq, "intra": round(intra, 2), "stop_order": ""}

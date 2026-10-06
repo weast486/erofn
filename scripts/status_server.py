@@ -4,6 +4,7 @@
 
 브라우저에서 http://localhost:8765 를 열면 그 순간 봇 기록을 읽어 페이지를 새로 만든다.
 페이지의 '지금 업데이트' 버튼·새로고침(F5)·자동 갱신(60초)마다 다시 만든다 (Claude 를 거치지 않음).
+바이낸스 거래 내역의 종목을 누르면 그날 봉 차트에 진입·손절·익절·청산 지점을 보여 준다 (trade_chart.py).
 토스 현재가는 최대 60초에 한 번만 다시 조회한다 (가격 조회만, 주문 없음).
 기본은 이 PC 에서만 열린다. --lan 을 주면 같은 와이파이의 다른 기기에서도 열린다 (비밀번호 없음 — 집 안에서만).
 이미 켜져 있으면 브라우저만 열고 끝난다.
@@ -11,6 +12,7 @@
 from __future__ import annotations
 
 import argparse
+import re
 import socket
 import subprocess
 import sys
@@ -25,6 +27,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import make_status_page  # noqa: E402
+import trade_chart  # noqa: E402
 
 PRICE_EVERY = 60  # 토스 현재가를 다시 조회하는 최소 간격(초)
 AUTO_REFRESH = 60  # 페이지 자동 갱신 간격(초)
@@ -57,7 +60,7 @@ def render() -> bytes:
             f'<span>{AUTO_REFRESH}초마다 자동으로 새로 읽습니다.</span>'
             + (f'<span>{note}</span>' if note else '') + '</div>')
         try:
-            body = make_status_page.build(toolbar)
+            body = make_status_page.build(toolbar, links=True)
         except Exception as exc:  # noqa: BLE001
             body = (f'<title>봇 매매현황</title><div style="font-family:sans-serif;padding:24px">'
                     f'<h1>페이지를 만들지 못했어요</h1><p>{type(exc).__name__}: {exc}</p>'
@@ -76,10 +79,18 @@ def render() -> bytes:
 
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):  # noqa: N802
-        if self.path.split("?")[0] not in ("/", "/index.html"):
+        path = self.path.split("?")[0]
+        m = re.fullmatch(r"/chart/binance/([A-Z0-9]{2,20})/(\d{4}-\d{2}-\d{2})/(day|night)", path)
+        if m:  # 거래 차트: 그날 봉 위에 진입·손절·익절·청산 지점
+            try:
+                data = trade_chart.chart_page(*m.groups()).encode("utf-8")
+            except Exception as exc:  # noqa: BLE001
+                data = f"<meta charset=utf-8><p>차트를 만들지 못했어요: {type(exc).__name__}: {exc}</p><p><a href='/'>돌아가기</a></p>".encode("utf-8")
+        elif path in ("/", "/index.html"):
+            data = render()
+        else:
             self.send_error(404)
             return
-        data = render()
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(data)))

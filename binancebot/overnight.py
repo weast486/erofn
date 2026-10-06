@@ -6,7 +6,7 @@
             → 많이 내린 순으로 on_max 종목까지 시장가 매수 (종목마다 평가금액 x on_leverage 배)
             → 거래소 손절(STOP_MARKET) = 매수가 -on_stop% (밤사이 비상용; 좁은 손절은 백테스트에서 수익·낙폭 모두 나빴음)
   다음 거래일 9:30  손절 주문 취소, 남은 수량 시장가 매도 (손절로 이미 정리됐으면 기록만)
-상태는 state_dir/overnight.json, 거래 내역은 trades.csv (reason = night / night_stop).
+상태는 state_dir/overnight.json (positions = 보유 중, history = 정리한 거래), 거래 내역은 trades.csv (reason = night / night_stop).
 """
 from __future__ import annotations
 
@@ -100,6 +100,9 @@ class Overnight:
             w.writerow([pos["day"], "dry" if self.cfg.dry_run else "live", sym, 1, pos["qty"], pos["entry"], pos["stop"], 0.0,
                         price, reason, round(ret, 3), round(pnl, 4)])
         st["positions"].pop(sym, None)
+        hist = st.setdefault("history", [])  # 현황 페이지 차트용: 최근 정리한 거래의 시각·가격
+        hist.append(dict(pos, exit=price, exit_time=self.t.now().isoformat(), reason=reason, ret_pct=round(ret, 3)))
+        del hist[:-200]
         self.save(st)
 
     # ------------------------------------------------------------ 저녁: 종가 매수

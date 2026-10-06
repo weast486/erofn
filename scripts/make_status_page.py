@@ -236,7 +236,7 @@ BN_REASON = {"target": "익절", "stop": "손절", "time": "시간 정리", "nig
 BN_PHASE = {"new": "준비 중", "watch": "신호 감시 중", "position": "보유 중", "done": "끝"}
 
 
-def binance_section() -> tuple[str, str]:
+def binance_section(links: bool = False) -> tuple[str, str]:
     sdir = ROOT / "state_binance"
     dry = env_flag(ROOT / ".env.binance", "BINANCE_DRY_RUN")
     live = dry is False
@@ -290,8 +290,12 @@ def binance_section() -> tuple[str, str]:
         n += 1
         total += pnl
         side = "롱" if float(t.get("side") or 1) > 0 else "숏"
+        name = esc(t.get("symbol", "").replace("USDT", ""))
+        if links and re.fullmatch(r"[A-Z0-9]+", t.get("symbol", "")) and re.fullmatch(r"\d{4}-\d{2}-\d{2}", t.get("day", "")):
+            kind = "night" if str(t.get("reason", "")).startswith("night") else "day"
+            name = f'<a href="/chart/binance/{t["symbol"]}/{t["day"]}/{kind}">{name} <span aria-hidden="true">↗</span></a>'
         trade_rows.append(
-            f'<tr><td class="num">{esc(t.get("day", "")[5:])}</td><th scope="row">{esc(t.get("symbol", "").replace("USDT", ""))}'
+            f'<tr><td class="num">{esc(t.get("day", "")[5:])}</td><th scope="row">{name}'
             f'<small>{"드라이런" if t.get("mode") == "dry" else "실전"}</small></th><td>{side}</td>'
             f'<td class="num">{esc(t.get("qty", ""))}</td><td class="num">{esc(t.get("entry", ""))}</td>'
             f'<td class="num">{esc(t.get("exit", ""))}</td><td class="num {tone(ret)}">{signed(ret, "%", 2)}</td>'
@@ -393,6 +397,9 @@ thead .num{font-family:var(--font)}
 .b-fill{display:block;height:100%;background:var(--muted);border-radius:5px}
 .b-val{text-align:right;color:var(--muted);font-variant-numeric:tabular-nums}
 .foot{color:var(--muted);font-size:12.5px;margin:0}
+tbody th a{color:inherit;text-decoration:underline;text-decoration-color:var(--line);text-underline-offset:3px}
+tbody th a:hover{text-decoration-color:var(--ink)}
+tbody th a:focus-visible{outline:2px solid var(--down);outline-offset:2px}
 .bar{display:flex;flex-wrap:wrap;align-items:center;gap:8px 14px;color:var(--muted);font-size:13px}
 .bar button{font:inherit;font-weight:600;color:var(--surface);background:var(--ink);border:0;border-radius:8px;padding:8px 16px;cursor:pointer}
 .bar button:hover{opacity:.85} .bar button:focus-visible{outline:2px solid var(--down);outline-offset:2px}
@@ -400,9 +407,9 @@ thead .num{font-family:var(--font)}
 """
 
 
-def build(toolbar: str = "") -> str:
+def build(toolbar: str = "", links: bool = False) -> str:
     now = datetime.now().astimezone()
-    blocks = [toss_section()[0], kiwoom_section()[0], binance_section()[0]]
+    blocks = [toss_section()[0], kiwoom_section()[0], binance_section(links)[0]]
     return (
         '<title>봇 매매현황</title>\n'
         '<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans+KR:wght@400;500;600;700&display=swap">\n'

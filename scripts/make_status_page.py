@@ -74,6 +74,11 @@ def signed(x: float, unit: str = "", digits: int = 0) -> str:
     return f"{x:+,.{digits}f}{unit}" if x else f"0{unit}"
 
 
+def chart_link(on: bool, href: str, label: str) -> str:
+    """현황 서버로 볼 때만 종목 이름을 차트 링크로 (아티팩트·파일로 볼 때는 그냥 이름)."""
+    return f'<a href="{href}">{label} <span aria-hidden="true">↗</span></a>' if on else label
+
+
 def tone(x: float) -> str:
     return "up" if x > 0 else "down" if x < 0 else "flat"
 
@@ -86,7 +91,7 @@ def short_dt(iso: str) -> str:
 
 
 # ------------------------------------------------------------------ 토스
-def toss_section() -> tuple[str, str]:
+def toss_section(links: bool = False) -> tuple[str, str]:
     snap = read_json(ROOT / "state" / "매매현황.json") or {}
     state = read_json(ROOT / "state" / "state.json") or {}
     sl, tp = float(snap.get("stop_loss_pct") or 4.7), float(snap.get("take_profit_pct") or 20)
@@ -120,7 +125,7 @@ def toss_section() -> tuple[str, str]:
                  f'<div class="g-ends"><span>손절 {won(entry * (1 + lo / 100))}</span>'
                  f'<span>{"RSI 50↑ 매도" if rsi else "익절 " + won(entry * (1 + hi / 100))}</span></div>')
         rows.append(
-            f'<tr><th scope="row">{esc(p["name"])}<small>{esc(p["symbol"])}</small></th>'
+            f'<tr><th scope="row">{chart_link(links, "/chart/toss/%s/%s" % (p["symbol"], str(p.get("opened_at", ""))[:10]), esc(p["name"]))}<small>{esc(p["symbol"])}</small></th>'
             f'<td><span class="tag">{"RSI" if rsi else "신고가"}</span></td>'
             f'<td class="num">{qty}</td><td class="num">{won(entry)}</td><td class="num">{won(last)}</td>'
             f'<td class="num {tone(ret)}">{signed(ret, "%", 2)}</td>'
@@ -133,7 +138,7 @@ def toss_section() -> tuple[str, str]:
 
     reasons = {"STOP_LOSS": "손절", "TAKE_PROFIT": "익절", "RSI_EXIT": "RSI 매도", "MAX_HOLD": "보유 기간 끝"}
     hist_rows = [
-        f'<tr><th scope="row">{esc(h["name"])}<small>{esc(h["symbol"])}</small></th>'
+        f'<tr><th scope="row">{chart_link(links, "/chart/toss/%s/%s" % (h["symbol"], str(h.get("opened_at", ""))[:10]), esc(h["name"]))}<small>{esc(h["symbol"])}</small></th>'
         f'<td><span class="tag">{"RSI" if h.get("kind") == "rsi" else "신고가"}</span></td>'
         f'<td class="num">{int(h.get("quantity", 0))}</td><td class="num">{won(h["entry_price"])}</td>'
         f'<td class="num">{won(h["exit_price"])}</td>'
@@ -172,7 +177,7 @@ KW_STATUS = {"watch": "감시 중", "bought": "매수", "skip_gap": "갭상승 �
 KW_TRADE = {"pending": "주문 중", "open": "보유", "closing": "매도 중", "closed": "끝", "canceled": "취소"}
 
 
-def kiwoom_section() -> tuple[str, str]:
+def kiwoom_section(links: bool = False) -> tuple[str, str]:
     days = sorted((ROOT / "state_kiwoom").glob("daytrade_*.json"))
     states = [s for s in (read_json(p) for p in days) if s]
     latest = states[-1] if states else {}
@@ -186,7 +191,7 @@ def kiwoom_section() -> tuple[str, str]:
     day = latest.get("date", "")
     day_txt = f"{day[:4]}-{day[4:6]}-{day[6:]}" if len(day) == 8 else "-"
     cand_rows = [
-        f'<tr><th scope="row">{esc(c["name"])}<small>{esc(c["code"])}</small></th>'
+        f'<tr><th scope="row">{chart_link(links, "/chart/kiwoom/%s/%s" % (c["code"], day), esc(c["name"]))}<small>{esc(c["code"])}</small></th>'
         f'<td class="num up">{signed(c["prev_change"], "%", 1)}</td><td class="num">{won(c["prev_close"])}</td>'
         f'<td>{esc(KW_STATUS.get(c.get("status"), c.get("status", "")))}</td></tr>'
         for c in latest.get("candidates", [])]
@@ -203,7 +208,7 @@ def kiwoom_section() -> tuple[str, str]:
             pnl = (exit_px - entry) * qty if exit_px else 0.0
             total_pnl += pnl
             trade_rows.append(
-                f'<tr><td class="num">{d[4:6]}-{d[6:]}</td><th scope="row">{esc(t["name"])}<small>{esc(t["code"])}</small></th>'
+                f'<tr><td class="num">{d[4:6]}-{d[6:]}</td><th scope="row">{chart_link(links, "/chart/kiwoom/%s/%s" % (t["code"], d), esc(t["name"]))}<small>{esc(t["code"])}</small></th>'
                 f'<td class="num">{qty}</td><td class="num">{won(entry)}</td>'
                 f'<td class="num">{won(exit_px) if exit_px else "-"}</td>'
                 f'<td class="num {tone(ret)}">{signed(ret, "%", 2) if exit_px else "-"}</td>'
@@ -409,7 +414,7 @@ tbody th a:focus-visible{outline:2px solid var(--down);outline-offset:2px}
 
 def build(toolbar: str = "", links: bool = False) -> str:
     now = datetime.now().astimezone()
-    blocks = [toss_section()[0], kiwoom_section()[0], binance_section(links)[0]]
+    blocks = [toss_section(links)[0], kiwoom_section(links)[0], binance_section(links)[0]]
     return (
         '<title>봇 매매현황</title>\n'
         '<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans+KR:wght@400;500;600;700&display=swap">\n'

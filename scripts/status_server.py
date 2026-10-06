@@ -4,7 +4,7 @@
 
 브라우저에서 http://localhost:8765 를 열면 그 순간 봇 기록을 읽어 페이지를 새로 만든다.
 페이지의 '지금 업데이트' 버튼·새로고침(F5)·자동 갱신(60초)마다 다시 만든다 (Claude 를 거치지 않음).
-바이낸스 거래 내역의 종목을 누르면 그날 봉 차트에 진입·손절·익절·청산 지점을 보여 준다 (trade_chart.py).
+표의 종목 이름을 누르면 봉 차트에 진입·손절·익절·청산 지점을 보여 준다 (trade_chart.py, 세 봇 모두).
 토스 현재가는 최대 60초에 한 번만 다시 조회한다 (가격 조회만, 주문 없음).
 기본은 이 PC 에서만 열린다. --lan 을 주면 같은 와이파이의 다른 기기에서도 열린다 (비밀번호 없음 — 집 안에서만).
 이미 켜져 있으면 브라우저만 열고 끝난다.
@@ -80,12 +80,11 @@ def render() -> bytes:
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):  # noqa: N802
         path = self.path.split("?")[0]
-        m = re.fullmatch(r"/chart/binance/([A-Z0-9]{2,20})/(\d{4}-\d{2}-\d{2})/(day|night)", path)
-        if m:  # 거래 차트: 그날 봉 위에 진입·손절·익절·청산 지점
-            try:
-                data = trade_chart.chart_page(*m.groups()).encode("utf-8")
-            except Exception as exc:  # noqa: BLE001
-                data = f"<meta charset=utf-8><p>차트를 만들지 못했어요: {type(exc).__name__}: {exc}</p><p><a href='/'>돌아가기</a></p>".encode("utf-8")
+        m = (re.fullmatch(r"/chart/(binance)/([A-Z0-9]{2,20})/(\d{4}-\d{2}-\d{2})/(day|night)", path)
+             or re.fullmatch(r"/chart/(kiwoom)/([0-9A-Z]{6})/(\d{8})", path)
+             or re.fullmatch(r"/chart/(toss)/([0-9A-Z]{6})/(\d{4}-\d{2}-\d{2})", path))
+        if m:  # 거래 차트: 봉 위에 진입·손절·익절·청산 지점
+            data = trade_chart.page(*m.groups()).encode("utf-8")
         elif path in ("/", "/index.html"):
             data = render()
         else:

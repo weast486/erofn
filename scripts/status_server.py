@@ -99,7 +99,7 @@ def render(local: bool = False) -> bytes:
         f'setTimeout(function(){{if(!document.hidden)go();else document.addEventListener("visibilitychange",go,{{once:true}});}},{AUTO_REFRESH * 1000});'
         + ((
             'document.addEventListener("click",function(e){var s=e.target.closest("button[data-sell]");if(!s||busy)return;'
-            'if(!confirm(s.dataset.name+" "+s.dataset.qty+"주를 지금 시장가로 팔까요?\\n\\n실제 주문이 나가며 취소할 수 없습니다."))return;'
+            'if(!confirm(s.dataset.name+" "+s.dataset.qty+"주를 지금 팔까요?\\n\\n정규장은 시장가, 넥스트레이드 시간(08:00~08:50, 15:40~20:00)은 현재가보다 1% 낮은 지정가로 냅니다.\\n실제 주문이 나가며 취소할 수 없습니다."))return;'
             'busy=true;s.disabled=true;s.textContent="파는 중...";'
             f'fetch("/sell/toss/"+s.dataset.sell,{{method:"POST",headers:{{"X-Sell-Token":"{SELL_TOKEN}"}}}})'
             '.then(function(r){return r.text();}).then(function(t){alert(t);busy=false;location.reload();})'

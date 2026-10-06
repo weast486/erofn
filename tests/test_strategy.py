@@ -223,6 +223,25 @@ class StrategyTest(unittest.TestCase):
         self.tick(MON, 10, 1)
         self.assertNotIn("000001", s.state.positions)  # 판 날에는 다시 사지 않음
 
+    def test_manual_sell_limit_price(self):
+        s = self.strategy
+        self.client.prices["000001"] = 10_000
+        self.tick(MON, 10, 0)
+        self.assertTrue(s.manual_sell("000001", 9_900))  # 넥스트레이드 시간용: 현재가보다 낮은 지정가
+        s.sync_orders()
+        self.assertEqual(s.state.positions, {})
+        self.assertEqual(s.state.history[-1]["reason"], "MANUAL")
+
+    def test_sell_session_by_time(self):
+        from tossbot.__main__ import sell_session
+        at = lambda h, m: MON.market_open.replace(hour=h, minute=m)  # noqa: E731
+        self.assertEqual(sell_session(at(10, 0), MON), "regular")
+        self.assertEqual(sell_session(at(8, 10), MON), "nxt")
+        self.assertEqual(sell_session(at(17, 0), MON), "nxt")
+        self.assertEqual(sell_session(at(8, 55), MON), "")
+        self.assertEqual(sell_session(at(20, 30), MON), "")
+        self.assertEqual(sell_session(at(17, 0), TUE), "")  # 다른 날의 달력
+
     def test_no_buy_after_1520(self):
         self.client.prices["000001"] = 10_000
         self.tick(MON, 15, 20)

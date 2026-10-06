@@ -9,7 +9,7 @@ echo.
 "%PY%" -m tossbot status
 echo.
 set "CODE="
-set /p CODE=즉시 시장가로 팔 종목코드 (여러 개는 띄어쓰기, 그냥 Enter = 취소): 
+set /p CODE=즉시 팔 종목코드 (여러 개는 띄어쓰기, 그냥 Enter = 취소): 
 if "%CODE%"=="" goto :end
 echo.
 "%PY%" -m tossbot sell %CODE%

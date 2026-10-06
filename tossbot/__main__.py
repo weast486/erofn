@@ -6,7 +6,8 @@
     python -m tossbot status       # 봇 보유 포지션 및 매매 이력
     python -m tossbot run          # 자동매매 상주 실행
     python -m tossbot liquidate    # 봇 보유 종목 즉시 전량 매도 (비상용)
-    python -m tossbot sell 종목코드  # 봇 보유 종목 중 그 종목만 즉시 시장가 매도 (봇이 켜져 있으면 봇에게 맡김)
+    python -m tossbot sell 종목코드  # 봇 보유 종목 중 그 종목만 즉시 매도 (봇이 켜져 있으면 봇에게 맡김)
+                                   #   정규장 = 시장가, 넥스트레이드 프리·애프터마켓 = 현재가보다 조금 낮은 지정가
 """
 from __future__ import annotations
 
@@ -14,10 +15,10 @@ import argparse
 import logging
 import sys
 import time
-from datetime import datetime
+from datetime import datetime, time as dtime
 from pathlib import Path
 
-from .broker import Broker
+from .broker import Broker, round_down_to_tick
 from .client import TossClient
 from .config import KST, Config, load_dotenv
 from .market_calendar import TradingDay, trading_day_from_api
@@ -137,26 +138,73 @@ def cmd_liquidate(cfg: Config, _c, strategy: PullbackStrategy) -> None:
 
 
 ALIVE_FILE = "bot_alive.txt"  # 켜져 있는 봇이 돌 때마다 고쳐 쓰는 파일 (sell 명령이 봇이 켜져 있는지 아는 용도)
-SELL_PREFIX = "sell_request_"  # sell 명령이 남기는 요청 파일: sell_request_종목코드.txt
+SELL_PREFIX = "sell_request_"  # sell 명령이 남기는 요청 파일: sell_request_종목코드.txt (내용 = 요청 시각)
+ALIVE_MAX_AGE = 600  # 이 시간(초) 안에 봇이 표시를 남겼으면 켜져 있다고 봄 (15:10 종목 고르기는 몇 분 걸릴 수 있음)
+REQUEST_MAX_AGE = 300  # 이보다 오래된 요청은 버림 (꺼져 있던 봇이 나중에 켜지면서 옛 요청으로 파는 일 방지)
+NXT_DISCOUNT_PCT = 1.0  # 넥스트레이드 시간 즉시 매도: 현재가보다 이만큼 낮은 지정가 (시장가 주문이 안 됨)
+NXT_PRE = (dtime(8, 0), dtime(8, 50))  # 프리마켓
+NXT_AFTER = (dtime(15, 40), dtime(19, 58))  # 애프터마켓 (20:00 마감 직전은 뺌)
 
 
 def sell_requests(cfg: Config) -> list[Path]:
     return sorted(Path(cfg.state_dir).glob(f"{SELL_PREFIX}*.txt"))
 
 
-def handle_sell_requests(cfg: Config, strategy: PullbackStrategy) -> None:
+def sell_session(now: datetime, day: TradingDay | None) -> str:
+    """지금 즉시 매도를 어떻게 낼 수 있는지: 'regular' 정규장(시장가) / 'nxt' 넥스트레이드 프리·애프터마켓(지정가) / '' 불가."""
+    if day is None or not day.is_open or day.market_open is None or day.market_close is None:
+        return ""
+    if day.market_open <= now < day.market_close:
+        return "regular"
+    if now.date() == day.today and any(a <= now.time() < b for a, b in (NXT_PRE, NXT_AFTER)):
+        return "nxt"
+    return ""
+
+
+def sell_one(client: TossClient, strategy: PullbackStrategy, symbol: str, session: str) -> str:
+    """시간대에 맞는 방식으로 한 종목 매도 주문을 낸다. 어떻게 냈는지(안내 문구)를 돌려줌, 못 냈으면 빈 문자열."""
+    if session == "regular":
+        return "시장가" if strategy.manual_sell(symbol) else ""
+    price = next((float(p["lastPrice"]) for p in client.get_prices([symbol])), 0.0)
+    if price <= 0:
+        log.warning("즉시 매도 %s: 현재가를 조회하지 못해 주문하지 않음", symbol)
+        return ""
+    limit = round_down_to_tick(price * (1 - NXT_DISCOUNT_PCT / 100))
+    return f"지정가 {limit:,}원 (현재가 {price:,.0f}원)" if strategy.manual_sell(symbol, limit) else ""
+
+
+def handle_sell_requests(cfg: Config, client: TossClient, strategy: PullbackStrategy, now: datetime,
+                         day: TradingDay | None) -> None:
     """켜져 있는 봇이 즉시 매도 요청 파일을 읽어 처리 (파일을 먼저 지워 한 번만 실행)."""
     for path in sell_requests(cfg):
         symbol = path.stem[len(SELL_PREFIX):]
         try:
+            asked = datetime.fromisoformat(path.read_text(encoding="utf-8").strip())
             path.unlink()
-        except OSError:
+        except (OSError, ValueError):
+            try:
+                path.unlink()
+            except OSError:
+                pass
             continue
-        strategy.manual_sell(symbol)
+        if (now - asked).total_seconds() > REQUEST_MAX_AGE:
+            log.warning("즉시 매도 요청 %s: %s 에 남긴 오래된 요청이라 버림", symbol, asked.strftime("%m-%d %H:%M"))
+            continue
+        session = sell_session(now, day)
+        if not session:
+            log.warning("즉시 매도 요청 %s: 지금은 주문할 수 없는 시간이라 버림", symbol)
+            continue
+        sell_one(client, strategy, symbol, session)
+
+
+def manual_pending(strategy: PullbackStrategy) -> bool:
+    """직접 매도 주문이 아직 안 끝난 종목이 있는지 (넥스트레이드 시간에도 체결을 확인해야 함)."""
+    return any(p.status == "SELLING" and p.sell_reason == "MANUAL" for p in strategy.state.positions.values())
 
 
 def cmd_sell(cfg: Config, client: TossClient, strategy: PullbackStrategy, wanted: list[str]) -> None:
-    """봇 보유 종목 중 고른 종목만 즉시 시장가 매도. 봇이 켜져 있으면 요청만 남기고 봇이 판다 (기록이 어긋나지 않게)."""
+    """봇 보유 종목 중 고른 종목만 즉시 매도. 봇이 켜져 있으면 요청만 남기고 봇이 판다 (기록이 어긋나지 않게).
+    정규장은 시장가, 넥스트레이드 프리·애프터마켓은 현재가보다 조금 낮은 지정가."""
     held = strategy.state.positions
     symbols = []
     for w in wanted:
@@ -169,21 +217,27 @@ def cmd_sell(cfg: Config, client: TossClient, strategy: PullbackStrategy, wanted
         return
     now = datetime.now(KST)
     day = trading_day_from_api(client.get_market_calendar_kr(now.date().isoformat()))
-    if not (day.is_open and day.market_open <= now < day.market_close):
-        print("지금은 장중이 아니라 시장가 매도를 할 수 없습니다. 장중(09:00~15:30)에 다시 실행해 주세요.")
+    session = sell_session(now, day)
+    if not session:
+        print("지금은 주문할 수 없는 시간입니다. 정규장 09:00~15:30(시장가), "
+              "넥스트레이드 08:00~08:50·15:40~19:58(지정가)에 다시 실행해 주세요.")
         return
+    nxt = session == "nxt"
+    if nxt:
+        print(f"넥스트레이드 시간이라 시장가가 안 됩니다 → 현재가보다 {NXT_DISCOUNT_PCT:g}% 낮은 지정가로 냅니다.")
     alive = Path(cfg.state_dir) / ALIVE_FILE
-    running = alive.exists() and time.time() - alive.stat().st_mtime < cfg.monitor_interval_seconds * 2 + 30
+    running = alive.exists() and time.time() - alive.stat().st_mtime < ALIVE_MAX_AGE
     if running:
         for s in symbols:
             (Path(cfg.state_dir) / f"{SELL_PREFIX}{s}.txt").write_text(now.isoformat(), encoding="utf-8")
-        print(f"켜져 있는 봇에게 매도를 요청했습니다: {', '.join(symbols)} (최대 1~2분)")
+        print(f"켜져 있는 봇에게 매도를 요청했습니다: {', '.join(symbols)}")
     else:
         print("봇이 꺼져 있어 여기서 바로 매도합니다.")
         strategy.sync_orders()
         for s in symbols:
-            strategy.manual_sell(s)
-    for _ in range(60):  # 최대 2분 동안 결과 확인
+            how = sell_one(client, strategy, s, session)
+            print(f"  {s}: {'주문 ' + how if how else '주문하지 못했습니다 (로그 확인)'}")
+    for _ in range(30 if nxt else 60):  # 결과 확인 (넥스트레이드 1분, 정규장 최대 2분)
         if running:
             strategy.state = strategy.store.load()
         else:
@@ -192,9 +246,20 @@ def cmd_sell(cfg: Config, client: TossClient, strategy: PullbackStrategy, wanted
             break
         time.sleep(2)
     for s in symbols:
-        if s in strategy.state.positions:
+        left = Path(cfg.state_dir) / f"{SELL_PREFIX}{s}.txt"
+        if left.exists():  # 봇이 요청을 가져가지 않음 → 나중에 엉뚱한 때 팔리지 않게 지움
+            try:
+                left.unlink()
+            except OSError:
+                pass
+            print(f"  {s}: 봇이 응답하지 않아 요청을 취소했습니다. 봇 창이 켜져 있는지 확인해 주세요.")
+        elif s in strategy.state.positions:
             p = strategy.state.positions[s]
-            print(f"  {s} {p.name}: 아직 처리 중 (상태 {p.status}, 남은 {p.quantity}주) — 잠시 뒤 status 로 확인해 주세요")
+            if nxt and p.status == "SELLING":
+                print(f"  {s} {p.name}: 지정가 매도 주문이 나갔지만 아직 안 팔렸습니다 (남은 {p.quantity}주). "
+                      "더 낮은 가격으로 다시 내려면 한 번 더 실행하세요. 끝까지 안 팔리면 다음 정규장에 손절·익절이 다시 걸립니다.")
+            else:
+                print(f"  {s} {p.name}: 아직 처리 중 (상태 {p.status}, 남은 {p.quantity}주) — 잠시 뒤 status 로 확인해 주세요")
         else:
             h = next((x for x in reversed(strategy.state.history) if x.get("symbol") == s), {})
             print(f"  {s} {h.get('name', '')}: 매도 완료 {h.get('return_pct')}%")
@@ -225,26 +290,36 @@ def cmd_run(cfg: Config, client: TossClient, strategy: PullbackStrategy) -> None
     cached: TradingDay | None = None
     while True:
         now = datetime.now(KST)
+        fast = False
+        alive = Path(cfg.state_dir) / ALIVE_FILE
         try:
-            alive = Path(cfg.state_dir) / ALIVE_FILE
             alive.parent.mkdir(parents=True, exist_ok=True)
             alive.write_text(now.isoformat(), encoding="utf-8")
-            handle_sell_requests(cfg, strategy)
             if cached is None or cached.today != now.date():
                 cached = trading_day_from_api(client.get_market_calendar_kr(now.date().isoformat()))
                 log.info("%s 개장=%s", cached.today, cached.is_open)
+            handle_sell_requests(cfg, client, strategy, now, cached)
             strategy.tick(now, cached)
+            if manual_pending(strategy) and sell_session(now, cached) == "nxt":
+                strategy.sync_orders()  # 정규장 밖에서는 tick 이 아무것도 안 하므로 직접 매도 체결만 따로 확인
+                fast = manual_pending(strategy)
         except KeyboardInterrupt:
             raise
         except Exception:
             log.exception("tick 처리 중 오류")
 
         in_session = cached is not None and cached.is_open and cached.market_open <= now < cached.market_close
-        wait_until = time.time() + (cfg.monitor_interval_seconds if in_session else 300)
+        started = time.time()
+        wait_until = started + (cfg.monitor_interval_seconds if in_session or fast else 300)
         while time.time() < wait_until:  # 쉬는 동안에도 즉시 매도 요청이 오면 바로 깨어남
-            if in_session and sell_requests(cfg):
+            if sell_requests(cfg):
                 break
             time.sleep(2)
+            if int(time.time() - started) % 30 < 2:  # 길게 쉬는 동안에도 켜져 있다는 표시를 남김
+                try:
+                    alive.write_text(datetime.now(KST).isoformat(), encoding="utf-8")
+                except OSError:
+                    pass
 
 
 def main(argv: list[str] | None = None) -> None:

@@ -416,20 +416,23 @@ class PullbackStrategy:
                 continue  # 이미 시장가 매도 주문이 나가 있음
             self._sell_now(pos, reason)
 
-    def manual_sell(self, symbol: str) -> bool:
-        """사용자 요청 즉시 매도 (`python -m tossbot sell 종목코드`): 그 종목만 조건주문·대기 주문 정리 후 시장가 매도."""
+    def manual_sell(self, symbol: str, limit_price: int | None = None) -> bool:
+        """사용자 요청 즉시 매도 (`python -m tossbot sell 종목코드`): 그 종목만 조건주문·대기 주문 정리 후 시장가 매도.
+        limit_price 를 주면 그 가격 지정가로 (넥스트레이드 프리·애프터마켓은 시장가가 안 됨). 이미 낸 직접 매도 주문이
+        안 팔리고 남아 있으면 취소하고 새 가격으로 다시 낸다."""
         pos = self.state.positions.get(symbol)
         if pos is None:
             log.warning("즉시 매도 요청 %s: 봇이 보유한 종목이 아님", symbol)
             return False
-        if pos.status == "SELLING" and pos.sell_reason in ("MANUAL", "STOP_LOSS"):
-            return True  # 이미 시장가 매도 주문이 나가 있음
-        log.info("사용자 요청 즉시 매도 %s %s %d주", pos.symbol, pos.name, pos.quantity)
-        self._sell_now(pos, "MANUAL")
+        if pos.status == "SELLING" and pos.sell_reason == "STOP_LOSS":
+            return True  # 이미 손절 시장가 매도 주문이 나가 있음
+        log.info("사용자 요청 즉시 매도 %s %s %d주 (%s)", pos.symbol, pos.name, pos.quantity,
+                 f"지정가 {limit_price:,}" if limit_price else "시장가")
+        self._sell_now(pos, "MANUAL", limit_price)
         return True
 
-    def _sell_now(self, pos: Position, reason: str) -> None:
-        """조건주문·대기 주문을 정리하고 시장가로 매도."""
+    def _sell_now(self, pos: Position, reason: str, limit_price: int | None = None) -> None:
+        """조건주문·대기 주문을 정리하고 시장가로 매도 (limit_price 를 주면 그 가격 지정가)."""
         if pos.buy_open and pos.buy_order_id:
             try:
                 self.broker.cancel(pos.buy_order_id)
@@ -454,7 +457,8 @@ class PullbackStrategy:
             log.warning("%s 매도 가능 수량 0 (대기 주문 취소 처리 중일 수 있음)", pos.symbol)
             return
         try:
-            order_id = self.broker.sell_market(pos.symbol, qty)
+            order_id = (self.broker.sell_limit(pos.symbol, qty, limit_price) if limit_price
+                        else self.broker.sell_market(pos.symbol, qty))
         except Exception as exc:
             log.error("%s 매도 주문 실패 (%s): %s", pos.symbol, reason, exc)
             return

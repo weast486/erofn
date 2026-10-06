@@ -1,13 +1,14 @@
 """전일 +20% 종목 다음 날 전일 종가 재돌파 단타 (백테스트 `surgebreak --mode prevclose` 를 실전으로).
 
 하루 흐름
-  08:50  대상 고르기: 전일 등락률 상위(ka10027) → 일봉(ka10081)으로 전일 +min_prev_change%↑·직전 20일 평균 거래대금·1주 가격 확인,
-         토스 스윙 봇이 들고 있는 종목 제외
+  08:50  대상 고르기: 전날 장 마감 뒤 저장해 둔 급등 목록(surge_날짜.json) + 등락률 상위(ka10027, 장 시작 전에는 비어 있음)
+         → 일봉(ka10081)으로 전일 +min_prev_change%↑·직전 20일 평균 거래대금·1주 가격 확인, 토스 스윙 봇이 들고 있는 종목 제외
   09:00~buy_until  2초마다 1분봉(ka10080) 확인: 시가가 전일 종가 아래에서 시작했고 고가가 전일 종가를 넘으면 매수
          (현재가 + entry_slip_pct 지정가, 전일 종가 + max_chase_pct 를 넘으면 추격 안 함, fill_timeout_sec 뒤 잔량 취소)
   체결 뒤  익절 지정가(매수가 +take_profit_pct) 주문, 현재가가 손절가(매수가 -stop_pct) 이하면 익절 주문 취소 후 시장가 매도
   exit_time  남은 주문 취소, 보유 전량 시장가 매도
   (etf_enabled) 08:45 어제 산 ETF 매도 주문, 15:21 오늘 ETF 가 내렸으면 매수 주문 — overnight.py
+  15:35  오늘 등락률 상위를 다음 거래일 대상 후보로 저장 (surge_날짜.json)
 매수 수량은 키움 주문가능금액 안에서만 정한다.
 """
 from __future__ import annotations
@@ -28,6 +29,8 @@ from .overnight import EtfOvernight
 from .reserve import ReserveBook
 
 log = logging.getLogger("kiwoombot")
+
+SURGE_SAVE_TIME = "15:35"  # 장 마감 뒤 이 시각에 오늘 등락률 상위를 다음 거래일 후보로 저장
 
 
 @dataclass
@@ -133,26 +136,84 @@ class DayTrader:
         return True
 
     # ------------------------------------------------------------ candidates
-    def select_candidates(self, ymd: str) -> list[Candidate]:
-        cfg = self.cfg
-        swing = swing_symbols(cfg.swing_state_file)
-        ranks = []
-        for attempt in range(3):  # 장 전 이른 시각엔 순위가 비어 있을 수 있어 잠깐 기다렸다 다시
-            ranks = self.client.change_rate_ranking()
-            if ranks:
-                break
-            log.warning("등락률 순위가 비어 있음, 60초 뒤 다시 (%d/3)", attempt + 1)
-            self.sleep_fn(60)
+    def _surge_rows(self, ranks: list[dict]) -> list[dict]:
+        """등락률 순위에서 급등 후보(보통주, 기준의 90% 이상 상승)만 {code, name, flu_rt} 로."""
         seen, out = set(), []
         for r in ranks:
             code = str(r.get("stk_cd", "")).split("_")[0].lstrip("A")
             if not is_common_stock(code) or code in seen:
                 continue
             seen.add(code)
-            if num(r.get("flu_rt")) < cfg.min_prev_change * 0.9:  # 장 전에는 전일 등락률 — 여유 있게 거르고 일봉으로 확인
+            if num(r.get("flu_rt")) < self.cfg.min_prev_change * 0.9:  # 여유 있게 거르고 일봉으로 확인
                 continue
+            out.append({"code": code, "name": str(r.get("stk_nm", "")), "flu_rt": num(r.get("flu_rt"))})
+        return out
+
+    def save_surge_list(self, ymd: str) -> int:
+        """장 마감 뒤: 오늘 등락률 상위를 다음 거래일 대상 후보로 저장한다. 저장한 종목 수를 돌려줌.
+        다음 날 장 시작 전에는 등락률 순위(ka10027)가 비어 있어서 전날 저장해 둔 이 목록으로 대상을 고른다."""
+        try:
+            ranks = self.client.change_rate_ranking()
+        except Exception as exc:  # noqa: BLE001
+            log.warning("내일 대상 후보 저장 실패(등락률 순위 조회): %s", exc)
+            return 0
+        if not ranks:
+            log.warning("등락률 순위가 비어 있어 내일 대상 후보를 저장하지 못함")
+            return 0
+        rows = self._surge_rows(ranks)
+        trade_day = ymd
+        try:  # 휴장일에 돌면 순위는 마지막 거래일 것 → 그 날짜로 저장
+            code = rows[0]["code"] if rows else str(ranks[0].get("stk_cd", "")).split("_")[0].lstrip("A")
+            trade_day = str(self.client.daily_chart(code, ymd)[0].get("dt", "")) or ymd
+        except Exception as exc:  # noqa: BLE001
+            log.warning("마지막 거래일 확인 실패(오늘 날짜로 저장): %s", exc)
+        self.state_dir.mkdir(parents=True, exist_ok=True)
+        p = self.state_dir / f"surge_{trade_day}.json"
+        tmp = p.with_suffix(".tmp")
+        tmp.write_text(json.dumps({"date": trade_day, "saved_at": self.now_fn().isoformat(), "rows": rows},
+                                  ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp.replace(p)
+        log.info("다음 거래일 대상 후보 %d종목 저장 (%s 등락률 +%g%%↑)", len(rows), trade_day,
+                 self.cfg.min_prev_change * 0.9)
+        return len(rows)
+
+    def load_surge_list(self, ymd: str) -> tuple[str, list[dict]]:
+        """오늘(ymd) 이전에 저장한 가장 최근 급등 목록. (날짜, 목록), 없으면 ("", [])."""
+        for p in sorted(self.state_dir.glob("surge_*.json"), reverse=True):
+            day = p.stem.split("_", 1)[1]
+            if not (len(day) == 8 and day.isdigit() and day < ymd):
+                continue
+            try:
+                return day, list(json.loads(p.read_text(encoding="utf-8")).get("rows", []))
+            except Exception as exc:  # noqa: BLE001
+                log.warning("저장된 급등 목록을 읽지 못함(%s): %s", p.name, exc)
+        return "", []
+
+    def select_candidates(self, ymd: str) -> list[Candidate]:
+        cfg = self.cfg
+        swing = swing_symbols(cfg.swing_state_file)
+        saved_day, saved = self.load_surge_list(ymd)
+        ranks = []
+        for attempt in range(1 if saved else 3):  # 장 시작 전에는 순위가 비어 있음 — 저장 목록이 없을 때만 기다렸다 다시
+            ranks = self.client.change_rate_ranking()
+            if ranks:
+                break
+            if not saved:
+                log.warning("등락률 순위가 비어 있음, 60초 뒤 다시 (%d/3)", attempt + 1)
+                self.sleep_fn(60)
+        rows = self._surge_rows(ranks)
+        have = {r["code"] for r in rows}
+        rows += [r for r in saved if r.get("code") not in have]
+        log.info("대상 후보 %d종목 (전날 저장 %s %d종목 + 지금 등락률 순위 %d종목)", len(rows),
+                 saved_day or "없음", len(saved), len(have))
+        if not rows:
+            log.warning("등락률 순위가 비어 있고 전날 저장한 목록도 없어 오늘 대상을 고를 수 없음 "
+                        "(봇을 전날 %s 까지 켜 두면 목록이 저장됩니다)", SURGE_SAVE_TIME)
+        out, last_day = [], ""
+        for r in rows:
+            code = r["code"]
             if code in swing:
-                log.info("  %s %s: 토스 스윙 봇 보유 종목이라 제외", code, r.get("stk_nm", ""))
+                log.info("  %s %s: 토스 스윙 봇 보유 종목이라 제외", code, r.get("name", ""))
                 continue
             try:
                 daily = [d for d in self.client.daily_chart(code, ymd) if str(d.get("dt", "")) < ymd]
@@ -162,6 +223,7 @@ class DayTrader:
             if len(daily) < 21:
                 continue
             last, prior = daily[0], daily[1]
+            last_day = max(last_day, str(last.get("dt", "")))
             close, prev = num(last.get("cur_prc")), num(prior.get("cur_prc"))
             if prev <= 0:
                 continue
@@ -169,9 +231,12 @@ class DayTrader:
             avg_amt = sum(num(d.get("cur_prc")) * num(d.get("trde_qty")) for d in daily[1:21]) / 20
             if change < cfg.min_prev_change or avg_amt < cfg.min_avg_amount or close > cfg.max_price:
                 continue
-            out.append(Candidate(code, str(r.get("stk_nm", "")), close, round(change, 2)))
+            out.append(Candidate(code, str(r.get("name", "")), close, round(change, 2)))
             log.info(f"  대상 {code} {out[-1].name}: 전일 {change:+.1f}%, 종가 {close:,.0f}, "
                      f"20일 평균 거래대금 {avg_amt / 1e8:.0f}억")
+        if saved and not have and last_day and saved_day != last_day:
+            log.warning("저장된 급등 목록(%s)이 마지막 거래일(%s) 것이 아니라 대상이 빠졌을 수 있음 "
+                        "(마지막 거래일 %s 에 봇이 꺼져 있었음)", saved_day, last_day, SURGE_SAVE_TIME)
         return out
 
     def prepare(self) -> None:
@@ -442,6 +507,9 @@ class DayTrader:
                 etf.evening_buy(self.now_fn(), equity)
             else:
                 log.info("장 마감 동시호가가 지나 ETF 매수 안 함")
+        while self.now_fn().strftime("%H:%M") < SURGE_SAVE_TIME:
+            self.sleep_fn(30)
+        self.save_surge_list(self.now_fn().strftime("%Y%m%d"))
 
     def settle_reserve(self) -> None:
         """정리 시각(exit_time)이 지나 보유 종목이 없을 때 하루 손익을 재고 수익의 일부를 적립한다."""

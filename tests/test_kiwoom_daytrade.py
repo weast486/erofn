@@ -114,6 +114,38 @@ class KiwoomDayTradeTest(unittest.TestCase):
         self.assertEqual(codes, ["111110"])
         self.assertEqual(self.trader.state.candidates[0].prev_close, 12000)
 
+    def test_empty_ranking_before_open_uses_list_saved_after_previous_close(self):
+        ranks = self.client.change_rate_ranking()
+        self.clock[0] = datetime(2026, 10, 1, 15, 35, tzinfo=KST)  # 전날 장 마감 뒤
+        self.assertEqual(self.trader.save_surge_list("20261001"), 1)  # 기준의 90%(+18%) 이상만 저장
+        self.assertTrue((Path(self.tmp.name) / "surge_20261001.json").exists())
+        self.at(8, 50)
+        self.client.change_rate_ranking = lambda max_pages=5: []  # 장 시작 전에는 순위가 비어 있음
+        self.trader.prepare()
+        self.assertEqual([c.code for c in self.trader.state.candidates], ["111110"])
+        self.assertEqual(len(ranks), 3)
+
+    def test_empty_ranking_and_no_saved_list_gives_no_candidates(self):
+        self.client.change_rate_ranking = lambda max_pages=5: []
+        with self.assertLogs("kiwoombot", level="WARNING") as logs:
+            self.trader.prepare()
+        self.assertEqual(self.trader.state.candidates, [])
+        self.assertTrue(any("전날 저장한 목록도 없어" in m for m in logs.output))
+
+    def test_saved_list_from_today_or_later_is_not_used(self):
+        self.trader.save_surge_list("20261002")  # FakeClient 일봉의 마지막 날짜(20261001)로 저장됨
+        self.assertEqual(self.trader.load_surge_list("20261001"), ("", []))
+        self.assertEqual(self.trader.load_surge_list("20261002")[0], "20261001")
+
+    def test_stale_saved_list_warns(self):
+        (Path(self.tmp.name) / "surge_20260925.json").write_text(
+            json.dumps({"date": "20260925", "rows": [{"code": "111110", "name": "급등A", "flu_rt": 20.5}]}), encoding="utf-8")
+        self.client.change_rate_ranking = lambda max_pages=5: []
+        with self.assertLogs("kiwoombot", level="WARNING") as logs:
+            self.trader.prepare()
+        self.assertEqual([c.code for c in self.trader.state.candidates], ["111110"])  # 일봉으로 다시 확인해 통과
+        self.assertTrue(any("마지막 거래일" in m for m in logs.output))
+
     def test_swing_holdings_excluded(self):
         p = Path(self.tmp.name) / "swing.json"
         p.write_text(json.dumps({"positions": {"111110": {}}}), encoding="utf-8")

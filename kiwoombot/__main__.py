@@ -175,7 +175,7 @@ def update_settings(env_path: Path, example_path: Path, keep: tuple = KEEP_KEYS)
 
 def main(argv: list[str] | None = None) -> None:
     p = argparse.ArgumentParser(prog="kiwoombot", description="키움 단타 봇 (전일 +20%% 종목 전일 종가 재돌파 + ETF 오버나이트)")
-    p.add_argument("command", choices=["check", "candidates", "run", "loop", "reserve", "update-settings"])
+    p.add_argument("command", choices=["check", "candidates", "save-surge", "run", "loop", "reserve", "update-settings"])
     p.add_argument("--env", default=".env.kiwoom")
     p.add_argument("--set", type=float, default=None, help="reserve: 적립금을 이 금액(원)으로 고침")
     args = p.parse_args(argv)
@@ -215,6 +215,10 @@ def main(argv: list[str] | None = None) -> None:
     trader = DayTrader(client, cfg)
     if args.command == "candidates":
         trader.prepare()
+        return
+    if args.command == "save-surge":  # 장 마감 뒤 직접: 오늘 등락률 상위를 다음 거래일 대상 후보로 저장
+        n = trader.save_surge_list(datetime.now(KST).strftime("%Y%m%d"))
+        print(f"다음 거래일 대상 후보 {n}종목을 저장했어요." if n else "저장하지 못했어요 (로그를 확인하세요).")
         return
     lock = acquire_lock(cfg.state_dir)  # run·loop 는 주문을 내므로 한 번에 하나만
     if lock is None:

@@ -3,7 +3,8 @@ import unittest
 from datetime import date, timedelta
 from pathlib import Path
 
-from tossbot.backtest import BacktestSettings, SELL_TAX_BY_YEAR, load_cache, run_backtest, _write_bars
+from tossbot.backtest import (BacktestSettings, EnvelopeSettings, SELL_TAX_BY_YEAR, load_cache, run_backtest,
+                              run_envelope, _write_bars)
 from tossbot.broker import round_down_to_tick, round_up_to_tick
 from tossbot.selector import Bar, PullbackParams, analyze, touch_zone
 
@@ -239,6 +240,29 @@ class FirstHighTest(unittest.TestCase):
         wick = calm[:1] + [(10_200, 10_300, 10_000, 10_200)] + calm[:1]  # 저가만 시가 아래
         self.assertEqual(len(run(wick)), 1)  # 종가 기준이면 통과
         self.assertEqual(run(wick, intraday=True), [])  # 장중 기준이면 탈락
+
+
+class EnvelopeEngineTest(unittest.TestCase):
+    def run_env(self, **kw):
+        # 30일 1만원 보합 → 8,000원 마감(20일선 -19%, 하단선 근접) → 다음날 시가 8,200 / 종가 8,500
+        days = weekdays(33, date(2024, 1, 1))
+        bars = [Bar(d, 10_000, 10_050, 9_950, 10_000, 1_000_000) for d in days[:30]]
+        bars.append(Bar(days[30], 8_100, 8_150, 7_950, 8_000, 1_000_000))
+        bars.append(Bar(days[31], 8_200, 8_600, 8_100, 8_500, 1_000_000))
+        bars.append(Bar(days[32], 8_500, 8_550, 8_450, 8_500, 1_000_000))
+        s = BacktestSettings(slippage=0.0)
+        return run_envelope({"000010": ("테스트", bars)}, days[0], days[-1], s, EnvelopeSettings(**kw)), days
+
+    def test_exit_next_close(self):
+        res, days = self.run_env()
+        (t,) = res.trades
+        self.assertEqual((t.entry_date, t.entry_price), (days[30], 8_000))
+        self.assertEqual((t.exit_date, t.exit_price, t.reason), (days[31], 8_500, "TIME_EXIT"))
+
+    def test_exit_next_open(self):
+        res, days = self.run_env(exit_at_open=True)
+        (t,) = res.trades
+        self.assertEqual((t.exit_date, t.exit_price, t.reason), (days[31], 8_200, "TIME_EXIT"))
 
 
 class IndexFilterTest(unittest.TestCase):

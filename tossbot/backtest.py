@@ -1046,6 +1046,7 @@ class EnvelopeSettings:
     near_pct: float = 2.0  # 종가가 하단선의 ±near_pct% 이내 (mode="near") 또는 하단선 x (1 + near_pct%) 이하 (mode="below")
     mode: str = "near"
     hold_days: int = 1  # 매수 후 N거래일째 종가에 매도 (1 = 익일 종가, 0 = 제한 없음)
+    exit_at_open: bool = False  # True 면 N거래일째 종가 대신 시가에 매도 (1 = 익일 시가)
     position_pct: float = 10.0  # 종목당 평가금액의 N%
     stop_loss_pct: float = 0.0  # 0 이면 없음 (장중 손절가 도달 시 매도)
     take_profit_pct: float = 0.0  # 0 이면 없음 (장중 익절가 도달 시 지정가 매도, 같은 날 둘 다면 손절)
@@ -1098,7 +1099,7 @@ def run_envelope(
         del positions[t.symbol]
 
     for day in calendar:
-        # 1) 매도: 손절(장중) → N거래일째 종가
+        # 1) 매도: 손절(장중) → N거래일째 종가 (exit_at_open 이면 시가)
         for sym, t in list(positions.items()):
             ser = series[sym]
             i = ser.index.get(day)
@@ -1108,15 +1109,18 @@ def run_envelope(
             bar = ser.bars[i]
             stop = round_down_to_tick(t.entry_price * (1 - e.stop_loss_pct / 100)) if e.stop_loss_pct else None
             tp = round_up_to_tick(t.entry_price * (1 + e.take_profit_pct / 100)) if e.take_profit_pct else None
+            time_up = e.hold_days and t.hold_days >= e.hold_days
             if stop and bar.open <= stop:
                 close_position(t, day, bar.open * (1 - s.slippage), "STOP_LOSS")
             elif tp and bar.open >= tp:
                 close_position(t, day, bar.open, "TAKE_PROFIT")
+            elif time_up and e.exit_at_open:
+                close_position(t, day, bar.open * (1 - s.slippage), "TIME_EXIT")
             elif stop and bar.low <= stop:
                 close_position(t, day, stop * (1 - s.slippage), "STOP_LOSS")
             elif tp and bar.high >= tp:
                 close_position(t, day, tp, "TAKE_PROFIT")
-            elif e.hold_days and t.hold_days >= e.hold_days:
+            elif time_up:
                 close_position(t, day, bar.close * (1 - s.slippage), "TIME_EXIT")
 
         # 2) 매수: 엔벨로프 하단선 근접 종가

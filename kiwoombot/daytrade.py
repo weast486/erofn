@@ -5,6 +5,8 @@
          → 일봉(ka10081)으로 전일 +min_prev_change%↑·직전 20일 평균 거래대금·1주 가격 확인, 토스 스윙 봇이 들고 있는 종목 제외
   09:00~buy_until  2초마다 1분봉(ka10080) 확인: 시가가 전일 종가 아래에서 시작했고 고가가 전일 종가를 넘으면 매수
          (현재가 + entry_slip_pct 지정가, 전일 종가 + max_chase_pct 를 넘으면 추격 안 함, fill_timeout_sec 뒤 잔량 취소)
+         갭상승으로 시작한 종목(gap_dip_enabled): 첫 5분 안에 전일 종가 이하로 내려간 적이 있고 그 뒤 오늘 시가를 넘으면 매수
+         (기준가가 전일 종가 대신 오늘 시가, 나머지는 같음. 같은 순간이면 갭하락 재돌파 종목을 먼저 삼)
   체결 뒤  익절 지정가(매수가 +take_profit_pct) 주문, 현재가가 손절가(매수가 -stop_pct) 이하면 익절 주문 취소 후 시장가 매도
   exit_time  남은 주문 취소, 보유 전량 시장가 매도
   (etf_enabled) 08:45 어제 산 ETF 매도 주문, 15:21 오늘 ETF 가 내렸으면 매수 주문 — overnight.py
@@ -40,6 +42,8 @@ class Candidate:
     prev_close: float
     prev_change: float
     status: str = "watch"  # watch / bought / skip_gap / missed_chase / full / too_expensive / expired
+    day_open: float = 0.0  # 갭상승으로 시작한 종목이면 오늘 시가 (매수 기준가), 아니면 0
+    dipped: bool = False  # 갭상승 종목: 첫 5분 안에 전일 종가 이하로 내려간 적이 있음
 
 
 @dataclass
@@ -59,6 +63,7 @@ class Trade:
     exit_reason: str = ""
     exit_price: float = 0.0
     exit_at: str = ""
+    kind: str = "break"  # break = 갭하락 뒤 전일 종가 재돌파 / gapdip = 갭상승 뒤 전일 종가 이하로 밀렸다가 시가 돌파
 
 
 @dataclass
@@ -261,6 +266,8 @@ class DayTrader:
         c = self.cfg
         log.info(f"설정: 전일 +{c.min_prev_change:g}%↑, {c.buy_until} 까지 매수, 하루 {c.max_positions}종목 x {c.position_pct:g}%, "
                  f"손절 -{c.stop_pct:g}% / 익절 +{c.take_profit_pct:g}% / {c.exit_time} 정리"
+                 + (f", 갭상승 종목은 첫 {c.gap_dip_minutes}분 안에 전일 종가 이하로 밀렸다가 시가를 넘으면 매수"
+                    if c.gap_dip_enabled else ", 갭상승 종목 제외")
                  + (f", ETF {c.etf_code} {c.etf_pct:g}% 오버나이트" if c.etf_enabled else ", ETF 끔")
                  + (f", 수익의 {c.reserve_pct:g}% 적립(운용금 {c.reserve_floor:,.0f}원 아래면 보충)" if self.reserve.enabled
                     else ", 적립 끔"))
@@ -304,29 +311,57 @@ class DayTrader:
         self.save()
         return True
 
+    def _gap_dip_broke(self, c: Candidate, b: list[dict]) -> bool:
+        """갭상승 종목: 첫 gap_dip_minutes 분 안에 전일 종가 이하로 내려간 적이 있고, 그 뒤 오늘 시가를 넘었는지.
+        키움 1분봉 시각은 봉이 시작하는 시각(0900 = 9:00~9:01)이라 첫 5분 = 0900~0904 봉."""
+        end = f"09{self.cfg.gap_dip_minutes:02d}"
+        i = next((k for k, x in enumerate(b) if x["t"] < end and x["low"] <= c.prev_close), None)
+        if i is None:
+            if b[-1]["t"] >= end and c.status == "watch":
+                c.status = "skip_gap"
+                log.info(f"{c.code} {c.name}: 갭상승 시작 뒤 첫 {self.cfg.gap_dip_minutes}분 안에 전일 종가 "
+                         f"{c.prev_close:,.0f} 이하로 안 내려옴 → 제외")
+            return False
+        if not c.dipped:
+            c.dipped = True
+            log.info(f"{c.code} {c.name}: 전일 종가 {c.prev_close:,.0f} 이하로 내려옴 → 오늘 시가 {c.day_open:,.0f} 를 넘으면 매수")
+        # 내려간 봉보다 뒤의 봉이 시가를 넘었거나, 내려간 봉이 아직 진행 중이면 지금 가격이 시가 위
+        return any(x["high"] > c.day_open for x in b[i + 1:]) or (i == len(b) - 1 and b[-1]["close"] > c.day_open)
+
     def check_entries(self, now: datetime, bars) -> None:
         cfg = self.cfg
-        for c in self.state.candidates:
+        # 갭하락 뒤 전일 종가 재돌파 종목을 먼저, 갭상승 종목(day_open 있음)은 그다음에 확인
+        for c in sorted(self.state.candidates, key=lambda x: x.day_open > 0):
             if c.status != "watch":
                 continue
             b = bars(c.code)
             if not b:
                 continue
-            if b[0]["open"] >= c.prev_close:
-                c.status = "skip_gap"
-                log.info(f"{c.code} {c.name}: 시가 {b[0]['open']:,.0f} 가 전일 종가 {c.prev_close:,.0f} 이상(갭상승) → 제외")
+            if b[0]["open"] >= c.prev_close and not c.day_open:
+                if not cfg.gap_dip_enabled or b[0]["open"] == c.prev_close:
+                    c.status = "skip_gap"
+                    log.info(f"{c.code} {c.name}: 시가 {b[0]['open']:,.0f} 가 전일 종가 {c.prev_close:,.0f} 이상(갭상승) → 제외")
+                    continue
+                c.day_open = b[0]["open"]
+                log.info(f"{c.code} {c.name}: 시가 {c.day_open:,.0f} 갭상승 시작 (전일 종가 {c.prev_close:,.0f}) → "
+                         f"첫 {cfg.gap_dip_minutes}분 안에 전일 종가 이하로 내려오는지 지켜봄")
+            gap = c.day_open > 0
+            level = c.day_open if gap else c.prev_close  # 매수 기준가
+            if gap:
+                if not self._gap_dip_broke(c, b):
+                    continue
+            elif max(x["high"] for x in b) <= c.prev_close:
                 continue
-            if max(x["high"] for x in b) <= c.prev_close:
-                continue
+            what = "오늘 시가" if gap else "전일 종가"
             cur = b[-1]["close"]
             if len(self._active_trades()) >= cfg.max_positions:
                 c.status = "full"
-                log.info("%s %s: 전일 종가 돌파했지만 오늘 %d종목 다 참", c.code, c.name, cfg.max_positions)
+                log.info("%s %s: %s 돌파했지만 오늘 %d종목 다 참", c.code, c.name, what, cfg.max_positions)
                 continue
-            cap = c.prev_close * (1 + cfg.max_chase_pct / 100)
+            cap = level * (1 + cfg.max_chase_pct / 100)
             if cur > cap:
                 c.status = "missed_chase"
-                log.info(f"{c.code} {c.name}: 돌파 확인 시 현재가 {cur:,.0f} 가 전일 종가 +{cfg.max_chase_pct}% 초과 → 추격 안 함")
+                log.info(f"{c.code} {c.name}: 돌파 확인 시 현재가 {cur:,.0f} 가 {what} +{cfg.max_chase_pct}% 초과 → 추격 안 함")
                 continue
             price = round_up_to_tick(min(cur * (1 + cfg.entry_slip_pct / 100), cap))
             qty = int(self.state.equity * cfg.position_pct / 100 // price)
@@ -339,8 +374,9 @@ class DayTrader:
                 continue
             order_no = "DRY" if cfg.dry_run else self.client.buy(c.code, qty, price)
             c.status = "bought"
-            self.state.trades.append(Trade(c.code, c.name, order_no, qty, price, now.isoformat()))
-            log.info(f"매수 주문 {c.code} {c.name}: {qty}주 x {price:,}원 (전일 종가 {c.prev_close:,.0f} 돌파, "
+            self.state.trades.append(Trade(c.code, c.name, order_no, qty, price, now.isoformat(),
+                                           kind="gapdip" if gap else "break"))
+            log.info(f"매수 주문 {c.code} {c.name}: {qty}주 x {price:,}원 ({what} {level:,.0f} 돌파, "
                      f"현재가 {cur:,.0f}) 주문번호 {order_no}")
 
     def _orderable(self) -> float | None:
@@ -480,7 +516,7 @@ class DayTrader:
         if etf and hm < "09:00":
             while self.now_fn().strftime("%H:%M") < self.cfg.etf_sell_time:
                 self.sleep_fn(30)
-            etf.morning_sell()
+            etf.morning_sell(self.now_fn())
         while self.now_fn().strftime("%H:%M") < "08:50":
             self.sleep_fn(30)
         self.prepare()
@@ -491,6 +527,7 @@ class DayTrader:
         self.summary()
         self.settle_reserve()
         if etf:
+            self._etf_settle(etf)  # 아침에 판 ETF 의 매도가(오늘 시가) 기록
             while self.now_fn().strftime("%H:%M") < self.cfg.etf_buy_time:
                 self.sleep_fn(30)
             if self.now_fn().strftime("%H:%M") < "15:30":
@@ -509,7 +546,16 @@ class DayTrader:
                 log.info("장 마감 동시호가가 지나 ETF 매수 안 함")
         while self.now_fn().strftime("%H:%M") < SURGE_SAVE_TIME:
             self.sleep_fn(30)
+        if etf:
+            self._etf_settle(etf)  # 오늘 산 ETF 의 매수가(종가) 기록
         self.save_surge_list(self.now_fn().strftime("%Y%m%d"))
+
+    def _etf_settle(self, etf: "EtfOvernight") -> None:
+        try:
+            if self.now_fn().strftime("%H:%M") >= "09:01":
+                etf.settle(self.now_fn())
+        except Exception as exc:  # noqa: BLE001
+            log.warning("ETF 매매 내역 정리 실패: %s", exc)
 
     def settle_reserve(self) -> None:
         """정리 시각(exit_time)이 지나 보유 종목이 없을 때 하루 손익을 재고 수익의 일부를 적립한다."""

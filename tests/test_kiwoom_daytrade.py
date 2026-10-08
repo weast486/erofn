@@ -186,9 +186,63 @@ class KiwoomDayTradeTest(unittest.TestCase):
         self.assertEqual(t.exit_reason, "STOP_LOSS")
 
     def test_gap_up_skipped_and_exit_time(self):
+        self.cfg.gap_dip_enabled = False  # 예전 규칙: 갭상승 종목은 제외
         self.trader.prepare()
         self.client.minute["111110"] = [("0900", "12100", "12300", "12000", "12200")]
         self.at(9, 0)
+        self.trader.step()
+        self.assertEqual(self.trader.state.candidates[0].status, "skip_gap")
+        self.assertEqual(self.client.orders, [])
+
+    def test_gap_up_dips_below_prev_close_then_breaks_open(self):
+        self.trader.prepare()
+        # 시가 12,100 (전일 종가 12,000 위) → 09:01 저가 11,950 으로 전일 종가 아래 → 09:02 고가 12,150 으로 시가 돌파
+        m = self.client.minute["111110"] = [("0900", "12100", "12300", "12050", "12080")]
+        self.at(9, 0)
+        self.trader.step()
+        c = self.trader.state.candidates[0]
+        self.assertEqual((c.status, c.day_open, c.dipped), ("watch", 12100, False))
+        self.assertEqual(self.client.orders, [])                       # 시가 위에 있어도 아직 안 내려왔으니 안 삼
+        m.append(("0901", "12080", "12090", "11950", "11980"))
+        self.at(9, 1)
+        self.trader.step()
+        self.assertTrue(c.dipped)
+        self.assertEqual(self.client.orders, [])                       # 내려왔지만 아직 시가 아래
+        m.append(("0902", "11980", "12150", "11980", "12140"))
+        self.at(9, 2)
+        self.trader.step()
+        kind, code, qty, price, _ = self.client.orders[0]
+        self.assertEqual((kind, code), ("buy", "111110"))
+        self.assertLessEqual(price, 12100 * 1.015 + 10)                # 추격 한도는 오늘 시가 기준
+        self.assertEqual((c.status, self.trader.state.trades[0].kind), ("bought", "gapdip"))
+
+    def test_gap_up_dip_and_break_in_the_same_live_bar(self):
+        self.trader.prepare()
+        # 진행 중인 첫 봉에서 전일 종가 아래로 찍고 지금 가격이 시가 위 → 이미 내려갔다 올라온 것이므로 매수
+        self.client.minute["111110"] = [("0900", "12100", "12200", "11900", "12150")]
+        self.at(9, 0)
+        self.trader.step()
+        self.assertEqual([o[0] for o in self.client.orders], ["buy"])
+
+    def test_gap_up_touching_prev_close_counts_as_dip(self):
+        self.trader.prepare()
+        # 저가가 딱 전일 종가(12,000)까지만 찍어도 인정 → 다음 봉이 시가를 넘으면 매수
+        m = self.client.minute["111110"] = [("0900", "12100", "12120", "12000", "12050")]
+        self.at(9, 0)
+        self.trader.step()
+        self.assertTrue(self.trader.state.candidates[0].dipped)
+        m.append(("0901", "12050", "12150", "12040", "12140"))
+        self.at(9, 1)
+        self.trader.step()
+        self.assertEqual([o[0] for o in self.client.orders], ["buy"])
+
+    def test_gap_up_without_dip_in_first_minutes_is_dropped(self):
+        self.trader.prepare()
+        m = self.client.minute["111110"] = [("0900", "12100", "12300", "12050", "12250")]
+        self.at(9, 0)
+        self.trader.step()
+        m.append(("0905", "12250", "12300", "11900", "12200"))         # 5분 지나서 내려온 것은 인정 안 함
+        self.at(9, 5)
         self.trader.step()
         self.assertEqual(self.trader.state.candidates[0].status, "skip_gap")
         self.assertEqual(self.client.orders, [])

@@ -19,6 +19,10 @@ class KiwoomConfig:
     max_price: float = 100_000
     # 매수: 시가가 전일 종가 아래에서 시작해 전일 종가를 넘으면, buy_until 까지만
     buy_until: str = "09:05"
+    # 갭상승으로 시작한 종목도 삼(2026-10-07): 첫 gap_dip_minutes 분 안에 전일 종가 이하로(닿기만 해도) 내려간 적이 있고
+    # 그 뒤 오늘 시가를 넘으면 매수 (같은 buy_until·손절·익절·정리). 끄면 갭상승 종목은 예전처럼 제외
+    gap_dip_enabled: bool = True
+    gap_dip_minutes: int = 5
     position_pct: float = 33.0  # 종목당 아침 평가금액의 N%
     max_positions: int = 3  # 하루 최대 종목 수 (먼저 돌파한 순)
     max_chase_pct: float = 1.5  # 현재가가 전일 종가보다 이 % 넘게 올라 있으면 추격하지 않음
@@ -57,6 +61,8 @@ class KiwoomConfig:
             min_avg_amount=f("KW_MIN_AVG_AMOUNT", "min_avg_amount"),
             max_price=f("KW_MAX_PRICE", "max_price"),
             buy_until=_get("KW_BUY_UNTIL", cls.buy_until),
+            gap_dip_enabled=_get("KW_GAP_DIP", "true").strip().lower() in ("1", "true", "yes", "on"),
+            gap_dip_minutes=int(f("KW_GAP_DIP_MINUTES", "gap_dip_minutes")),
             position_pct=f("KW_POSITION_PCT", "position_pct"),
             max_positions=f("KW_MAX_POSITIONS", "max_positions", int),
             max_chase_pct=f("KW_MAX_CHASE_PCT", "max_chase_pct"),

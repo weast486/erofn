@@ -40,7 +40,8 @@ def make_client(responses):
 
 class KiwoomClientTokenTest(unittest.TestCase):
     def test_token_invalid_reissues_and_retries_once(self):
-        client, session = make_client([TOKEN_INVALID, {"return_code": 0, "ord_alow_amt": "000000000879052"}])
+        client, session = make_client([TOKEN_INVALID, {"return_code": 0, "ord_alow_amt": "000000000347307",
+                                                       "100stk_ord_alow_amt": "000000000879052"}])
         self.assertEqual(client.orderable_cash(), 879052)
         self.assertEqual(session.token_calls, 2)
         self.assertEqual(session.tr_tokens, ["Bearer t1", "Bearer t2"])

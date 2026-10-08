@@ -320,7 +320,7 @@ def kr_daily_bars(code: str, count: int = 200) -> list[dict]:
     return sorted(out, key=lambda b: b["day"])
 
 
-KW_STATUS = {"watch": "감시 중", "bought": "매수", "skip_gap": "갭상승이라 제외", "missed_chase": "너무 올라 추격 안 함",
+KW_STATUS = {"watch": "감시 중", "bought": "매수", "skip_gap": "갭상승 뒤 조건 안 맞음", "missed_chase": "너무 올라 추격 안 함",
              "full": "자리 다 참", "too_expensive": "금액 부족", "expired": "돌파 없이 매수 시간 끝"}
 
 

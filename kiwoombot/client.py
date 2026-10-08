@@ -182,9 +182,13 @@ class KiwoomClient:
         return out
 
     def orderable_cash(self) -> float:
-        """kt00001 예수금상세현황의 주문가능금액(ord_alow_amt). 당일 매도 체결 대금이 바로 반영되는지는 실계좌로 확인 필요."""
+        """kt00001 예수금상세현황에서 '증거금 100% 종목 주문가능금액'(100stk_ord_alow_amt).
+        2026-10-08 실계좌 확인: 아침에 ETF 를 팔고 난 뒤 ord_alow_amt 는 347,307원(매도 대금이 결제되기 전 현금만)인데
+        100stk_ord_alow_amt 는 1,019,874원(= D+2 추정예수금, 매도 대금을 바로 다시 쓸 수 있는 금액)이었다.
+        ord_alow_amt 로 수량을 막으면 매도 대금을 못 써서 주문이 1/3 로 줄어든다. 100% 기준이라 미수는 생기지 않는다."""
         data, _ = self.request("kt00001", "/api/dostk/acnt", {"qry_tp": "3"})
-        return num(data.get("ord_alow_amt"))
+        full = num(data.get("100stk_ord_alow_amt"))
+        return full if full > 0 else num(data.get("ord_alow_amt"))
 
     def unfilled(self) -> list[dict]:
         """ka10075 미체결 (전체 종목)."""

@@ -175,7 +175,7 @@ def empty_row(cols: int, text: str) -> str:
 
 
 # ------------------------------------------------------------------ 키움
-KW_STATUS = {"watch": "감시 중", "bought": "매수", "skip_gap": "갭상승 → 제외", "missed_chase": "너무 올라 추격 안 함",
+KW_STATUS = {"watch": "감시 중", "bought": "매수", "skip_gap": "갭상승 뒤 조건 안 맞음", "missed_chase": "너무 올라 추격 안 함",
              "full": "자리 다 참", "too_expensive": "금액 부족", "expired": "돌파 없이 시간 끝"}
 KW_TRADE = {"pending": "주문 중", "open": "보유", "closing": "매도 중", "closed": "끝", "canceled": "취소"}
 
@@ -189,7 +189,8 @@ def kiwoom_section(links: bool = False) -> tuple[str, str]:
     logs = read_lines(ROOT / "state_kiwoom" / "daytrade.log")
     setting = next((l.split("설정: ", 1)[1] for l in reversed(logs) if "설정: " in l), "")
     waiting = next((l.split(" ", 2)[2] for l in reversed(logs) if "다음 실행" in l), "")
-    orderable = next((re.search(r"주문가능금액\(9시 직후\) ([\d,]+)원", l) for l in reversed(logs) if "9시 직후" in l), None)
+    orderable = next((re.search(r"^\d{4}-(\d{2}-\d{2} \d{2}:\d{2}).*주문가능금액\(9시 직후\) ([\d,]+)원", l)
+                      for l in reversed(logs) if "9시 직후" in l), None)
 
     day = latest.get("date", "")
     day_txt = f"{day[:4]}-{day[4:6]}-{day[6:]}" if len(day) == 8 else "-"
@@ -218,13 +219,37 @@ def kiwoom_section(links: bool = False) -> tuple[str, str]:
                 f'<td class="num {tone(pnl)}">{signed(pnl) if exit_px else "-"}</td>'
                 f'<td>{esc(t.get("exit_reason") or KW_TRADE.get(t.get("status"), ""))}</td></tr>')
 
+    # ETF 오버나이트 내역 (kiwoombot/overnight.py 가 남기는 etf_trades.json)
+    etf_rows, etf_pnl, n_etf = [], 0.0, 0
+    etf_state = {"ordered": "매수 주문", "held": "보유 중", "selling": "매도 주문", "closed": "끝"}
+    for t in reversed(read_json(ROOT / "state_kiwoom" / "etf_trades.json") or []):
+        if t.get("status") == "unfilled":
+            continue
+        qty, buy, sell = int(t.get("qty") or 0), float(t.get("buy_price") or 0), float(t.get("sell_price") or 0)
+        done = t.get("status") == "closed" and buy and sell
+        pnl = (sell - buy) * qty if done else 0.0
+        ret = (sell / buy - 1) * 100 if done else 0.0
+        if done:
+            n_etf += 1
+            etf_pnl += pnl
+        bd, sd = str(t.get("buy_day") or ""), str(t.get("sell_day") or "")
+        etf_rows.append(
+            f'<tr><td class="num">{bd[4:6] + "-" + bd[6:] if bd else "-"}</td><td class="num">{sd[4:6] + "-" + sd[6:] if sd else "-"}</td>'
+            f'<th scope="row">코스닥150 ETF<small>{esc(t.get("code", ""))}</small></th>'
+            f'<td class="num">{qty}</td><td class="num">{won(buy) if buy else "-"}</td><td class="num">{won(sell) if sell else "-"}</td>'
+            f'<td class="num {tone(ret)}">{signed(ret, "%", 2) if done else "-"}</td>'
+            f'<td class="num {tone(pnl)}">{signed(pnl) if done else "-"}</td>'
+            f'<td>{esc(etf_state.get(t.get("status"), t.get("status", "")))}</td></tr>')
+
     equity = float(latest.get("equity") or 0)
+    both = total_pnl + etf_pnl
     summary = (
         f'<dl class="facts">'
         f'<div><dt>평가금액</dt><dd>{won(equity) + "원" if equity else "-"}<small>{esc(day_txt)} 기준</small></dd></div>'
-        f'<div><dt>주문가능금액</dt><dd>{orderable.group(1) + "원" if orderable else "-"}<small>마지막 조회</small></dd></div>'
-        f'<div><dt>단타 거래</dt><dd>{n_trades}건<small>기록 {len(states)}일</small></dd></div>'
-        f'<div><dt>단타 손익</dt><dd class="{tone(total_pnl)}">{signed(total_pnl)}원<small>수수료·세금 전</small></dd></div>'
+        f'<div><dt>주문가능금액</dt><dd>{orderable.group(2) + "원" if orderable else "-"}<small>{esc(orderable.group(1)) + " 봇이 조회" if orderable else "조회 기록 없음"}</small></dd></div>'
+        f'<div><dt>단타 손익</dt><dd class="{tone(total_pnl)}">{signed(total_pnl)}원<small>{n_trades}건 · 기록 {len(states)}일</small></dd></div>'
+        f'<div><dt>ETF 오버나이트 손익</dt><dd class="{tone(etf_pnl)}">{signed(etf_pnl)}원<small>끝난 거래 {n_etf}건</small></dd></div>'
+        f'<div><dt>합계 손익</dt><dd class="{tone(both)}">{signed(both)}원<small>수수료·세금 전</small></dd></div>'
         f'</dl>')
     body = (
         (f'<p class="note">{esc(setting)}</p>' if setting else "")
@@ -234,7 +259,11 @@ def kiwoom_section(links: bool = False) -> tuple[str, str]:
         + f'<h3>단타 거래 내역</h3><div class="scroll"><table><thead><tr><th class="num">날짜</th><th>종목</th><th class="num">수량</th>'
           f'<th class="num">매수가</th><th class="num">매도가</th><th class="num">수익률</th><th class="num">손익</th><th>상태</th></tr></thead>'
           f'<tbody>{"".join(trade_rows) or empty_row(8, "아직 거래 없음")}</tbody></table></div>'
-        + '<p class="note">ETF 오버나이트(229200) 매매는 봇이 상태 파일에 남기지 않아 여기에 나오지 않습니다.</p>')
+        + f'<h3>ETF 오버나이트 내역</h3><p class="note">장 마감 동시호가에 사서 다음 거래일 장 시작 동시호가에 팝니다. '
+          f'매수가는 계좌의 평균 매입가(없으면 그날 종가), 매도가는 매도일 시가입니다.</p>'
+          f'<div class="scroll"><table><thead><tr><th class="num">매수일</th><th class="num">매도일</th><th>종목</th><th class="num">수량</th>'
+          f'<th class="num">매수가</th><th class="num">매도가</th><th class="num">수익률</th><th class="num">손익</th><th>상태</th></tr></thead>'
+          f'<tbody>{"".join(etf_rows) or empty_row(9, "아직 거래 없음")}</tbody></table></div>')
     return bot_block("kiwoom", "키움 단타 봇", "국내 주식 · 전일 +20% 종목 종가 재돌파 · 9:05 까지 매수, 12시 정리 + ETF 오버나이트",
                      live, summary, body), ("실전" if live else "드라이런")
 

@@ -3594,7 +3594,7 @@ def quarter_daily_trade(bar: "Bar", c: dict, s: "PullBreakSettings", entry_frac:
 
 
 def surge_break_event(day: list[MinuteBar], c: dict, mode: str, s: "PullBreakSettings",
-                      stop_daylow: bool = False, retest: bool = False) -> dict | None:
+                      stop_daylow: bool = False, retest: bool = False, retest_after: str = "") -> dict | None:
     """mode prevclose: 시가가 전일 종가 아래(갭상승 제외)에서 시작해 전일 종가를 넘는 순간 매수.
     mode prevhigh: 시가가 전일 고가 아래에서 시작해 전일 고가를 넘는 순간 매수.
     가격 = max(그 1분봉 시가, 기준가) + 슬리피지. stop_daylow 면 손절가 = 매수 전까지 당일 최저가.
@@ -3606,6 +3606,27 @@ def surge_break_event(day: list[MinuteBar], c: dict, mode: str, s: "PullBreakSet
     if day[0].open >= level:
         return None  # 갭상승으로 이미 넘은 날 제외
     low = day[0].low
+    if retest_after:
+        # 이 시각까지(봉 끝 시각 기준) 처음 넘으면 그 순간 매수, 그 뒤에 처음 넘으면 되돌림(기준가 지정가) 매수
+        broke = held = False
+        for j, m in enumerate(day):
+            if m.t > s.buy_until:
+                return None
+            if not broke:
+                if m.high > level:
+                    if m.t <= retest_after:
+                        price = max(m.open, level) * (1 + s.slippage)
+                        return {"time": m.t, "idx": j, "price": price, "stop": low if stop_daylow else 0.0,
+                                "pivot": level, "chg": (price / c["prev_close"] - 1) * 100}
+                    broke, held = True, m.close > level
+            elif held and m.low <= level:
+                price = min(m.open, level)
+                return {"time": m.t, "idx": j, "price": price, "stop": low if stop_daylow else 0.0, "pivot": level,
+                        "chg": (price / c["prev_close"] - 1) * 100}
+            elif m.close > level:
+                held = True
+            low = min(low, m.low)
+        return None
     if retest:
         broke = held = False
         for j, m in enumerate(day):
@@ -3630,6 +3651,59 @@ def surge_break_event(day: list[MinuteBar], c: dict, mode: str, s: "PullBreakSet
             return {"time": m.t, "idx": j, "price": price, "stop": low if stop_daylow else 0.0, "pivot": level,
                     "chg": (price / c["prev_close"] - 1) * 100}
         low = min(low, m.low)
+    return None
+
+
+def gap_dip_event(day: list[MinuteBar], c: dict, s: "PullBreakSettings", min_gap: float = 0.0, max_gap: float = 0.0,
+                  first_minutes: int = 5, cancel_low: bool = False, min_body: float = 0.0,
+                  entry: str = "touch", target_r: float = 0.0, dip: str = "bear",
+                  dip_touch: bool = False) -> dict | None:
+    """전일 급등주가 갭상승으로 시작해 첫 5분봉(9:00~9:05)이 음봉이면, 그 뒤 1분봉이 당일 시가를 넘는 순간 매수.
+    손절가 = 첫 5분봉 저가. 1분봉 시각은 봉이 끝나는 시각이라 첫 5분봉 = '09:01'~'09:05' 봉.
+    min_gap / max_gap: 시가 갭(전일 종가 대비 %) 범위 (max 0 = 없음), min_body: 음봉 몸통(시가 대비 %) 하한,
+    cancel_low: 시가를 넘기 전에 첫 5분봉 저가를 깨면 그날은 매수 안 함,
+    entry: touch = 넘는 순간(그 봉 시가가 이미 위면 시가) / close = 1분봉 종가가 시가 위에서 끝나면 그 종가."""
+    if not day or day[0].t > "09:01":
+        return None  # 장 시작 1분 안에 거래가 없던 날 (시가를 알 수 없음)
+    open_ = day[0].open
+    gap = (open_ / c["prev_close"] - 1) * 100
+    if gap <= min_gap or (max_gap and gap > max_gap):
+        return None
+    end = f"09:{first_minutes:02d}"
+    if dip == "prevclose":
+        # 첫 5분 안에 전일 종가 아래로 내려간 적이 있는 종목 → 그 뒤(다음 봉부터) 당일 시가를 넘는 순간 매수.
+        # 손절가 = 매수 전까지 당일 최저가 (--stop-pct 를 주면 그쪽이 우선)
+        dipped, low = False, float("inf")
+        for j, m in enumerate(day):
+            if m.t > s.buy_until or (not dipped and m.t > end):
+                return None
+            if dipped and m.high > open_:
+                price = max(m.open, open_) * (1 + s.slippage)
+                return {"time": m.t, "idx": j, "price": price, "stop": low, "pivot": open_,
+                        "target": price + (price - low) * target_r if target_r else 0.0,
+                        "chg": (price / c["prev_close"] - 1) * 100, "gap": gap, "risk": (price / low - 1) * 100}
+            if m.low < c["prev_close"] or (dip_touch and m.low == c["prev_close"]):
+                dipped = True  # dip_touch: 전일 종가에 닿기만 해도 인정
+            low = min(low, m.low)
+        return None
+    first = [m for m in day if m.t <= end]
+    if first[-1].close >= open_ or (open_ - first[-1].close) / open_ * 100 < min_body:
+        return None  # 첫 5분봉이 음봉이 아님
+    low = min(m.low for m in first)
+    for j, m in enumerate(day):
+        if m.t <= end:
+            continue
+        if m.t > s.buy_until:
+            return None
+        if cancel_low and m.low < low and m.open <= open_:
+            return None
+        hit = m.close > open_ if entry == "close" else m.high > open_
+        if hit:
+            price = (m.close if entry == "close" else max(m.open, open_)) * (1 + s.slippage)
+            return {"time": m.t, "idx": j, "price": price, "stop": low, "pivot": open_,
+                    "target": price + (price - low) * target_r if target_r else 0.0,  # 익절 = 손절 폭의 R 배
+                    "chg": (price / c["prev_close"] - 1) * 100, "gap": gap,
+                    "risk": (price / low - 1) * 100}
     return None
 
 
@@ -3663,8 +3737,10 @@ def run_surge_break(days: dict[date, list[dict]], minute_dir: Path, mode: str, s
                 continue
             if mode == "quarter":
                 ev = quarter_event(day, c, s, **q)
+            elif mode == "gapdip":
+                ev = gap_dip_event(day, c, s, **q)
             else:
-                ev = surge_break_event(day, c, mode, s, stop_daylow, retest)
+                ev = surge_break_event(day, c, mode, s, stop_daylow, retest, (q or {}).get("retest_after", ""))
             if not ev:
                 continue
             i, t, px, reason = _exit_trade(day, ev, s)
@@ -3674,7 +3750,8 @@ def run_surge_break(days: dict[date, list[dict]], minute_dir: Path, mode: str, s
                            "prev_change": round(c["prev_change"], 1), "level": round(ev["pivot"], 1),
                            "entry_time": ev["time"], "entry_price": round(ev["price"], 1),
                            "exit_time": t, "exit_price": round(px, 1), "reason": reason,
-                           "ret_pct": round(ret * 100, 3)})
+                           "ret_pct": round(ret * 100, 3), "gap": round(ev.get("gap", 0.0), 2),
+                           "risk_pct": round(ev.get("risk", 0.0), 2)})
     trades.sort(key=lambda t: (t["trade_day"], t["entry_time"]))
     return trades, missing
 
@@ -4080,8 +4157,20 @@ def main(argv: list[str] | None = None) -> None:
     pb.add_argument("--write-days", type=Path, default=None,
                     help="받아야 할 목록만 쓰고 끝냄 (매매일은 하루 전체, 전날은 끝 200분)")
     sb = sub.add_parser("surgebreak", help="1분봉: 전일 급등주가 다음 날 전일 종가(아래에서)·전일 고가를 넘을 때 매수")
-    sb.add_argument("--mode", choices=["prevclose", "prevhigh", "quarter"], default="prevclose",
-                    help="quarter = 기준봉(전일)을 4등분해 3/4 지점 지정가 매수, 1/2 지점 이탈 손절 (--stop-pct 0 과 함께)")
+    sb.add_argument("--mode", choices=["prevclose", "prevhigh", "quarter", "gapdip"], default="prevclose",
+                    help="quarter = 기준봉(전일)을 4등분해 3/4 지점 지정가 매수, 1/2 지점 이탈 손절 (--stop-pct 0 과 함께) / "
+                         "gapdip = 갭상승 시작 + 첫 5분봉 음봉 → 1분봉이 당일 시가를 넘으면 매수, 손절 첫 5분봉 저가 (--stop-pct 0)")
+    sb.add_argument("--gd-min-gap", type=float, default=0.0, help="gapdip: 시가 갭 하한 %% (초과)")
+    sb.add_argument("--gd-max-gap", type=float, default=0.0, help="gapdip: 시가 갭 상한 %% (0: 없음)")
+    sb.add_argument("--gd-minutes", type=int, default=5, help="gapdip: 첫 봉 길이(분)")
+    sb.add_argument("--gd-min-body", type=float, default=0.0, help="gapdip: 첫 봉 음봉 몸통 하한 (시가 대비 %%)")
+    sb.add_argument("--gd-cancel-low", action="store_true", help="gapdip: 시가를 넘기 전에 첫 봉 저가를 깨면 매수 안 함")
+    sb.add_argument("--gd-target-r", type=float, default=0.0, help="gapdip: 익절 = 매수가 + 손절 폭 x R (0: --take-profit %%)")
+    sb.add_argument("--gd-dip", choices=["bear", "prevclose"], default="bear",
+                    help="gapdip: bear = 첫 5분봉 음봉 / prevclose = 첫 5분 안에 전일 종가 아래로 내려간 적 있음 (그 뒤 시가 돌파 매수)")
+    sb.add_argument("--gd-dip-touch", action="store_true", help="gapdip prevclose: 전일 종가에 닿기만 해도(이하) 인정")
+    sb.add_argument("--gd-entry", choices=["touch", "close"], default="touch",
+                    help="gapdip: touch = 시가를 넘는 순간 / close = 1분봉 종가가 시가 위에서 끝나면 그 종가")
     sb.add_argument("--min-prev-amount", type=float, default=0.0, help="전일(기준봉) 거래대금 하한 (원)")
     sb.add_argument("--q-entry", type=float, default=0.75, help="quarter: 매수 지점 (아래에서부터 비율)")
     sb.add_argument("--q-stop", type=float, default=0.5, help="quarter: 손절 지점 (아래에서부터 비율)")
@@ -4107,6 +4196,8 @@ def main(argv: list[str] | None = None) -> None:
     sb.add_argument("--stop-pct", type=float, default=2.0, help="손절 = 매수가 -N%% (0: 없음)")
     sb.add_argument("--stop-daylow", action="store_true", help="손절 = 매수 전까지 당일 최저가 (--stop-pct 0 과 함께)")
     sb.add_argument("--retest", action="store_true", help="돌파 순간 대신, 돌파 뒤 기준가로 되돌아오면 지정가 매수")
+    sb.add_argument("--retest-after", default="",
+                    help="이 시각(예 09:05)까지 처음 넘으면 그 순간 매수, 그 뒤에 처음 넘으면 되돌림 매수 (--buy-until 까지)")
     sb.add_argument("--take-profit", type=float, default=5.0)
     sb.add_argument("--entry-bar-stop", choices=["low", "close"], default="low")
     sb.add_argument("--ma-exit", type=int, default=0,
@@ -4529,6 +4620,11 @@ def main(argv: list[str] | None = None) -> None:
                     if args.mode == "quarter":
                         if b is not None and b.low > quarter_levels(r, **q)[0]:
                             continue  # 매수가까지 안 내려온 날
+                    elif args.mode == "gapdip":
+                        if b is not None and b.open <= r["prev_close"]:
+                            continue  # 갭상승이 아닌 날
+                        if (args.minute_dir / f"{r['code']}_{d.isoformat()}.csv").exists():
+                            continue  # 이미 받은 날
                     else:
                         level = r["prev_close"] if args.mode == "prevclose" else r["prev_high"]
                         if b is not None and not (b.open < level < b.high):
@@ -4551,8 +4647,14 @@ def main(argv: list[str] | None = None) -> None:
         if args.daily:
             daily = {(c, b.day): b for c, (_, bars) in data.items() for b in bars}
         qq = dict(q, optimistic=args.optimistic) if args.daily else q
+        if args.mode == "gapdip":
+            qq = {"min_gap": args.gd_min_gap, "max_gap": args.gd_max_gap, "first_minutes": args.gd_minutes,
+                  "cancel_low": args.gd_cancel_low, "min_body": args.gd_min_body, "entry": args.gd_entry,
+                  "target_r": args.gd_target_r, "dip": args.gd_dip,
+                  "dip_touch": args.gd_dip_touch}
         trades, missing = run_surge_break(days, args.minute_dir, args.mode, s, args.stop_daylow, args.retest,
-                                          qq if args.mode == "quarter" else None, daily)
+                                          qq if args.mode in ("quarter", "gapdip") else
+                                          ({"retest_after": args.retest_after} if args.retest_after else None), daily)
         rets = [t["ret_pct"] for t in trades]
         print(f"대상 {sum(len(v) for v in days.values())}건 (분봉 없음 {missing}) → 매수 {len(trades)}건", end="")
         if rets:

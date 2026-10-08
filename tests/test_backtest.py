@@ -454,6 +454,27 @@ class NPatternTest(unittest.TestCase):
         self.assertFalse(n_pattern_signal(bars, 29, d))
 
 
+class GapDipTest(unittest.TestCase):
+    def test_gap_up_bearish_first_candle_then_open_break(self):
+        from tossbot.backtest import MinuteBar, PullBreakSettings, gap_dip_event
+        c = {"prev_close": 10_000}
+        s = PullBreakSettings(take_profit=5, stop_pct=0, slippage=0)
+        # 시가 10,500 (갭 +5%), 첫 5분봉(09:01~09:05 봉) 종가 10,300 = 음봉, 저가 10,200
+        first = [MinuteBar("09:01", 10_500, 10_550, 10_400, 10_450, 1), MinuteBar("09:03", 10_450, 10_460, 10_200, 10_250, 1),
+                 MinuteBar("09:05", 10_250, 10_350, 10_240, 10_300, 1)]
+        later = [MinuteBar("09:06", 10_300, 10_480, 10_290, 10_470, 1), MinuteBar("09:07", 10_470, 10_600, 10_460, 10_580, 1)]
+        ev = gap_dip_event(first + later, c, s)
+        self.assertEqual((ev["time"], ev["price"], ev["stop"]), ("09:07", 10_500, 10_200))
+        self.assertAlmostEqual(gap_dip_event(first + later, c, s, target_r=2)["target"], 10_500 + 300 * 2)
+        self.assertEqual(gap_dip_event(first + later, c, s, entry="close")["price"], 10_580)
+        self.assertIsNone(gap_dip_event(first + later, {"prev_close": 10_600}, s))        # 갭상승 아님
+        up = first[:2] + [MinuteBar("09:05", 10_250, 10_600, 10_240, 10_550, 1)]
+        self.assertIsNone(gap_dip_event(up + later, c, s))                                  # 첫 5분봉이 양봉
+        dip = [MinuteBar("09:06", 10_300, 10_310, 10_100, 10_150, 1)]
+        self.assertIsNotNone(gap_dip_event(first + dip + later, c, s))
+        self.assertIsNone(gap_dip_event(first + dip + later, c, s, cancel_low=True))       # 넘기 전에 저가를 깸
+
+
 class QuarterTest(unittest.TestCase):
     def test_quarter_levels_and_trades(self):
         from tossbot.backtest import (Bar, MinuteBar, PullBreakSettings, quarter_daily_trade, quarter_event,

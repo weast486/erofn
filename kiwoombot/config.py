@@ -33,8 +33,8 @@ class KiwoomConfig:
     take_profit_pct: float = 7.0  # 익절 = 매수가 +N% 지정가 (매수 체결 직후 주문)
     exit_time: str = "12:00"  # 이 시각에 남은 주문 취소·보유 전량 시장가 매도
     poll_seconds: float = 2.0
-    # 토스 스윙 봇이 들고 있는 종목은 건너뜀 (그 봇의 state.json 경로, 비우면 확인 안 함)
-    swing_state_file: str = "state/state.json"
+    # 토스 스윙 봇 보유 종목 제외용 state.json 경로 (기본 끔: 계좌가 달라 필요 없음, 2026-10-12 사용자 결정)
+    swing_state_file: str = ""
     state_dir: str = "state_kiwoom"
     # ETF 오버나이트: 오늘 ETF 가 전일 종가보다 내렸으면 장 마감 동시호가에 사서 다음 날 장 시작 동시호가에 팖
     etf_enabled: bool = True

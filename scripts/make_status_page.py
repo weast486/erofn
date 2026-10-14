@@ -44,6 +44,26 @@ def env_flag(path: Path, key: str) -> bool | None:
     return None
 
 
+def env_num(path: Path, key: str) -> float | None:
+    """.env 파일에서 key=숫자 한 줄만 본다 (다른 값은 읽지 않음)."""
+    for line in read_lines(path):
+        m = re.match(rf"\s*{re.escape(key)}\s*=\s*([\d_.]+)\s*(?:#.*)?$", line)
+        if m:
+            try:
+                return float(m.group(1).replace("_", ""))
+            except ValueError:
+                return None
+    return None
+
+
+def ret_fact(pnl: float, base: float, note: str) -> str:
+    """계좌 수익률 칸 (손익 / 시작 금액)."""
+    if not base:
+        return f'<div><dt>계좌 수익률</dt><dd>-<small>{esc(note)}</small></dd></div>'
+    r = pnl / base * 100
+    return f'<div><dt>계좌 수익률</dt><dd class="{tone(r)}">{signed(r, "%", 2)}<small>{esc(note)}</small></dd></div>'
+
+
 def icon_data_uri(path: Path) -> str:
     """ICO 안의 PNG(64px 우선)를 data URI 로."""
     try:
@@ -91,7 +111,7 @@ def short_dt(iso: str) -> str:
 
 
 # ------------------------------------------------------------------ 토스
-def toss_section(links: bool = False, sell: bool = False) -> tuple[str, str]:
+def toss_section(links: bool = False, sell: bool = False) -> tuple[str, str, dict]:
     snap = read_json(ROOT / "state" / "매매현황.json") or {}
     state = read_json(ROOT / "state" / "state.json") or {}
     sl, tp = float(snap.get("stop_loss_pct") or 4.7), float(snap.get("take_profit_pct") or 20)
@@ -137,6 +157,10 @@ def toss_section(links: bool = False, sell: bool = False) -> tuple[str, str]:
     unreal = value_sum - cost_sum
     unreal_pct = unreal / cost_sum * 100 if cost_sum else 0.0
     realized = sum((float(h["exit_price"]) - float(h["entry_price"])) * int(h.get("quantity", 0)) for h in history)
+    base = env_num(ROOT / ".env", "TOTAL_BUDGET") or 1_000_000  # 봇에 배정한 금액 (tossbot 기본 100만원)
+    first = min((str(x.get("opened_at", ""))[:10] for x in list(history) + list(positions) if x.get("opened_at")), default="")
+    acct = {"name": "토스 스윙 봇", "since": first, "base": base, "pnl": realized + unreal, "unit": "원",
+            "n": len(history), "note": f"실현 {signed(realized)} + 보유 평가 {signed(unreal)}"}
 
     reasons = {"STOP_LOSS": "손절", "TAKE_PROFIT": "익절", "RSI_EXIT": "RSI 매도", "MAX_HOLD": "보유 기간 끝", "MANUAL": "직접 매도"}
     hist_rows = [
@@ -156,7 +180,8 @@ def toss_section(links: bool = False, sell: bool = False) -> tuple[str, str]:
         f'<div><dt>보유</dt><dd>{len(positions)}종목<small>최대 {int(snap.get("num_stocks") or 10)}</small></dd></div>'
         f'<div><dt>평가손익</dt><dd class="{tone(unreal)}">{signed(unreal)}원<small>{signed(unreal_pct, "%", 2)}</small></dd></div>'
         f'<div><dt>실현손익</dt><dd class="{tone(realized)}">{signed(realized)}원<small>끝난 거래 {len(history)}건</small></dd></div>'
-        f'</dl>')
+        + ret_fact(realized + unreal, base, f"시작 {won(base)}원 대비 · 실현+평가")
+        + '</dl>')
     body = (
         f'<h3>보유 종목</h3><p class="note">{esc(price_note)}. 막대는 손절선과 익절선 사이에서 지금 위치, 세로선이 매수가입니다.</p>'
         f'<div class="scroll"><table><thead><tr><th>종목</th><th>구분</th><th class="num">수량</th><th class="num">매수가</th>'
@@ -167,7 +192,7 @@ def toss_section(links: bool = False, sell: bool = False) -> tuple[str, str]:
         f'<th class="num">매수가</th><th class="num">매도가</th><th class="num">수익률</th><th class="num">손익</th>'
         f'<th>사유</th><th class="num">매도 시각</th></tr></thead><tbody>{"".join(hist_rows) or empty_row(9, "아직 끝난 거래 없음")}</tbody></table></div>')
     return bot_block("toss", "토스 스윙 봇", "국내 주식 · 20일 신고가 + RSI 평균회귀 · 15:10 종가 매수",
-                     live, summary, body), ("실전" if live else "드라이런")
+                     live, summary, body), ("실전" if live else "드라이런"), acct
 
 
 def empty_row(cols: int, text: str) -> str:
@@ -180,7 +205,7 @@ KW_STATUS = {"watch": "감시 중", "bought": "매수", "skip_gap": "갭상승 �
 KW_TRADE = {"pending": "주문 중", "open": "보유", "closing": "매도 중", "closed": "끝", "canceled": "취소"}
 
 
-def kiwoom_section(links: bool = False) -> tuple[str, str]:
+def kiwoom_section(links: bool = False) -> tuple[str, str, dict]:
     days = sorted((ROOT / "state_kiwoom").glob("daytrade_*.json"))
     states = [s for s in (read_json(p) for p in days) if s]
     latest = states[-1] if states else {}
@@ -243,6 +268,11 @@ def kiwoom_section(links: bool = False) -> tuple[str, str]:
 
     equity = float(latest.get("equity") or 0)
     both = total_pnl + etf_pnl
+    first = next((s for s in states if float(s.get("equity") or 0) > 0), {})
+    base = float(first.get("equity") or 0)  # 기록이 시작된 날의 평가금액
+    fd = first.get("date", "")
+    acct = {"name": "키움 단타 봇", "since": f"{fd[:4]}-{fd[4:6]}-{fd[6:]}" if len(fd) == 8 else "", "base": base,
+            "pnl": both, "unit": "원", "n": n_trades + n_etf, "note": f"단타 {signed(total_pnl)} + ETF {signed(etf_pnl)}"}
     summary = (
         f'<dl class="facts">'
         f'<div><dt>평가금액</dt><dd>{won(equity) + "원" if equity else "-"}<small>{esc(day_txt)} 기준</small></dd></div>'
@@ -250,7 +280,8 @@ def kiwoom_section(links: bool = False) -> tuple[str, str]:
         f'<div><dt>단타 손익</dt><dd class="{tone(total_pnl)}">{signed(total_pnl)}원<small>{n_trades}건 · 기록 {len(states)}일</small></dd></div>'
         f'<div><dt>ETF 오버나이트 손익</dt><dd class="{tone(etf_pnl)}">{signed(etf_pnl)}원<small>끝난 거래 {n_etf}건</small></dd></div>'
         f'<div><dt>합계 손익</dt><dd class="{tone(both)}">{signed(both)}원<small>수수료·세금 전</small></dd></div>'
-        f'</dl>')
+        + ret_fact(both, base, f"시작 {won(base)}원 대비" if base else "시작 금액 기록 없음")
+        + '</dl>')
     body = (
         (f'<p class="note">{esc(setting)}</p>' if setting else "")
         + (f'<p class="note">봇 창: {esc(waiting)}</p>' if waiting else "")
@@ -265,7 +296,7 @@ def kiwoom_section(links: bool = False) -> tuple[str, str]:
           f'<th class="num">매수가</th><th class="num">매도가</th><th class="num">수익률</th><th class="num">손익</th><th>상태</th></tr></thead>'
           f'<tbody>{"".join(etf_rows) or empty_row(9, "아직 거래 없음")}</tbody></table></div>')
     return bot_block("kiwoom", "키움 단타 봇", "국내 주식 · 전일 +20% 종목 종가 재돌파 · 9:05 까지 매수, 12시 정리 + ETF 오버나이트",
-                     live, summary, body), ("실전" if live else "드라이런")
+                     live, summary, body), ("실전" if live else "드라이런"), acct
 
 
 # ------------------------------------------------------------------ 바이낸스
@@ -273,7 +304,7 @@ BN_REASON = {"target": "익절", "stop": "손절", "time": "시간 정리", "nig
 BN_PHASE = {"new": "준비 중", "watch": "신호 감시 중", "position": "보유 중", "done": "끝"}
 
 
-def binance_section(links: bool = False) -> tuple[str, str]:
+def binance_section(links: bool = False) -> tuple[str, str, dict]:
     sdir = ROOT / "state_binance"
     dry = env_flag(ROOT / ".env.binance", "BINANCE_DRY_RUN")
     live = dry is False
@@ -339,13 +370,26 @@ def binance_section(links: bool = False) -> tuple[str, str]:
             f'<td class="num {tone(pnl)}">{signed(pnl, "", 2)}</td><td>{esc(BN_REASON.get(t.get("reason"), t.get("reason", "")))}</td></tr>')
 
     phase = BN_PHASE.get((latest or {}).get("phase"), "첫 실행 대기")
+    # 봇이 평가금액을 기록하지 않아, 첫 낮 거래의 주문 금액(= 평가금액 x 배율)에서 시작 금액을 거꾸로 계산
+    lev = env_num(ROOT / ".env.binance", "BN_LEVERAGE") or 5
+    base = 0.0
+    for t in trades:
+        if not str(t.get("reason", "")).startswith("night"):
+            try:
+                base = float(t["qty"]) * float(t["entry"]) / lev
+            except (KeyError, ValueError):
+                base = 0.0
+            break
+    acct = {"name": "바이낸스 봇", "since": trades[0].get("day", "") if trades else "", "base": base, "pnl": total,
+            "unit": "USDT", "n": n, "note": "시작 금액은 첫 거래 주문 금액 ÷ 배율로 추정"}
     summary = (
         f'<dl class="facts">'
         f'<div><dt>오늘 상태</dt><dd>{esc(phase)}<small>{esc((latest or {}).get("day", "기록 없음"))}</small></dd></div>'
         f'<div><dt>보유 포지션</dt><dd>{len(open_rows)}개<small>낮 2종목 + 종가 2종목</small></dd></div>'
         f'<div><dt>거래</dt><dd>{n}건<small>기록 {len(days)}일</small></dd></div>'
         f'<div><dt>손익 (USDT)</dt><dd class="{tone(total)}">{signed(total, "", 2)}<small>수수료 전</small></dd></div>'
-        f'</dl>')
+        + ret_fact(total, base, f"시작 약 {base:,.0f} USDT 대비 (첫 거래로 추정)" if base else "시작 금액 기록 없음")
+        + '</dl>')
     body = (
         (f'<p class="note">{esc(mode_line)}</p>' if mode_line else "")
         + (f'<p class="note">봇 창: {esc(waiting)}</p>' if waiting else "")
@@ -358,7 +402,7 @@ def binance_section(links: bool = False) -> tuple[str, str]:
           f'<th class="num">수량</th><th class="num">진입가</th><th class="num">청산가</th><th class="num">수익률</th>'
           f'<th class="num">손익</th><th>사유</th></tr></thead><tbody>{"".join(trade_rows) or empty_row(9, "아직 거래 없음")}</tbody></table></div>')
     return bot_block("binance", "바이낸스 봇", "미국 주식 선물 · 낮: 첫 5분봉 + 1분봉 FVG 5배 x 2종목 · 밤: 급락 종목 종가 매수 1배 x 2종목",
-                     live, summary, body), ("실전" if live else "드라이런")
+                     live, summary, body), ("실전" if live else "드라이런"), acct
 
 
 # ------------------------------------------------------------------ 페이지
@@ -410,6 +454,7 @@ h2{font-size:19px;font-weight:700;margin:0;letter-spacing:-0.01em}
 .facts small{display:block;font-family:var(--font);font-size:12px;font-weight:400;color:var(--muted)}
 h3{font-size:14px;font-weight:600;margin:6px 0 0}
 .note{margin:0;color:var(--muted);font-size:13px}
+.sum-h{margin:22px 0 6px} .sum-h+.note{margin-bottom:10px}
 .scroll{overflow-x:auto;border:1px solid var(--line);border-radius:10px}
 table{border-collapse:collapse;width:100%;font-size:14px}
 th,td{padding:9px 12px;text-align:left;white-space:nowrap;border-bottom:1px solid var(--line)}
@@ -447,10 +492,30 @@ tbody th a:focus-visible{outline:2px solid var(--down);outline-offset:2px}
 """
 
 
+def accounts_table(accts: list[dict]) -> str:
+    """계좌별 수익률 한눈에 보기."""
+    rows = []
+    for a in accts:
+        usd = a["unit"] == "USDT"
+        base_txt = (f'{a["base"]:,.2f}' if usd else won(a["base"])) + " " + a["unit"] if a["base"] else "-"
+        ret = a["pnl"] / a["base"] * 100 if a["base"] else None
+        rows.append(
+            f'<tr><th scope="row">{esc(a["name"])}<small>{esc(a["since"] or "-")} 부터 · 끝난 거래 {a["n"]}건</small></th>'
+            f'<td class="num">{base_txt}</td>'
+            f'<td class="num {tone(a["pnl"])}">{signed(a["pnl"], "", 2 if usd else 0)} {a["unit"]}</td>'
+            f'<td class="num {tone(ret or 0)}"><b>{signed(ret, "%", 2) if ret is not None else "-"}</b></td>'
+            f'<td><small>{esc(a["note"])}</small></td></tr>')
+    return ('<h2 class="sum-h">계좌별 수익률</h2>'
+            '<p class="note">수익률 = 손익 ÷ 시작 금액. 손익은 수수료·세금을 빼기 전 값이고, 중간에 넣거나 뺀 돈은 반영하지 않습니다.</p>'
+            '<div class="scroll"><table><thead><tr><th>계좌</th><th class="num">시작 금액</th><th class="num">손익</th>'
+            f'<th class="num">수익률</th><th>내용</th></tr></thead><tbody>{"".join(rows)}</tbody></table></div>')
+
+
 def build(toolbar: str = "", links: bool = False, sell: bool = False) -> str:
     """sell=True 면 토스 보유 종목에 '팔기' 버튼을 넣는다 (status_server 가 이 PC 에서 연 페이지에만 켬)."""
     now = datetime.now().astimezone()
-    blocks = [toss_section(links, sell)[0], kiwoom_section(links)[0], binance_section(links)[0]]
+    parts = [toss_section(links, sell), kiwoom_section(links), binance_section(links)]
+    blocks = [accounts_table([p[2] for p in parts])] + [p[0] for p in parts]
     return (
         '<title>봇 매매현황</title>\n'
         '<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans+KR:wght@400;500;600;700&display=swap">\n'

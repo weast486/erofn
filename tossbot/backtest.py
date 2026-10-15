@@ -362,6 +362,10 @@ class BreakoutSettings:
     reduced_slots: int = 8
     exclude_symbols: frozenset = frozenset()  # 매수 제외 종목코드 (예: 제약·바이오)
     breakeven_lock_pct: float = 0.0  # 올린 손절가 = 매수가 x (1 + 이 %). 0 이면 본전
+    # 트레일링 스탑: 고가가 매수가 대비 trail_start_pct % 에 닿은 다음 날부터 익절 지정가를 없애고
+    # 손절가 = 그때까지 최고 고가 x (1 - trail_pct %) (기존 손절가보다 낮으면 기존 손절가). 0 이면 끔
+    trail_start_pct: float = 0.0
+    trail_pct: float = 0.0
     # False 면 신고가 조건 없이 매수 (급등주 매매: min_change_pct 와 함께 사용)
     require_new_high: bool = True
     # 0 보다 크면 당일 상승률(전일 종가 대비)이 이 % 이상인 종목만
@@ -590,6 +594,7 @@ def run_breakout(
     equity_curve: list[tuple[date, float]] = []
     last_close: dict[str, float] = {}
     breakeven: set[str] = set()  # 손절가를 본전으로 올린 종목
+    trail_peak: dict[str, float] = {}  # 트레일링 스탑이 켜진 종목의 최고 고가
     recover: set[str] = set()  # 크게 빠져서 본전 탈출을 기다리는 종목
     closed_wins: list[bool] = []  # 청산 순서대로 수익 여부 (최근 승률 계산용)
     closed_rets: list[float] = []  # 청산 순서대로 수익률 (켈리 비중용)
@@ -605,6 +610,7 @@ def run_breakout(
         closed_rets.append(t.ret)
         del positions[t.symbol]
         breakeven.discard(t.symbol)
+        trail_peak.pop(t.symbol, None)
         recover.discard(t.symbol)
 
     for day in calendar:
@@ -634,6 +640,11 @@ def run_breakout(
             reason = "STOP_LOSS"
             if sym in breakeven:
                 stop, reason = round_down_to_tick(t.entry_price * (1 + b.breakeven_lock_pct / 100)), "BREAKEVEN"
+            if sym in trail_peak:
+                tp = None
+                trail = round_down_to_tick(trail_peak[sym] * (1 - b.trail_pct / 100))
+                if stop is None or trail > stop:
+                    stop, reason = trail, "TRAIL"
             # 같은 날 손절가·익절가 모두 닿으면 손절로 가정 (보수적)
             if stop and b.stop_limit and bar.open < stop:
                 if bar.high >= stop:
@@ -665,6 +676,11 @@ def run_breakout(
             if (b.breakeven_trigger_pct and sym in positions
                     and bar.high >= t.entry_price * (1 + b.breakeven_trigger_pct / 100)):
                 breakeven.add(sym)  # 장중 순서를 알 수 없으므로 다음 날부터 적용
+            if b.trail_start_pct and sym in positions:
+                if sym in trail_peak:
+                    trail_peak[sym] = max(trail_peak[sym], bar.high)
+                elif bar.high >= t.entry_price * (1 + b.trail_start_pct / 100):
+                    trail_peak[sym] = bar.high  # 다음 날부터 트레일링 적용
 
         # 2) 매수: 종가 신고가
         max_slots = s.num_slots
@@ -4421,6 +4437,10 @@ def main(argv: list[str] | None = None) -> None:
     r.add_argument("--reduced-slots", type=int, default=8, help="breakout: 승률 저하 시 최대 보유 종목 수")
     r.add_argument("--continuous", action="store_true",
                    help="연도마다 새로 시작하지 않고 첫 해 1월 1일부터 끝까지 한 번에 (복리 확인용)")
+    r.add_argument("--trail-start", type=float, default=0,
+                   help="breakout: 고가가 매수가 대비 N%% 닿은 다음 날부터 익절 없이 트레일링 스탑 (0 = 없음)")
+    r.add_argument("--trail-pct", type=float, default=7,
+                   help="breakout: --trail-start 이후 손절가 = 최고 고가 대비 -N%%")
     r.add_argument("--lock-profit", type=float, default=0,
                    help="breakout: --breakeven-at 이후 손절가를 매수가 +N%%로 (0 = 본전)")
     r.add_argument("--no-new-high", action="store_true", help="breakout: 신고가 조건 없이 매수 (--min-change 와 함께)")
@@ -4822,6 +4842,7 @@ def main(argv: list[str] | None = None) -> None:
                               require_new_high=not args.no_new_high, min_change_pct=args.min_change,
                               skip_limit_up=not args.allow_limit_up_signal,
                               breakeven_trigger_pct=args.breakeven_at, breakeven_lock_pct=args.lock_profit,
+                              trail_start_pct=args.trail_start, trail_pct=args.trail_pct,
                               next_day_exit=args.next_day_exit, ma_exit_days=args.ma_exit,
                               ma_exit_profit_only=args.ma_exit_profit_only, max_buys_per_day=args.max_buys_per_day,
                               min_marcap=args.min_marcap, skip_touched_limit_up=args.skip_touched_limit_up,

@@ -86,9 +86,28 @@ class EtfOvernightTest(unittest.TestCase):
         c.buy = buy
         etf = EtfOvernight(c, self.cfg())
         qty = etf.evening_buy(NOW, 1_000_000)
-        self.assertEqual(qty, int(1_000_000 * 0.98 // (9900 * 1.30)))  # 상한가 기준으로 줄인 수량
+        self.assertEqual(qty, int(1_000_000 * 0.98 // (10000 * 1.30)))  # 상한가(전일 종가 +30%) 기준으로 줄인 수량
         self.assertEqual(c.orders, [("buy", "229200", qty, None)])
         self.assertEqual(etf.load_trades()[0]["qty"], qty)
+
+    def test_rejected_market_buy_retries_with_quantity_from_broker_message(self):
+        """거부 메시지의 'N주 매수가능' 수량으로 다시 주문 (2026-10-12: 68주 거부 → 53주로 다시 내 또 거부됐던 경우)."""
+        c = FakeClient(rows(14385, 15165), cash=1_015_989)
+        calls = []
+        real_buy = c.buy
+
+        def buy(code, qty, price=None):
+            calls.append(qty)
+            if qty > 51:
+                raise RuntimeError("[kt10000] HTTP 200 code=20: [2000](855056:매수증거금이 부족합니다. 51주 매수가능)")
+            return real_buy(code, qty, price)
+
+        c.buy = buy
+        etf = EtfOvernight(c, self.cfg())
+        qty = etf.evening_buy(NOW, 1_020_493)
+        self.assertEqual(calls, [68, 51])
+        self.assertEqual(qty, 51)
+        self.assertEqual(etf.load_trades()[0]["qty"], 51)
 
     def test_ledger_drops_unfilled_buy_and_records_untracked_holding(self):
         cfg = self.cfg()

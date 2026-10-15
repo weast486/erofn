@@ -74,11 +74,19 @@ def main() -> None:
     bt.add_argument("--boll-tf", type=int, default=5, help="boll: 분봉 단위")
     bt.add_argument("--boll-len", type=int, default=20)
     bt.add_argument("--boll-k", type=float, default=2.0, help="boll: 표준편차 배수")
-    bt.add_argument("--boll-mode", choices=["reversion", "breakout"], default="reversion")
+    bt.add_argument("--boll-mode", choices=["reversion", "breakout", "doubleb"], default="reversion",
+                    help="doubleb = 두 밴드(20·2 + 4·4)를 동시에 벗어난 뒤 안으로 돌아오면 진입")
     bt.add_argument("--boll-exit", choices=["mid", "upper"], default="mid", help="boll reversion: 중심선 / 반대편 밴드에서 청산")
     bt.add_argument("--boll-side", choices=["long", "short", "both"], default="long")
     bt.add_argument("--boll-source", choices=["rth", "all"], default="rth")
     bt.add_argument("--boll-min-width", type=float, default=0.0, help="boll: 밴드 폭 %% 하한")
+    bt.add_argument("--boll-len2", type=int, default=4, help="boll doubleb: 두 번째 밴드 길이")
+    bt.add_argument("--boll-k2", type=float, default=4.0, help="boll doubleb: 두 번째 밴드 표준편차 배수")
+    bt.add_argument("--boll-src2", choices=["open", "close"], default="open", help="boll doubleb: 두 번째 밴드 계산 값")
+    bt.add_argument("--boll-db-break", choices=["low", "close"], default="low", help="boll doubleb: 저가(고가) / 종가가 두 밴드 밖")
+    bt.add_argument("--boll-db-entry", choices=["reenter", "break"], default="reenter",
+                    help="boll doubleb: 밴드 안으로 돌아온 봉 다음 시가 / 이탈 봉 다음 시가")
+    bt.add_argument("--boll-db-wait", type=int, default=3, help="boll doubleb: 이탈 뒤 돌아오기까지 기다릴 봉 수")
     bt.add_argument("--fvg-loc", choices=["zone", "mid"], default="zone", help="fvg: 갭 전체가 첫 봉 고가 위 / 가운데 봉 종가가 위")
     bt.add_argument("--fvg-entry", choices=["edge", "mid", "full"], default="edge", help="fvg: 갭 첫 닿음 / 가운데 / 다 메움")
     bt.add_argument("--fvg-pick", choices=["first", "latest"], default="latest")
@@ -151,7 +159,37 @@ def main() -> None:
                       ("update-settings", "봇: .env.binance 를 최신 설정으로 (API 키 유지)")]:
         sp = sub.add_parser(name, help=hlp)
         sp.add_argument("--env", default=".env.binance")
+    mn = sub.add_parser("manual", help="조건 주문 (테스트 매매만): add / list / cancel / run")
+    mn.add_argument("action", choices=["add", "list", "cancel", "run"])
+    mn.add_argument("target", nargs="?", help="add: 종목 (예: KORU) / cancel: 주문 번호")
+    mn.add_argument("--env", default=".env.binance")
+    mn.add_argument("--side", choices=["long", "short"])
+    mn.add_argument("--price", type=float, help="진입: 이 가격에 닿으면")
+    mn.add_argument("--ma", nargs=3, metavar=("봉", "종류", "기간"), help="진입: 이동평균선에 닿으면 (예: 1h vwma 100)")
+    mn.add_argument("--high", type=float, help="진입: 고점·저점 비율 지점의 고점")
+    mn.add_argument("--low", type=float, help="진입: 고점·저점 비율 지점의 저점")
+    mn.add_argument("--ratio", type=float, default=0.5, help="고점·저점 사이 되돌림 비율 (기본 0.5 = 1/2)")
+    mn.add_argument("--fixed", action="store_true", help="고점·저점을 자동으로 갱신하지 않음")
+    mn.add_argument("--stop", type=float, help="손절: 가격")
+    mn.add_argument("--stop-pct", type=float, help="손절: 진입가에서 몇 %%")
+    mn.add_argument("--stop-anchor", action="store_true", help="손절: 기준 고점 위(숏)·저점 아래(롱)")
+    mn.add_argument("--stop-ma", nargs=3, metavar=("봉", "종류", "기간"), help="손절: 끝난 봉의 시가·종가가 모두 이평선 너머면 (숏은 위·롱은 아래, 예: 15m sma 200)")
+    mn.add_argument("--tp-ma", nargs=3, metavar=("봉", "종류", "기간"), help="익절: 가격이 이평선에 닿으면 (예: 15m sma 50)")
+    mn.add_argument("--before-open", action="store_true", help="다음 미국 정규장 시작(동부 9:30)에 종료: 대기는 취소, 보유는 그때 가격으로 정리")
+    mn.add_argument("--until", help='이 한국 시각에 종료 ("HH:MM" 또는 "MM-DD HH:MM")')
+    mn.add_argument("--void-ma", nargs=3, metavar=("봉", "종류", "기간"), help="진입 전에 이 이평선이 가격 아래(숏)·위(롱)로 가면 폐기 (예: 15m sma 200)")
+    mn.add_argument("--void-vs-entry", action="store_true", help="--void-ma 를 지금 가격이 아니라 진입 위치와 비교 (숏: 이평선이 진입 위치 이하로 내려오면 폐기)")
+    mn.add_argument("--tp", type=float, help="익절: 가격")
+    mn.add_argument("--tp-r", type=float, help="익절: 손절폭의 몇 배")
+    mn.add_argument("--tp-far", action="store_true", help="익절: 마지막 저점(숏)·고점(롱)")
+    mn.add_argument("--lev", type=float, default=1.0, help="평가금액의 몇 배 (최대 5)")
+    mn.add_argument("--hours", type=float, default=0.0, help="이 시간 안에 안 닿으면 자동 취소 (0 = 기한 없음)")
+    mn.add_argument("--all", action="store_true", help="list: 끝난 주문도 모두")
     a = ap.parse_args()
+    if a.cmd == "manual":
+        from .manualmain import manual_main
+        manual_main(a)
+        return
     if a.cmd in ("check", "run", "loop", "update-settings"):
         from .botmain import bot_main
         bot_main(a.cmd, a.env)
@@ -189,6 +227,8 @@ def main() -> None:
                    rsi_source=a.rsi_source, rsi_side=a.rsi_side,
                    boll_tf=a.boll_tf, boll_len=a.boll_len, boll_k=a.boll_k, boll_mode=a.boll_mode,
                    boll_exit=a.boll_exit, boll_side=a.boll_side, boll_source=a.boll_source, boll_min_width=a.boll_min_width,
+                   boll_len2=a.boll_len2, boll_k2=a.boll_k2, boll_src2=a.boll_src2, boll_db_break=a.boll_db_break,
+                   boll_db_entry=a.boll_db_entry, boll_db_wait=a.boll_db_wait,
                    fvg_loc=a.fvg_loc, fvg_entry=a.fvg_entry, fvg_pick=a.fvg_pick, fvg_target_r=a.fvg_target_r,
                    fvg_min_gap=a.fvg_min_gap, fvg_side=a.fvg_side, fvg_minutes=a.fvg_minutes,
                    fvg_stop_mode=a.fvg_stop_mode, fvg_one_per_day=not a.fvg_all_symbols,

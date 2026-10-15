@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from datetime import datetime
 from pathlib import Path
 
@@ -193,8 +194,14 @@ class EtfOvernight:
             try:
                 self.client.buy(cfg.etf_code, qty)
             except Exception as exc:  # noqa: BLE001
-                # 시장가 주문은 증권사가 상한가(+30%) 기준으로 증거금을 잡아 거부할 수 있음 → 그 기준에 맞는 수량으로 한 번 더
-                safe = int(budget // (price * 1.30))
+                # 시장가 주문은 증권사가 상한가(전일 종가 +30%) 기준으로 증거금을 잡아 거부할 수 있음 → 그 기준에 맞는 수량으로 한 번 더.
+                # 거부 메시지에 "51주 매수가능" 처럼 가능한 수량이 있으면 그 수량을 씀 (2026-10-12: 현재가 +30% 로 계산해
+                # -5% 내린 날 53주를 다시 냈다가 51주 한도에 또 거부됨)
+                m = re.search(r"(\d[\d,]*)\s*주\s*매수\s*가능", str(exc))
+                if m:
+                    safe = int(m.group(1).replace(",", ""))
+                else:
+                    safe = int(budget // (price / (1 + chg / 100) * 1.30))
                 if not 1 <= safe < qty:
                     log.warning("ETF 매수 주문 실패: %s", exc)
                     return 0

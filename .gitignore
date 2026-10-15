@@ -12,3 +12,4 @@ state_kiwoom/
 state_binance/
 .env.bak
 .env.*.bak
+.env.bak_*

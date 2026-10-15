@@ -166,11 +166,18 @@ class Params:
     boll_tf: int = 5
     boll_len: int = 20
     boll_k: float = 2.0
-    boll_mode: str = "reversion"   # reversion = 밴드 밖에서 되돌림 / breakout = 밴드 돌파 추종
+    boll_mode: str = "reversion"   # reversion = 밴드 밖에서 되돌림 / breakout = 밴드 돌파 추종 / doubleb = 두 밴드 동시 이탈 뒤 복귀
     boll_exit: str = "mid"         # reversion 청산: mid = 중심선 / upper = 반대편 밴드
     boll_side: str = "long"        # long / short / both
     boll_source: str = "rth"
     boll_min_width: float = 0.0    # 밴드 폭(상단-하단)/중심선 % 하한 (0 = 조건 없음)
+    # doubleb(더블비): 밴드1(boll_len·boll_k, 종가) + 밴드2(boll_len2·boll_k2, 기본 시가 4·4)
+    boll_len2: int = 4
+    boll_k2: float = 4.0
+    boll_src2: str = "open"        # 밴드2 계산 값: open(시가, 봉 안에서 밴드가 안 움직임) / close
+    boll_db_break: str = "low"     # 이탈 판정: low = 저가(숏은 고가)가 두 밴드 밖 / close = 종가가 두 밴드 밖
+    boll_db_entry: str = "reenter"  # reenter = 이탈 뒤 종가가 밴드2 안으로 돌아온 봉 다음 시가 / break = 이탈 봉 다음 시가
+    boll_db_wait: int = 3          # reenter: 이탈 봉 뒤 이 봉 수 안에 돌아와야 함 (0 = 이탈 봉이 바로 안에서 끝날 때만)
     # fvg: 첫 5분봉(9:30~9:35) 고가·저가 → 1분봉 FVG(3봉 갭)가 고가 위면 롱, 저가 아래면 숏, 갭 되돌림 지정가 진입
     fvg_loc: str = "zone"          # zone = 갭 전체가 고가 위(저가 아래) / mid = 가운데 봉 종가가 고가 위(저가 아래)
     fvg_entry: str = "edge"        # edge = 갭 첫 닿음(3번째 봉 저가) / mid = 갭 가운데 / full = 갭 다 메움(1번째 봉 고가)
@@ -991,6 +998,7 @@ def rsi_trades(symbol: str, mins: list[MinBar], p: Params) -> tuple[list[Trade],
 def boll_trades(symbol: str, mins: list[MinBar], p: Params) -> tuple[list[Trade], dict]:
     """장중 볼린저밴드. 신호는 완성된 tf 분봉 종가, 진입·청산은 다음 tf 봉 첫 1분봉 시가.
     reversion: 종가가 하단 아래면 롱 → 종가가 중심선(boll_exit=mid) 또는 상단(upper) 이상이면 청산 (숏은 반대)
+    doubleb: 봉이 밴드1·밴드2 하단을 모두 벗어난 뒤 종가가 밴드2 안으로 돌아오면 롱 → 청산은 reversion 과 같음
     breakout: 종가가 상단 위면 롱 → 종가가 중심선 아래면 청산 (숏은 반대)"""
     bars = tf_bars(mins, p.boll_tf, p.boll_source)
     c = [b[4] for b in bars]
@@ -998,6 +1006,41 @@ def boll_trades(symbol: str, mins: list[MinBar], p: Params) -> tuple[list[Trade]
     sides = [s for s in (1, -1) if p.boll_side == "both" or (s == 1) == (p.boll_side == "long")]
     enter_at: dict[datetime, int] = {}
     exit_at: dict[datetime, set[int]] = {}
+    if p.boll_mode == "doubleb":
+        n2, k2 = p.boll_len2, p.boll_k2
+        src2 = [b[1] for b in bars] if p.boll_src2 == "open" else c
+        armed: dict[int, int] = {}  # 방향 → 두 밴드를 벗어난 마지막 봉 번호
+        for i in range(max(n, n2) - 1, len(bars) - 1):
+            w = c[i - n + 1:i + 1]
+            mid = sum(w) / n
+            sd = (sum((x - mid) ** 2 for x in w) / n) ** 0.5
+            up, lo = mid + k * sd, mid - k * sd
+            w2 = src2[i - n2 + 1:i + 1]
+            m2 = sum(w2) / n2
+            sd2 = (sum((x - m2) ** 2 for x in w2) / n2) ** 0.5
+            up2, lo2 = m2 + k2 * sd2, m2 - k2 * sd2
+            width_ok = not (p.boll_min_width > 0 and (up - lo) / mid * 100 < p.boll_min_width)
+            nxt = bars[i + 1][0]
+            if i > 0 and bars[i][0].date() != bars[i - 1][0].date():
+                armed.clear()  # 이탈은 당일 안에서만 유효
+            for s in sides:
+                x = c[i]
+                ext_px = bars[i][3 if s == 1 else 2] if p.boll_db_break == "low" else x
+                broke = (ext_px < lo and ext_px < lo2) if s == 1 else (ext_px > up and ext_px > up2)
+                if broke and width_ok:
+                    armed[s] = i
+                inside = (x > lo2) if s == 1 else (x < up2)
+                if p.boll_db_entry == "break":
+                    ent = broke and width_ok
+                else:
+                    ent = s in armed and i - armed[s] <= p.boll_db_wait and inside
+                if ent:
+                    armed.pop(s, None)
+                    enter_at.setdefault(nxt, s)
+                tgt = (mid if p.boll_exit == "mid" else up) if s == 1 else (mid if p.boll_exit == "mid" else lo)
+                if (x >= tgt) if s == 1 else (x <= tgt):
+                    exit_at.setdefault(nxt, set()).add(s)
+        return signal_trades(symbol, mins, p, p.boll_tf, enter_at, exit_at)
     for i in range(n - 1, len(bars) - 1):
         w = c[i - n + 1:i + 1]
         mid = sum(w) / n

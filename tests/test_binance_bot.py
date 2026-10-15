@@ -105,6 +105,15 @@ class BotTest(unittest.TestCase):
         self.assertEqual(pos["result"]["reason"], "stop")
         self.assertAlmostEqual(pos["result"]["exit"], 101)
 
+    def test_stop_distance_limit_skips_signal(self):
+        first = [(100, 101, 99, 100.5)] * 5                                       # 진입 101.5 · 손절 99 → 거리 2.46%
+        fvg = [(101, 101.5, 100.8, 101.4), (101.4, 103, 101.3, 102.9), (102.9, 103.5, 102.2, 103.2)]
+        after = [(103.2, 103.3, 102.0, 102.5), (102.5, 102.6, 101.3, 101.4)]
+        trader, _ = self._setup(first + fvg + after + [(101.4, 107, 101.4, 107)] * 3)
+        trader.cfg.max_stop_pct, trader.cfg.exit_minutes = 2.0, 40
+        st = trader.run(DAY)
+        self.assertEqual((st.dropped, st.positions, st.result["reason"]), (["AUSDT"], {}, "no_trade"))
+
     def test_no_fvg_no_trade(self):
         trader, clock = self._setup([(100, 101, 99, 100)] * 400)
         trader.cfg.exit_minutes = 40  # 테스트 시간을 줄임

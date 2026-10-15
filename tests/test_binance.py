@@ -194,6 +194,25 @@ class BollTest(unittest.TestCase):
         p.boll_mode = "breakout"
         self.assertEqual(boll_trades("X", mins, p)[0], [])
 
+    def test_doubleb_reenter(self):
+        """저가가 두 밴드 하단을 모두 벗어난 뒤 종가가 밴드2 안으로 돌아오면 다음 봉 시가 매수 → 중심선 회복 청산."""
+        t0 = datetime(2026, 9, 1, 9, 30, tzinfo=ET)
+        rows = [(100, 100.1, 99.9, 100)] * 5 + [(100.2, 100.3, 100.1, 100.2)] * 5   # (시가, 고가, 저가, 종가)
+        rows += [(100.2, 100.3, 96, 96.5),   # 급락: 종가도 밴드2(시가 4·4) 밖 → 기다림
+                 (96.5, 98, 96.4, 97.8),     # 밴드2 가 넓어져 종가가 안으로 → 다음 봉 시가 매수
+                 (97.8, 100.5, 97.7, 100.4), (100.4, 100.6, 100.3, 100.5), (100.5, 100.6, 100.4, 100.5)]
+        mins = [MinBar(t0 + timedelta(minutes=i), o, h, l, c, 1.0) for i, (o, h, l, c) in enumerate(rows)]
+        p = Params(strategy="boll", boll_mode="doubleb", boll_tf=1, boll_len=10, boll_k=2, stop_pct=0,
+                   vwap_start=time(9, 30), rule=SizeRule(2, 5, 0, 0))
+        trades, _ = boll_trades("X", mins, p)
+        self.assertEqual((trades[0].side, trades[0].reason), (1, "signal"))
+        self.assertEqual(trades[0].entry_t, t0 + timedelta(minutes=12))
+        self.assertAlmostEqual(trades[0].entry, 97.8)
+        p.boll_db_wait = 0  # 이탈 봉이 바로 안에서 끝나야 함 → 진입 없음
+        self.assertEqual(boll_trades("X", mins, p)[0], [])
+        p.boll_db_entry = "break"  # 이탈 봉 다음 시가
+        self.assertEqual(boll_trades("X", mins, p)[0][0].entry_t, t0 + timedelta(minutes=11))
+
 
 class First5Test(unittest.TestCase):
     def _mins(self, d, pxs, start=time(9, 30)):

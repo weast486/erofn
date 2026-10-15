@@ -32,6 +32,11 @@ log = logging.getLogger("tossbot")
 
 
 def setup_logging(cfg: Config, verbose: bool) -> None:
+    try:  # 창을 클릭해도 봇이 멈추지 않게 (winconsole.py)
+        from winconsole import disable_quick_edit
+        disable_quick_edit()
+    except Exception:  # noqa: BLE001
+        pass
     Path(cfg.log_dir).mkdir(parents=True, exist_ok=True)
     fmt = logging.Formatter("%(asctime)s %(levelname)s %(name)s | %(message)s")
     root = logging.getLogger()

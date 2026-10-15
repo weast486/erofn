@@ -46,6 +46,7 @@ class BotConfig:
     top_n: int = 10               # 전날 정규장 거래대금 상위 N
     extra_symbols: str = ""       # 순위와 상관없이 늘 넣을 종목 (예 BTCUSDT,ETHUSDT — 백테스트 안 됨)
     exclude: str = "SOXSUSDT,SQQQUSDT,SKDDUSDT"  # 순위에서 뺄 종목: 롱 짝(SOXL·TQQQ·SKUU)이 있는 인버스 ETF
+    max_stop_pct: float = 5.0     # 진입가~손절선 거리가 이 % 를 넘는 신호는 건너뜀 (0 = 제한 없음)
     target_r: float = 2.0         # 익절 = 손절 거리 x R (0 = 익절 없음)
     exit_minutes: int = 350       # 9:30 부터 N분 뒤 정리 (350 = 15:20)
     side: str = "both"            # both / long / short
@@ -78,6 +79,7 @@ class BotConfig:
             top_n=f("BN_TOP_N", "top_n", int),
             extra_symbols=_get("BN_EXTRA_SYMBOLS", cls.extra_symbols),
             exclude=os.environ.get("BN_EXCLUDE", cls.exclude),
+            max_stop_pct=f("BN_MAX_STOP_PCT", "max_stop_pct"),
             target_r=f("BN_TARGET_R", "target_r"),
             exit_minutes=f("BN_EXIT_MINUTES", "exit_minutes", int),
             side=_get("BN_SIDE", cls.side),
@@ -98,7 +100,8 @@ class BotConfig:
     def describe(self) -> str:
         extra = f" + {self.extra_symbols}" if self.extra_symbols else ""
         return (f"전날 거래대금 상위 {self.top_n}{extra}, 첫 5분봉 + 1분봉 FVG({self.entry}) {self.side}, "
-                f"손절 첫 봉 반대편 / 익절 {self.target_r:g}R / 9:30+{self.exit_minutes}분 정리, "
+                f"손절 첫 봉 반대편{f'(거리 {self.max_stop_pct:g}% 이하만)' if self.max_stop_pct > 0 else ''}"
+                f" / 익절 {self.target_r:g}R / 9:30+{self.exit_minutes}분 정리, "
                 f"종목당 평가금액 x {self.leverage:g}배, 하루 최대 {self.max_trades}종목"
                 + (f" + 종가 매매(장중 -{self.on_drop:g}%↓·저가 근처 마감 {self.on_max}종목 x {self.on_leverage:g}배, "
                    f"손절 -{self.on_stop:g}%, 다음 거래일 9:30 정리)" if self.on_enabled else "")
@@ -319,6 +322,10 @@ class FvgTrader:
                         st.signals[sym] = [sig[0], sig[1], sig[2].strftime("%H:%M")]
                         log.info("%s FVG %s (%s 봉) → %g 에 닿으면 진입, 손절 %g", sym, "롱" if sig[0] == 1 else "숏",
                                  sig[2].strftime("%H:%M"), sig[1], l1 if sig[0] == 1 else h1)
+                        dist = abs(sig[1] - (l1 if sig[0] == 1 else h1)) / sig[1] * 100
+                        if self.cfg.max_stop_pct > 0 and dist > self.cfg.max_stop_pct:
+                            st.dropped.append(sym)
+                            log.info("%s 손절 거리 %.2f%% 가 한도 %g%% 를 넘어 제외", sym, dist, self.cfg.max_stop_pct)
                         self.save(st)
             waiting = slots and any(s not in st.dropped and s not in st.positions for s in st.signals)
             if not waiting and not self.open_positions(st):

@@ -365,6 +365,8 @@ class BreakoutSettings:
     # 트레일링 스탑: 고가가 매수가 대비 trail_start_pct % 에 닿은 다음 날부터 익절 지정가를 없애고
     # 손절가 = 그때까지 최고 고가 x (1 - trail_pct %) (기존 손절가보다 낮으면 기존 손절가). 0 이면 끔
     trail_start_pct: float = 0.0
+    # 0 이상이면 손절가가 직전 entry_days 일 최고 종가(돌파한 선)보다 위일 때 손절가를 그 선 x (1 - N%) 로 내림 (-1 = 끔)
+    stop_under_prev_high: float = -1.0
     trail_pct: float = 0.0
     # False 면 신고가 조건 없이 매수 (급등주 매매: min_change_pct 와 함께 사용)
     require_new_high: bool = True
@@ -595,6 +597,7 @@ def run_breakout(
     last_close: dict[str, float] = {}
     breakeven: set[str] = set()  # 손절가를 본전으로 올린 종목
     trail_peak: dict[str, float] = {}  # 트레일링 스탑이 켜진 종목의 최고 고가
+    stop_override: dict[str, float] = {}  # stop_under_prev_high 로 내린 손절가
     recover: set[str] = set()  # 크게 빠져서 본전 탈출을 기다리는 종목
     closed_wins: list[bool] = []  # 청산 순서대로 수익 여부 (최근 승률 계산용)
     closed_rets: list[float] = []  # 청산 순서대로 수익률 (켈리 비중용)
@@ -611,6 +614,7 @@ def run_breakout(
         del positions[t.symbol]
         breakeven.discard(t.symbol)
         trail_peak.pop(t.symbol, None)
+        stop_override.pop(t.symbol, None)
         recover.discard(t.symbol)
 
     for day in calendar:
@@ -623,6 +627,8 @@ def run_breakout(
                 continue
             bar = ser.bars[i]
             stop = round_down_to_tick(t.entry_price * (1 - b.stop_loss_pct / 100)) if b.stop_loss_pct > 0 else None
+            if stop and sym in stop_override:
+                stop = stop_override[sym]
             tp = round_up_to_tick(t.entry_price * (1 + b.take_profit_pct / 100)) if b.take_profit_pct > 0 else None
             nd = b.next_day_exit if t.hold_days == 1 else ""
             no_gap = nd == "open_if_no_gap" and i > 0 and bar.open <= ser.bars[i - 1].close  # 매수일 종가 이하 출발
@@ -869,6 +875,11 @@ def run_breakout(
                 t = Trade(sym, series[sym].name, day, price, qty, surge_date=sig_day)
                 positions[sym] = t
                 trades.append(t)
+                if b.stop_under_prev_high >= 0 and b.stop_loss_pct > 0:
+                    si = series[sym].index[sig_day]
+                    line = max(x.close for x in series[sym].bars[max(si - b.entry_days, 0):si])
+                    if round_down_to_tick(price * (1 - b.stop_loss_pct / 100)) > line:
+                        stop_override[sym] = round_down_to_tick(line * (1 - b.stop_under_prev_high / 100))
                 if at_open:  # 시가 매수 → 당일 남은 장중에 손절·익절 (둘 다 닿으면 손절로 가정)
                     stop = round_down_to_tick(price * (1 - b.stop_loss_pct / 100)) if b.stop_loss_pct > 0 else None
                     tp = round_up_to_tick(price * (1 + b.take_profit_pct / 100)) if b.take_profit_pct > 0 else None
@@ -4467,6 +4478,8 @@ def main(argv: list[str] | None = None) -> None:
     r.add_argument("--reduced-slots", type=int, default=8, help="breakout: 승률 저하 시 최대 보유 종목 수")
     r.add_argument("--continuous", action="store_true",
                    help="연도마다 새로 시작하지 않고 첫 해 1월 1일부터 끝까지 한 번에 (복리 확인용)")
+    r.add_argument("--stop-under-prev-high", type=float, default=-1,
+                   help="breakout: 손절가가 직전 N일 최고 종가보다 위면 손절가를 그 값 x (1 - X%%) 로 (-1 = 끔)")
     r.add_argument("--trail-start", type=float, default=0,
                    help="breakout: 고가가 매수가 대비 N%% 닿은 다음 날부터 익절 없이 트레일링 스탑 (0 = 없음)")
     r.add_argument("--trail-pct", type=float, default=7,
@@ -4873,6 +4886,7 @@ def main(argv: list[str] | None = None) -> None:
                               skip_limit_up=not args.allow_limit_up_signal,
                               breakeven_trigger_pct=args.breakeven_at, breakeven_lock_pct=args.lock_profit,
                               trail_start_pct=args.trail_start, trail_pct=args.trail_pct,
+                              stop_under_prev_high=args.stop_under_prev_high,
                               next_day_exit=args.next_day_exit, ma_exit_days=args.ma_exit,
                               ma_exit_profit_only=args.ma_exit_profit_only, max_buys_per_day=args.max_buys_per_day,
                               min_marcap=args.min_marcap, skip_touched_limit_up=args.skip_touched_limit_up,

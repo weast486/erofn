@@ -11,6 +11,11 @@
     python -m binancebot run          # 오늘 하루 매매
     python -m binancebot loop         # 켜 둔 채 미국 거래일마다 반복
     python -m binancebot update-settings  # .env.binance 를 최신 설정으로 (API 키 유지, .bak 백업)
+
+SOXL 스플릿 매매 봇 (설정 .env.binance_split, 기본 드라이런):
+    python -m binancebot split check   # 설정·현재가·차수 가격 확인 (주문 없음)
+    python -m binancebot split run     # 켜 둔 채 계속 매매
+    python -m binancebot split status  # 장부·보유 차수 보기
 """
 from __future__ import annotations
 
@@ -159,6 +164,9 @@ def main() -> None:
                       ("update-settings", "봇: .env.binance 를 최신 설정으로 (API 키 유지)")]:
         sp = sub.add_parser(name, help=hlp)
         sp.add_argument("--env", default=".env.binance")
+    spl = sub.add_parser("split", help="SOXL 스플릿 매매 봇 (설정 .env.binance_split, 기본 드라이런): check / run / status")
+    spl.add_argument("action", choices=["check", "run", "status"])
+    spl.add_argument("--env", default=".env.binance_split")
     mn = sub.add_parser("manual", help="조건 주문 (테스트 매매만): add / list / cancel / run")
     mn.add_argument("action", choices=["add", "list", "cancel", "run"])
     mn.add_argument("target", nargs="?", help="add: 종목 (예: KORU) / cancel: 주문 번호")
@@ -189,6 +197,10 @@ def main() -> None:
     if a.cmd == "manual":
         from .manualmain import manual_main
         manual_main(a)
+        return
+    if a.cmd == "split":
+        from .splitmain import split_main
+        split_main(a.action, a.env)
         return
     if a.cmd in ("check", "run", "loop", "update-settings"):
         from .botmain import bot_main

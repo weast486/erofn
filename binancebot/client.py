@@ -173,6 +173,9 @@ class BinanceClient:
     def query_order(self, symbol: str, client_order_id: str) -> dict:
         return self._req("GET", "/fapi/v1/order", {"symbol": symbol, "origClientOrderId": client_order_id}, signed=True)
 
+    def cancel_order(self, symbol: str, client_order_id: str) -> dict:
+        return self._req("DELETE", "/fapi/v1/order", {"symbol": symbol, "origClientOrderId": client_order_id}, signed=True)
+
     def cancel_all(self, symbol: str) -> None:
         for path in ("/fapi/v1/allOpenOrders", "/fapi/v1/algoOpenOrders"):
             try:

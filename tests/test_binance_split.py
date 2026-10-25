@@ -124,6 +124,11 @@ class FakeExchange:
         self.orders = {}
         self.stop = None
 
+    def cancel_order(self, symbol, cid):
+        if cid not in self.orders:
+            raise BinanceError(400, -2011, "Unknown order sent.")
+        self.done[cid] = dict(self.orders.pop(cid), status="CANCELED")
+
     def stop_market(self, symbol, side, stop):
         self.stop = stop
         return "algo"
@@ -207,7 +212,21 @@ class SplitTest(unittest.TestCase):
         self.assertEqual(st.tps, 3)
         self.assertIsNotNone(st.waiting_high)                 # 다 팔고 재진입 대기
         self.assertAlmostEqual(ex.pos, 0.0, places=6)
-        self.assertEqual(ex.orders, {})                       # 걸린 주문 모두 정리
+        self.assertTrue(all("entry" in cid for cid in ex.orders))   # 남은 주문은 재진입 지정가뿐
+        self.assertEqual(st.paused, "")
+
+    def test_live_reentry_by_limit_order(self):
+        # 다 익절 → 고점 103 → 105 로 올라 재진입 지정가 100.94 취소 → 102.90 에 다시 걸고 102.5 에서 체결
+        seq = [100, 99.5, 98.5, 97.9, 96.5, 95.9, 97, 98.3, 99, 100.3, 101, 102.2, 103, 103, 105, 104, 102.5, 102.5]
+        tr, ex = run(seq, dry=False)
+        st = tr.st
+        self.assertEqual(st.cycle, 2)
+        self.assertAlmostEqual(st.start_price, 102.9)
+        self.assertEqual(sum(1 for e in ex.log if e[0] == "BUY" and e[1] == "MARKET"), 1)   # 첫 진입만 시장가
+        self.assertTrue(any("entry" in cid and o["status"] == "CANCELED" for cid, o in ex.done.items()))
+        held = sum(h["qty"] for h in st.held if h)
+        self.assertAlmostEqual(ex.pos, held, places=6)
+        self.assertIsNotNone(ex.stop)
         self.assertEqual(st.paused, "")
 
     def test_live_lagging_open_orders_no_double_buy(self):

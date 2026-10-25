@@ -48,6 +48,7 @@ class SplitConfig:
     stop_steps: float = 2.0       # 손절 = 마지막 차수 - 간격 x 이 값
     tp_extra_pct: float = 0.1     # 익절 = 매수가 + 간격 + 매수가 x 이 %
     reentry_drop_pct: float = 2.0  # 전 차수 익절 뒤 고점에서 이 % 내려오면 재진입 (0 = 기다리지 않고 바로 재진입)
+    reentry_limit: bool = True    # 재진입 1차를 시장가 대신 미리 거는 Post Only 지정가로 (2026-10-25 사용자 요청)
     first_tp_steps: float = 1.0   # 1차만 익절 = 매수가 + 간격 x 이 값 + 0.1% (나머지 차수는 1간격)
     exchange_leverage: int = 5    # 바이낸스 레버리지 설정값 (격리 마진 증거금용)
     margin_type: str = "ISOLATED"
@@ -75,6 +76,7 @@ class SplitConfig:
             stop_steps=f("SP_STOP_STEPS", "stop_steps"),
             tp_extra_pct=f("SP_TP_EXTRA_PCT", "tp_extra_pct"),
             reentry_drop_pct=f("SP_REENTRY_DROP", "reentry_drop_pct"),
+            reentry_limit=_bool(os.environ.get("SP_REENTRY_LIMIT"), True),
             first_tp_steps=f("SP_FIRST_TP_STEPS", "first_tp_steps"),
             exchange_leverage=f("SP_EXCHANGE_LEVERAGE", "exchange_leverage", int),
             margin_type=_get("SP_MARGIN_TYPE", cls.margin_type).upper(),
@@ -87,6 +89,8 @@ class SplitConfig:
         first = f" (1차는 +{self.first_tp_steps:g}간격)" if self.first_tp_steps != 1 else ""
         re = (f"전 차수 익절 뒤 고점 -{self.reentry_drop_pct:g}% 재진입" if self.reentry_drop_pct > 0
               else "전 차수 익절 뒤 바로 재진입")
+        if self.reentry_drop_pct > 0 and self.reentry_limit:
+            re += "(지정가)"
         return (f"{self.symbol} 박스 {self.box_pct:g}% {self.splits}분할 x {self.leverage:g}배, "
                 f"익절 +1간격+{self.tp_extra_pct:g}%{first}, 손절 마지막 차수 -{self.stop_steps:g}간격, "
                 f"{re}, 시작 금액 {self.capital:g} USDT 복리 "
@@ -197,16 +201,19 @@ class SplitTrader:
         return float(self.c.prices()[self.cfg.symbol])
 
     # ------------------------------------------------------------ 사이클
-    def start_cycle(self, price: float) -> bool:
-        """새 사이클: 간격·차수당 금액을 정하고 1차를 산다. 돈이 모자라면 False."""
+    def entry_notional(self) -> float | None:
+        """새 사이클의 차수당 금액 = 장부 / N x 배율. 최소 주문 금액 아래면 멈추고 None."""
         st, cfg = self.st, self.cfg
         notional = st.stake / cfg.splits * cfg.leverage
         if notional < self.f["min_notional"] * 1.05 or st.stake <= 0:
             st.ended = f"차수당 금액 {notional:.2f} USDT 가 최소 주문 금액({self.f['min_notional']:g}) 아래 → 멈춤"
             log.warning(st.ended)
             self.save()
-            return False
-        before = (st.cycle, st.start_price, st.step, st.notional, st.waiting_high)
+            return None
+        return notional
+
+    def open_cycle(self, price: float, notional: float) -> None:
+        st, cfg = self.st, self.cfg
         st.cycle += 1
         st.start_price = round_tick(price, self.f["tick"])
         st.step = st.start_price * cfg.box_pct / 100 / cfg.splits
@@ -214,15 +221,28 @@ class SplitTrader:
         st.held = [None] * cfg.splits
         st.waiting_high = None
         st.stop_placed = False
+
+    def log_cycle(self) -> None:
+        st, cfg = self.st, self.cfg
+        log.info("사이클 %d 시작: 1차 %.4f, 간격 %.4f, %d차 %.4f, 손절 %.4f, 차수당 %.2f USDT (장부 %.2f)",
+                 st.cycle, st.held[0]["price"], st.step, cfg.splits, st.levels(cfg.splits)[-1], self.stop_price(),
+                 st.notional, st.stake)
+
+    def start_cycle(self, price: float) -> bool:
+        """새 사이클: 간격·차수당 금액을 정하고 1차를 산다. 돈이 모자라면 False."""
+        st = self.st
+        notional = self.entry_notional()
+        if notional is None:
+            return False
+        before = (st.cycle, st.start_price, st.step, st.notional, st.waiting_high)
+        self.open_cycle(price, notional)
         if not self.buy_now(0, price, "entry"):  # 주문 오류 → 되돌리고 다음 확인 때 다시
             st.cycle, st.start_price, st.step, st.notional, st.waiting_high = before
             st.pending_entry = True
             self.save()
             return False
         st.pending_entry = False
-        log.info("사이클 %d 시작: 1차 %.4f, 간격 %.4f, %d차 %.4f, 손절 %.4f, 차수당 %.2f USDT (장부 %.2f)",
-                 st.cycle, st.held[0]["price"], st.step, cfg.splits, st.levels(cfg.splits)[-1], self.stop_price(),
-                 notional, st.stake)
+        self.log_cycle()
         self.save()
         return True
 
@@ -337,6 +357,9 @@ class SplitTrader:
             except BinanceError as exc:
                 log.warning("주문 조회 실패 %s: %s", cid, exc)
                 continue
+            if o["kind"] == "entry":
+                self.settle_entry(cid, r, place_stop=False)
+                continue
             done = float(r.get("executedQty") or 0)
             if done > 0:
                 px = float(r.get("avgPrice") or 0) or o["price"]
@@ -386,6 +409,9 @@ class SplitTrader:
             # (2026-10-24 실전: 목록에 아직 없던 8차 매수를 사라진 것으로 보고 한 번 더 내서 0.11개가 두 번 사짐)
             if r.get("status") not in FINAL:
                 continue
+            if o["kind"] == "entry":
+                self.settle_entry(cid, r)
+                continue
             done = float(r.get("executedQty") or 0)
             px = float(r.get("avgPrice") or 0) or o["price"]
             if done > 0:
@@ -394,6 +420,64 @@ class SplitTrader:
                 else:
                     self.apply_sell(o["k"], px, done, True)
             del self.st.orders[cid]
+
+    def reentry_limit(self, p: float) -> None:
+        """전 차수 익절 뒤 재진입 1차를 '고점 -N%' 가격에 미리 거는 Post Only 지정가로 (2026-10-25 사용자 요청).
+        고점이 올라 재진입 가격이 0.1% 넘게 올라가면 취소하고 새 가격에 다시 건다. 가격이 이미 지나쳤으면 시장가."""
+        st, tick = self.st, self.f["tick"]
+        trig = round_tick(st.waiting_high * (1 - self.cfg.reentry_drop_pct / 100), tick)
+        cid = self.order_for("entry", 0)
+        if cid:
+            o = st.orders[cid]
+            if p <= o["price"] * 1.0005 or trig - o["price"] < max(tick, o["price"] * 0.001):
+                return  # 체결을 기다림
+            self.cancel_entry(cid)
+            if st.waiting_high is None:  # 취소 직전에 체결돼서 사이클이 시작됨
+                return
+        if p <= trig * (1 - 0.0005):
+            if self.start_cycle(p):
+                self.place_stop()
+            return
+        if trig < p * (1 - (self.f["pct_down"] or 0.05) * 0.9):
+            return  # 지정가 허용 범위 밖 → 가까워지면 건다
+        notional = self.entry_notional()
+        if notional is None:
+            return
+        qty = round_step(notional / trig, self.f["step"])
+        new = self.cid("entry", 0)
+        try:
+            self.c.order(symbol=self.cfg.symbol, side="BUY", type="LIMIT", timeInForce="GTX", price=fmt(trig),
+                         quantity=fmt(qty), newClientOrderId=new)
+        except BinanceError as exc:
+            log.info("재진입 1차 지정가 %.4f 못 걸음: %s", trig, exc)
+            return
+        st.orders[new] = {"kind": "entry", "k": 0, "price": trig, "qty": qty, "notional": notional}
+        log.info("재진입 1차 지정가 %.4f x %g 걸어 둠 (고점 %.4f)", trig, qty, st.waiting_high)
+
+    def cancel_entry(self, cid: str) -> None:
+        try:
+            self.c.cancel_order(self.cfg.symbol, cid)
+        except BinanceError as exc:
+            log.info("재진입 지정가 취소 응답: %s", exc)
+        try:
+            r = self.c.query_order(self.cfg.symbol, cid)
+        except BinanceError as exc:
+            log.warning("주문 조회 실패 %s: %s", cid, exc)
+            return
+        if r.get("status") in FINAL:
+            self.settle_entry(cid, r)
+
+    def settle_entry(self, cid: str, r: dict, place_stop: bool = True) -> None:
+        """끝난 재진입 지정가: 체결분이 있으면 그 주문 가격을 1차로 새 사이클 시작."""
+        o = self.st.orders.pop(cid, None)
+        done = float(r.get("executedQty") or 0)
+        if not o or done <= 0:
+            return
+        self.open_cycle(o["price"], o["notional"])
+        self.apply_buy(0, float(r.get("avgPrice") or 0) or o["price"], done, True)
+        self.log_cycle()
+        if place_stop:
+            self.place_stop()
 
     def order_for(self, kind: str, k: int):
         for cid, o in self.st.orders.items():
@@ -416,8 +500,8 @@ class SplitTrader:
 
     def check_position(self) -> None:
         """30초마다 거래소 포지션 수량 = 장부 보유 수량인지 확인. 다르면 새 주문을 멈춤."""
-        if _time.monotonic() - self.last_check < 30:
-            return
+        if _time.monotonic() - self.last_check < 30 or self.order_for("entry", 0):
+            return  # 재진입 지정가가 걸려 있는 동안은 부분 체결이 있을 수 있어 건너뜀
         self.last_check = _time.monotonic()
         amt, _ = self.c.position_amt(self.cfg.symbol)
         mine = self.held_qty()
@@ -446,7 +530,9 @@ class SplitTrader:
             return
         if st.waiting_high is not None:
             st.waiting_high = max(st.waiting_high, p)
-            if p <= st.waiting_high * (1 - cfg.reentry_drop_pct / 100):
+            if cfg.reentry_limit:
+                self.reentry_limit(p)
+            elif p <= st.waiting_high * (1 - cfg.reentry_drop_pct / 100):
                 if self.start_cycle(p):
                     self.place_stop()
             return
@@ -565,6 +651,9 @@ class SplitTrader:
             lines.append(f"새 주문 멈춤: {st.paused}")
         if st.waiting_high is not None:
             lines.append(f"재진입 대기: 고점 {st.waiting_high:.4f} → {st.waiting_high * (1 - self.cfg.reentry_drop_pct / 100):.4f} 에서 1차")
+            for o in st.orders.values():
+                if o["kind"] == "entry":
+                    lines.append(f"재진입 1차 지정가 {o['price']:.4f} x {o['qty']:g} 걸려 있음")
         elif st.cycle:
             lv = st.levels(n)
             held = [f"{k + 1}차 {h['price']:.2f}" for k, h in enumerate(st.held) if h]

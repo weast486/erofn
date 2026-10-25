@@ -32,6 +32,7 @@ from tossbot.config import _bool, _get
 from .client import BinanceClient, BinanceError, filters_of, fmt, round_step, round_tick
 
 log = logging.getLogger("binancebot")
+FINAL = ("FILLED", "CANCELED", "EXPIRED", "REJECTED", "EXPIRED_IN_MATCH")
 
 
 @dataclass
@@ -125,6 +126,7 @@ class SplitTrader:
         self.st = self.load()
         self.f = {"tick": 0.0, "step": 0.0, "min_notional": 5.0, "pct_up": 0.0, "pct_down": 0.0}
         self.last_check = 0.0
+        self.last_price = 0.0
 
     # ------------------------------------------------------------ 장부
     def load(self) -> SplitState:
@@ -184,8 +186,12 @@ class SplitTrader:
             self.c.sync_time()
             if self.c.hedge_mode():
                 raise RuntimeError("바이낸스 선물이 양방향(Hedge) 포지션 모드예요. 단방향(One-way)으로 바꿔 주세요")
-            self.c.set_margin_type(self.cfg.symbol, self.cfg.margin_type)
-            self.c.set_leverage(self.cfg.symbol, max(1, self.cfg.exchange_leverage))
+            # 주문·포지션이 남아 있으면 바이낸스가 마진 방식·레버리지 변경을 거절함(-4067 등) → 이미 정해진 값으로 계속
+            for fn, arg in ((self.c.set_margin_type, self.cfg.margin_type), (self.c.set_leverage, max(1, self.cfg.exchange_leverage))):
+                try:
+                    fn(self.cfg.symbol, arg)
+                except BinanceError as exc:
+                    log.info("마진·레버리지 설정을 바꾸지 못함 (기존 값으로 계속): %s", exc)
 
     def price(self) -> float:
         return float(self.c.prices()[self.cfg.symbol])
@@ -258,6 +264,7 @@ class SplitTrader:
         if self.st.ended:
             return
         p = self.price()
+        self.last_price = p
         if self.cfg.dry_run:
             self.tick_dry(p)
         else:
@@ -306,7 +313,7 @@ class SplitTrader:
             if amt > 0:
                 r = self.c.order(symbol=self.cfg.symbol, side="SELL", type="MARKET", quantity=fmt(round_step(amt, self.f["step"])),
                                  reduceOnly="true", newClientOrderId=self.cid("stop", 0), newOrderRespType="RESULT")
-                px = float(r.get("avgPrice") or 0) or p
+                px = self.fill_avg(r, p)
             else:  # 거래소 손절이 먼저 체결됨 → 손절가로 기록 (실제 체결가는 trades 내역에서 확인)
                 px = stop_px
         for k in range(self.cfg.splits):
@@ -343,7 +350,7 @@ class SplitTrader:
         if self.cfg.dry_run:
             self.apply_buy(k, round_tick(price, self.f["tick"]), qty, False)
             return True
-        limit = round_tick(price, self.f["tick"])
+        limit = self.band_price("BUY", price, self.last_price or price)
         params = dict(symbol=self.cfg.symbol, side="BUY", quantity=fmt(qty), newClientOrderId=self.cid(kind, k),
                       newOrderRespType="RESULT")
         if kind == "entry":
@@ -357,7 +364,7 @@ class SplitTrader:
             return False
         done = float(r.get("executedQty") or 0)
         if done > 0:
-            self.apply_buy(k, float(r.get("avgPrice") or 0) or limit, done, False)
+            self.apply_buy(k, self.fill_avg(r, limit), done, False)
             return True
         log.info("%d차 매수가 체결되지 않음 (%.4f)", k + 1, limit)
         return kind != "entry"
@@ -374,6 +381,10 @@ class SplitTrader:
                 r = self.c.query_order(self.cfg.symbol, cid)
             except BinanceError as exc:
                 log.warning("주문 조회 실패 %s: %s", cid, exc)
+                continue
+            # 방금 낸 주문은 미체결 목록에 늦게 보일 수 있음 → 끝난 주문(체결·취소·만료)만 정리
+            # (2026-10-24 실전: 목록에 아직 없던 8차 매수를 사라진 것으로 보고 한 번 더 내서 0.11개가 두 번 사짐)
+            if r.get("status") not in FINAL:
                 continue
             done = float(r.get("executedQty") or 0)
             px = float(r.get("avgPrice") or 0) or o["price"]
@@ -479,8 +490,34 @@ class SplitTrader:
                 elif level >= p * (1 - down):
                     self.place_limit("buy", k, level, self.qty_for(level))
 
+    def fill_avg(self, r: dict, fallback: float) -> float:
+        """시장가·IOC 주문의 실제 평균 체결가: 체결 내역(userTrades)에서, 없으면 응답 avgPrice, 그것도 없으면 주문가.
+        (2026-10-25 실전: IOC 응답으로는 82.71 이 기록됐지만 실제 체결은 85.00)"""
+        oid = r.get("orderId")
+        fn = getattr(self.c, "fills", None)
+        if oid and fn:
+            try:
+                rows = [t for t in fn(self.cfg.symbol, order_id=oid) if str(t.get("orderId")) == str(oid)]
+                q = sum(float(t["qty"]) for t in rows)
+                if q > 0:
+                    return sum(float(t["price"]) * float(t["qty"]) for t in rows) / q
+            except BinanceError as exc:
+                log.info("체결 내역 조회 실패 (%s), 응답 가격으로 기록", exc)
+        avg = float(r.get("avgPrice") or 0)
+        return avg if avg > 0 else fallback
+
+    def band_price(self, side: str, price: float, p: float) -> float:
+        """지정가 허용 범위(현재가 ±%) 안으로 당김. 이미 지나친 익절·매수를 IOC 로 받을 때 범위 밖이면 거절되기 때문
+        (2026-10-25 실전: 81.78 익절 IOC 가 '82.47 보다 낮을 수 없음'(-4024)으로 거절)."""
+        if side == "SELL":
+            lo = p * (1 - (self.f["pct_down"] or 0.05) * 0.9)
+            return round_tick(max(price, lo), self.f["tick"])
+        hi = p * (1 + (self.f["pct_up"] or 0.05) * 0.9)
+        return round_tick(min(price, hi), self.f["tick"])
+
     def sell_ioc(self, k: int, price: float) -> None:
         h = self.st.held[k]
+        price = self.band_price("SELL", price, self.last_price or price)
         try:
             r = self.c.order(symbol=self.cfg.symbol, side="SELL", type="LIMIT", timeInForce="IOC", price=fmt(price),
                              quantity=fmt(round_step(h["qty"], self.f["step"])), reduceOnly="true",
@@ -490,7 +527,7 @@ class SplitTrader:
             return
         done = float(r.get("executedQty") or 0)
         if done > 0:
-            self.apply_sell(k, float(r.get("avgPrice") or price), done, False)
+            self.apply_sell(k, self.fill_avg(r, price), done, False)
 
     def place_stop(self) -> None:
         """거래소 손절(STOP_MARKET 전량)을 사이클 시작 때 걸어 둠. 실패하면 봇이 가격을 보고 직접 손절."""

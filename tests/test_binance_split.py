@@ -24,6 +24,8 @@ class FakeExchange:
         self.done = {}        # cid -> 끝난 주문
         self.stop = None
         self.log = []
+        self.trades = []
+        self.next_id = 0
 
     # 시세
     def exchange_info(self):
@@ -50,6 +52,7 @@ class FakeExchange:
     def _fill(self, o, px):
         o["executedQty"] = o["origQty"]
         o["avgPrice"] = px
+        self.trades.append({"orderId": o["orderId"], "price": px, "qty": o["origQty"]})
         self.pos += o["origQty"] if o["side"] == "BUY" else -o["origQty"]
         self.log.append((o["side"], o.get("type"), px, o["origQty"]))
 
@@ -61,7 +64,8 @@ class FakeExchange:
         return False
 
     def set_margin_type(self, *a):
-        pass
+        if self.orders or self.pos:
+            raise BinanceError(400, -4067, "Position side cannot be changed if there exists open orders.")
 
     def set_leverage(self, *a):
         pass
@@ -74,8 +78,9 @@ class FakeExchange:
 
     def order(self, **q):
         qty = float(q["quantity"])
+        self.next_id += 1
         o = {"side": q["side"], "type": q["type"], "origQty": qty, "executedQty": 0.0, "avgPrice": 0.0,
-             "clientOrderId": q["newClientOrderId"]}
+             "clientOrderId": q["newClientOrderId"], "orderId": self.next_id}
         if q["type"] == "MARKET":
             if q.get("reduceOnly"):
                 qty = min(qty, self.pos)
@@ -83,6 +88,8 @@ class FakeExchange:
             self._fill(o, self.p)
             return o
         price = float(q["price"])
+        if not self.p * 0.95 <= price <= self.p * 1.05:   # 지정가 허용 범위 ±5%
+            raise BinanceError(400, -4024, "Limit price out of range")
         o["price"] = price
         crosses = self.p <= price if q["side"] == "BUY" else self.p >= price
         if q["timeInForce"] == "GTX":
@@ -93,11 +100,18 @@ class FakeExchange:
         if q["timeInForce"] == "IOC":
             if crosses:
                 self._fill(o, self.p)
+                o = dict(o, avgPrice=price)   # 실제 바이낸스처럼 응답 가격이 실제 체결가와 다를 수 있음
             return o
         raise AssertionError(q)
 
+    def fills(self, symbol, start_ms=None, order_id=None):
+        return [t for t in self.trades if order_id is None or t["orderId"] == order_id]
+
     def open_orders(self, symbol):
-        return [dict(o) for o in self.orders.values()]
+        # lag=True: 방금 낸 주문이 한 번은 미체결 목록에 안 보임 (실제 바이낸스에서 겪은 지연)
+        out = [dict(o) for cid, o in self.orders.items() if not (getattr(self, "lag", False) and cid not in self.seen)]
+        self.seen = getattr(self, "seen", set()) | set(self.orders)
+        return out
 
     def query_order(self, symbol, cid):
         if cid in self.orders:
@@ -195,6 +209,41 @@ class SplitTest(unittest.TestCase):
         self.assertAlmostEqual(ex.pos, 0.0, places=6)
         self.assertEqual(ex.orders, {})                       # 걸린 주문 모두 정리
         self.assertEqual(st.paused, "")
+
+    def test_live_lagging_open_orders_no_double_buy(self):
+        seq = [100, 99.5, 99.4, 99.3, 98.5, 97.9, 97.5, 96.5, 95.9, 95.5, 97, 98.3, 99, 100.3, 101, 102.2, 103]
+        ex = FakeExchange(seq)
+        ex.lag = True
+        ex.seen = set()
+        tr = SplitTrader(ex, cfg(False), sleep_fn=lambda s: None)
+        tr.last_check = -1e9
+        tr.run(max_ticks=len(seq))
+        buys = [e for e in ex.log if e[0] == "BUY" and e[1] == "LIMIT"]
+        self.assertEqual(len(buys), 2)                 # 2·3차 한 번씩만
+        self.assertAlmostEqual(ex.pos, 0.0, places=6)
+        self.assertEqual(tr.st.paused, "")
+
+    def test_live_restart_with_open_orders(self):
+        seq = [100, 99.5, 99.0, 99.2]
+        tr, ex = run(seq, dry=False)
+        self.assertTrue(ex.orders)
+        tr2 = SplitTrader(ex, tr.cfg, sleep_fn=lambda s: None)   # 주문이 걸린 채 다시 켜도 멈추지 않음
+        tr2.run(max_ticks=2)
+        self.assertEqual(tr2.st.cycle, 1)
+
+    def test_live_far_passed_tp_sells_within_band(self):
+        ex = FakeExchange([100, 100, 100])
+        tr = SplitTrader(ex, cfg(False), sleep_fn=lambda s: None)
+        tr.prepare()
+        tr.tick()                                   # 1차 100 매수
+        ex.pos += 0.11
+        tr.st.held[3] = {"price": 80.0, "qty": 0.11}  # 익절가 82.08 이 현재가보다 훨씬 아래인 차수
+        tr.last_check = -1e9
+        tr.tick()
+        self.assertIsNone(tr.st.held[3])            # 범위 안 가격(95.5) IOC 로 팔림
+        rows = (Path(tr.cfg.state_dir) / "trades.csv").read_text(encoding="utf-8").splitlines()
+        self.assertIn(",tp,4,100.0000,", rows[-1])  # 장부에는 실제 체결가(100)로
+        self.assertAlmostEqual(ex.pos, tr.st.held[0]["qty"], places=6)
 
     def test_live_exchange_stop_fires_first(self):
         seq = [100, 98, 96, 94, 92, 90.5, 87.9, 87.9, 87.5]

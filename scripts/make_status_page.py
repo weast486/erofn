@@ -188,15 +188,22 @@ def toss_section(links: bool = False, sell: bool = False) -> tuple[str, str, dic
         f'<th class="num">현재가</th><th class="num">수익률</th><th class="num">평가손익</th><th class="num">보유</th>'
         f'<th>손절 ↔ 익절</th>{"<th>즉시 매도</th>" if sell else ""}</tr></thead>'
         f'<tbody>{"".join(rows) or empty_row(10 if sell else 9, "보유 종목 없음")}</tbody></table></div>'
-        f'<h3>끝난 거래</h3><div class="scroll"><table><thead><tr><th>종목</th><th>구분</th><th class="num">수량</th>'
-        f'<th class="num">매수가</th><th class="num">매도가</th><th class="num">수익률</th><th class="num">손익</th>'
-        f'<th>사유</th><th class="num">매도 시각</th></tr></thead><tbody>{"".join(hist_rows) or empty_row(9, "아직 끝난 거래 없음")}</tbody></table></div>')
+        + fold("toss-hist", "끝난 거래", f"{len(history)}건 · 실현 {signed(realized)}원",
+               f'<div class="scroll"><table><thead><tr><th>종목</th><th>구분</th><th class="num">수량</th>'
+               f'<th class="num">매수가</th><th class="num">매도가</th><th class="num">수익률</th><th class="num">손익</th>'
+               f'<th>사유</th><th class="num">매도 시각</th></tr></thead><tbody>{"".join(hist_rows) or empty_row(9, "아직 끝난 거래 없음")}</tbody></table></div>'))
     return bot_block("toss", "토스 스윙 봇", "국내 주식 · 20일 신고가 + RSI 평균회귀 · 15:10 종가 매수",
                      live, summary, body), ("실전" if live else "드라이런"), acct
 
 
 def empty_row(cols: int, text: str) -> str:
     return f'<tr><td colspan="{cols}" class="empty">{esc(text)}</td></tr>'
+
+
+def fold(key: str, title: str, info: str, inner: str) -> str:
+    """끝난 거래 표를 접었다 펴는 칸 (기본 접힘, 펼친 상태는 브라우저가 기억 — build 끝의 스크립트)."""
+    return (f'<details class="fold" data-fold="{esc(key)}"><summary><h3>{esc(title)}</h3>'
+            f'<span>{esc(info)}</span></summary>{inner}</details>')
 
 
 # ------------------------------------------------------------------ 키움
@@ -287,14 +294,16 @@ def kiwoom_section(links: bool = False) -> tuple[str, str, dict]:
         + (f'<p class="note">봇 창: {esc(waiting)}</p>' if waiting else "")
         + f'<h3>{esc(day_txt)} 대상 종목</h3><div class="scroll"><table><thead><tr><th>종목</th><th class="num">전일 상승률</th>'
           f'<th class="num">전일 종가</th><th>결과</th></tr></thead><tbody>{"".join(cand_rows) or empty_row(4, "대상 종목 없음")}</tbody></table></div>'
-        + f'<h3>단타 거래 내역</h3><div class="scroll"><table><thead><tr><th class="num">날짜</th><th>종목</th><th class="num">수량</th>'
-          f'<th class="num">매수가</th><th class="num">매도가</th><th class="num">수익률</th><th class="num">손익</th><th>상태</th></tr></thead>'
-          f'<tbody>{"".join(trade_rows) or empty_row(8, "아직 거래 없음")}</tbody></table></div>'
-        + f'<h3>ETF 오버나이트 내역</h3><p class="note">장 마감 동시호가에 사서 다음 거래일 장 시작 동시호가에 팝니다. '
-          f'매수가는 계좌의 평균 매입가(없으면 그날 종가), 매도가는 매도일 시가입니다.</p>'
-          f'<div class="scroll"><table><thead><tr><th class="num">매수일</th><th class="num">매도일</th><th>종목</th><th class="num">수량</th>'
-          f'<th class="num">매수가</th><th class="num">매도가</th><th class="num">수익률</th><th class="num">손익</th><th>상태</th></tr></thead>'
-          f'<tbody>{"".join(etf_rows) or empty_row(9, "아직 거래 없음")}</tbody></table></div>')
+        + fold("kiwoom-day", "단타 거래 내역", f"{n_trades}건 · {signed(total_pnl)}원",
+               f'<div class="scroll"><table><thead><tr><th class="num">날짜</th><th>종목</th><th class="num">수량</th>'
+               f'<th class="num">매수가</th><th class="num">매도가</th><th class="num">수익률</th><th class="num">손익</th><th>상태</th></tr></thead>'
+               f'<tbody>{"".join(trade_rows) or empty_row(8, "아직 거래 없음")}</tbody></table></div>')
+        + fold("kiwoom-etf", "ETF 오버나이트 내역", f"끝난 거래 {n_etf}건 · {signed(etf_pnl)}원",
+               f'<p class="note">장 마감 동시호가에 사서 다음 거래일 장 시작 동시호가에 팝니다. '
+               f'매수가는 계좌의 평균 매입가(없으면 그날 종가), 매도가는 매도일 시가입니다.</p>'
+               f'<div class="scroll"><table><thead><tr><th class="num">매수일</th><th class="num">매도일</th><th>종목</th><th class="num">수량</th>'
+               f'<th class="num">매수가</th><th class="num">매도가</th><th class="num">수익률</th><th class="num">손익</th><th>상태</th></tr></thead>'
+               f'<tbody>{"".join(etf_rows) or empty_row(9, "아직 거래 없음")}</tbody></table></div>'))
     return bot_block("kiwoom", "키움 단타 봇", "국내 주식 · 전일 +20% 종목 종가 재돌파 · 9:05 까지 매수, 12시 정리 + ETF 오버나이트",
                      live, summary, body), ("실전" if live else "드라이런"), acct
 
@@ -398,9 +407,10 @@ def binance_section(links: bool = False) -> tuple[str, str, dict]:
         + f'<h3>보유 포지션</h3><div class="scroll"><table><thead><tr><th>종목</th><th>방향</th><th class="num">수량</th>'
           f'<th class="num">진입가</th><th class="num">손절</th><th class="num">익절</th></tr></thead>'
           f'<tbody>{"".join(open_rows) or empty_row(6, "보유 포지션 없음")}</tbody></table></div>'
-        + f'<h3>거래 내역</h3><div class="scroll"><table><thead><tr><th class="num">날짜</th><th>종목</th><th>방향</th>'
-          f'<th class="num">수량</th><th class="num">진입가</th><th class="num">청산가</th><th class="num">수익률</th>'
-          f'<th class="num">손익</th><th>사유</th></tr></thead><tbody>{"".join(trade_rows) or empty_row(9, "아직 거래 없음")}</tbody></table></div>')
+        + fold("binance-hist", "거래 내역", f"{n}건 · {signed(total, '', 2)} USDT",
+               f'<div class="scroll"><table><thead><tr><th class="num">날짜</th><th>종목</th><th>방향</th>'
+               f'<th class="num">수량</th><th class="num">진입가</th><th class="num">청산가</th><th class="num">수익률</th>'
+               f'<th class="num">손익</th><th>사유</th></tr></thead><tbody>{"".join(trade_rows) or empty_row(9, "아직 거래 없음")}</tbody></table></div>'))
     return bot_block("binance", "바이낸스 봇", "미국 주식 선물 · 낮: 첫 5분봉 + 1분봉 FVG 5배 x 2종목 · 밤: 급락 종목 종가 매수 1배 x 2종목",
                      live, summary, body), ("실전" if live else "드라이런"), acct
 
@@ -455,7 +465,7 @@ def split_section(links: bool = False) -> tuple[str, str, dict]:
     cur = int(st.get("cycle") or 0)
     held = [h for h in (st.get("held") or []) if h]
     waiting = st.get("waiting_high") is not None
-    cyc_rows = []
+    cyc_rows, done_rows, done_pnl = [], [], 0.0
     for c in sorted(cycles, reverse=True):
         cy = cycles[c]
         if cy["stop"]:
@@ -464,13 +474,20 @@ def split_section(links: bool = False) -> tuple[str, str, dict]:
             result = f"진행 중 · {len(held)}차수 보유"
         else:
             result = "전 차수 익절"
-        cyc_rows.append(
+        if not result.startswith("진행"):
+            done_pnl += cy["pnl"]
+        (cyc_rows if result.startswith("진행") else done_rows).append(
             f'<tr><th scope="row">{c}</th><td class="num">{kst(cy["start"])}</td>'
             f'<td class="num">{"-" if result.startswith("진행") else kst(cy["end"])}</td>'
             f'<td class="num">{cy["first"]:.2f}</td><td class="num">{cy["deep"]}차</td>'
             f'<td class="num">{cy["buys"]}</td><td class="num">{cy["tps"]}</td>'
             f'<td class="num {tone(cy["pnl"])}">{signed(cy["pnl"], "", 4)}</td><td>{esc(result)}</td></tr>'
             if cy["first"] is not None else "")
+
+    def table(trs: list[str], empty: str) -> str:
+        return ('<div class="scroll"><table><thead><tr><th>사이클</th><th class="num">시작</th><th class="num">끝</th>'
+                '<th class="num">1차 가격</th><th class="num">가장 깊이</th><th class="num">매수</th><th class="num">익절</th>'
+                f'<th class="num">손익</th><th>결과</th></tr></thead><tbody>{"".join(trs) or empty_row(9, empty)}</tbody></table></div>')
 
     stake = float(st.get("stake") or 0)
     pnl = stake - capital if capital and stake else sum(cy["pnl"] for cy in cycles.values())
@@ -505,10 +522,9 @@ def split_section(links: bool = False) -> tuple[str, str, dict]:
         (f'<p class="note">{esc(mode_line)}</p>' if mode_line else "")
         + f'<h3>사이클별 요약</h3><p class="note">사이클 = 1차를 사서 모든 차수가 익절되거나 손절될 때까지. '
           f'손익은 그 사이클의 익절·손절 손익에서 매수 수수료를 뺀 값입니다. 시각은 한국 시각.</p>'
-          f'<div class="scroll"><table><thead><tr><th>사이클</th><th class="num">시작</th><th class="num">끝</th>'
-          f'<th class="num">1차 가격</th><th class="num">가장 깊이</th><th class="num">매수</th><th class="num">익절</th>'
-          f'<th class="num">손익</th><th>결과</th></tr></thead>'
-          f'<tbody>{"".join(cyc_rows) or empty_row(9, "아직 거래 없음")}</tbody></table></div>')
+        + table(cyc_rows, "진행 중인 사이클 없음 (재진입 대기)")
+        + fold("split-done", "끝난 사이클", f"{len(done_rows)}개 · {signed(done_pnl, '', 4)} USDT",
+               table(done_rows, "아직 끝난 사이클 없음")))
     return bot_block("split", "바이낸스 스플릿 봇", "SOXL 무기한 선물 · 박스 10% 20분할 3배 · 차수마다 1간격 익절 · 전 차수 익절 뒤 고점 -2% 재진입",
                      live, summary, body), ("실전" if live else "드라이런"), acct
 
@@ -597,7 +613,21 @@ tbody th a:focus-visible{outline:2px solid var(--down);outline-offset:2px}
 .sellbtn{font:inherit;font-size:12px;font-weight:600;color:var(--ink);background:transparent;border:1px solid var(--line);border-radius:6px;padding:4px 10px;cursor:pointer;white-space:nowrap}
 .sellbtn:hover{border-color:var(--ink)} .sellbtn:focus-visible{outline:2px solid var(--down);outline-offset:2px}
 .sellbtn[disabled]{opacity:.5;cursor:default}
+.fold{display:flex;flex-direction:column;gap:8px}
+.fold>summary{display:flex;flex-wrap:wrap;align-items:baseline;gap:4px 10px;cursor:pointer;list-style:none;padding:6px 0;border-radius:6px}
+.fold>summary::-webkit-details-marker{display:none}
+.fold>summary::before{content:"▸";color:var(--muted);font-size:12px;transition:transform .15s;display:inline-block}
+.fold[open]>summary::before{transform:rotate(90deg)}
+.fold>summary h3{margin:0;display:inline}
+.fold>summary span{color:var(--muted);font-size:13px;font-family:var(--mono)}
+.fold>summary:hover h3{text-decoration:underline;text-underline-offset:3px}
+.fold>summary:focus-visible{outline:2px solid var(--down);outline-offset:2px}
 """
+
+# 접은·편 상태를 브라우저에 기억 (60초 자동 새로고침 뒤에도 그대로). 저장이 막혀 있으면 그냥 접힌 채로
+FOLD_JS = ('<script>(function(){var k="fold:";document.querySelectorAll("details.fold").forEach(function(d){'
+           'try{if(localStorage.getItem(k+d.dataset.fold)==="1")d.open=true;}catch(e){}'
+           'd.addEventListener("toggle",function(){try{localStorage.setItem(k+d.dataset.fold,d.open?"1":"0");}catch(e){}});});})();</script>')
 
 
 def accounts_table(accts: list[dict]) -> str:
@@ -634,7 +664,7 @@ def build(toolbar: str = "", links: bool = False, sell: bool = False) -> str:
         + '<p class="legend">수익은 <span class="up">빨강</span>, 손실은 <span class="down">파랑</span>으로 표시합니다.</p>'
         + "".join(blocks)
         + '<p class="foot">봇이 PC에 남긴 상태 파일과 로그로 만들었습니다. 증권사 계좌 잔고와는 수수료·세금·체결 시점만큼 다를 수 있습니다.</p>'
-        '</div>\n')
+        '</div>\n' + FOLD_JS + '\n')
 
 
 def main() -> None:

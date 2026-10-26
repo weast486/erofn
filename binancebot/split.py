@@ -26,13 +26,24 @@ import time as _time
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from tossbot.config import _bool, _get
 
 from .client import BinanceClient, BinanceError, filters_of, fmt, round_step, round_tick
 
 log = logging.getLogger("binancebot")
-FINAL = ("FILLED", "CANCELED", "EXPIRED", "REJECTED", "EXPIRED_IN_MATCH")
+ET = ZoneInfo("America/New_York")
+
+
+def us_weekend(now: datetime) -> bool:
+    """미국 정규장이 쉬는 주말: 동부 금 16:00 ~ 월 9:30 (휴장일은 따지지 않음)."""
+    e = now.astimezone(ET)
+    hm = e.hour * 60 + e.minute
+    return e.weekday() in (5, 6) or (e.weekday() == 4 and hm >= 16 * 60) or (e.weekday() == 0 and hm < 9 * 60 + 30)
+
+
+FINAL =("FILLED", "CANCELED", "EXPIRED", "REJECTED", "EXPIRED_IN_MATCH")
 
 
 @dataclass
@@ -49,6 +60,7 @@ class SplitConfig:
     tp_extra_pct: float = 0.1     # 익절 = 매수가 + 간격 + 매수가 x 이 %
     reentry_drop_pct: float = 2.0  # 전 차수 익절 뒤 고점에서 이 % 내려오면 재진입 (0 = 기다리지 않고 바로 재진입)
     reentry_limit: bool = True    # 재진입 1차를 시장가 대신 미리 거는 Post Only 지정가로 (2026-10-25 사용자 요청)
+    weekend_first: bool = True    # 미국 주말(동부 금 16:00 ~ 월 9:30)에는 재진입가 = max(직전 1차 가격, 고점 -N%) (2026-10-26 사용자 요청)
     first_tp_steps: float = 1.0   # 1차만 익절 = 매수가 + 간격 x 이 값 + 0.1% (나머지 차수는 1간격)
     exchange_leverage: int = 5    # 바이낸스 레버리지 설정값 (격리 마진 증거금용)
     margin_type: str = "ISOLATED"
@@ -77,6 +89,7 @@ class SplitConfig:
             tp_extra_pct=f("SP_TP_EXTRA_PCT", "tp_extra_pct"),
             reentry_drop_pct=f("SP_REENTRY_DROP", "reentry_drop_pct"),
             reentry_limit=_bool(os.environ.get("SP_REENTRY_LIMIT"), True),
+            weekend_first=_bool(os.environ.get("SP_WEEKEND_FIRST"), True),
             first_tp_steps=f("SP_FIRST_TP_STEPS", "first_tp_steps"),
             exchange_leverage=f("SP_EXCHANGE_LEVERAGE", "exchange_leverage", int),
             margin_type=_get("SP_MARGIN_TYPE", cls.margin_type).upper(),
@@ -91,6 +104,8 @@ class SplitConfig:
               else "전 차수 익절 뒤 바로 재진입")
         if self.reentry_drop_pct > 0 and self.reentry_limit:
             re += "(지정가)"
+        if self.reentry_drop_pct > 0 and self.weekend_first:
+            re += ", 미국 주말엔 직전 1차 가격이 더 높으면 그 가격"
         return (f"{self.symbol} 박스 {self.box_pct:g}% {self.splits}분할 x {self.leverage:g}배, "
                 f"익절 +1간격+{self.tp_extra_pct:g}%{first}, 손절 마지막 차수 -{self.stop_steps:g}간격, "
                 f"{re}, 시작 금액 {self.capital:g} USDT 복리 "
@@ -298,8 +313,7 @@ class SplitTrader:
             return
         if st.waiting_high is not None:
             st.waiting_high = max(st.waiting_high, p)
-            trig = st.waiting_high * (1 - self.cfg.reentry_drop_pct / 100)
-            if p <= trig:
+            if p <= self.reentry_price():
                 self.start_cycle(p)
             return
         if p <= self.stop_price() and not self.all_empty():
@@ -421,15 +435,25 @@ class SplitTrader:
                     self.apply_sell(o["k"], px, done, True)
             del self.st.orders[cid]
 
+    def reentry_price(self) -> float:
+        """재진입 1차 가격 = 고점 -N%. 미국 주말에는 직전 사이클 1차 가격이 더 높으면 그 가격 (2026-10-26 사용자 요청,
+        백테스트 20분할 3배 634 → 731$ 지만 한국 주말 기준·15분할에서는 나빠지는 등 방향이 일정하지 않았음)."""
+        st, tick = self.st, self.f["tick"]
+        trig = round_tick(st.waiting_high * (1 - self.cfg.reentry_drop_pct / 100), tick)
+        if self.cfg.weekend_first and st.start_price and us_weekend(self.now()):
+            trig = max(trig, round_tick(st.start_price, tick))
+        return trig
+
     def reentry_limit(self, p: float) -> None:
         """전 차수 익절 뒤 재진입 1차를 '고점 -N%' 가격에 미리 거는 Post Only 지정가로 (2026-10-25 사용자 요청).
         고점이 올라 재진입 가격이 0.1% 넘게 올라가면 취소하고 새 가격에 다시 건다. 가격이 이미 지나쳤으면 시장가."""
         st, tick = self.st, self.f["tick"]
-        trig = round_tick(st.waiting_high * (1 - self.cfg.reentry_drop_pct / 100), tick)
+        trig = self.reentry_price()
         cid = self.order_for("entry", 0)
         if cid:
             o = st.orders[cid]
-            if p <= o["price"] * 1.0005 or trig - o["price"] < max(tick, o["price"] * 0.001):
+            moved = trig - o["price"] >= max(tick, o["price"] * 0.001) or trig < o["price"] - tick / 2  # 고점 갱신 · 주말 끝
+            if p <= o["price"] * 1.0005 or not moved:
                 return  # 체결을 기다림
             self.cancel_entry(cid)
             if st.waiting_high is None:  # 취소 직전에 체결돼서 사이클이 시작됨
@@ -532,7 +556,7 @@ class SplitTrader:
             st.waiting_high = max(st.waiting_high, p)
             if cfg.reentry_limit:
                 self.reentry_limit(p)
-            elif p <= st.waiting_high * (1 - cfg.reentry_drop_pct / 100):
+            elif p <= self.reentry_price():
                 if self.start_cycle(p):
                     self.place_stop()
             return
@@ -650,7 +674,8 @@ class SplitTrader:
         if st.paused:
             lines.append(f"새 주문 멈춤: {st.paused}")
         if st.waiting_high is not None:
-            lines.append(f"재진입 대기: 고점 {st.waiting_high:.4f} → {st.waiting_high * (1 - self.cfg.reentry_drop_pct / 100):.4f} 에서 1차")
+            wk = " (미국 주말: 직전 1차 가격 이상)" if self.cfg.weekend_first and us_weekend(self.now()) else ""
+            lines.append(f"재진입 대기: 고점 {st.waiting_high:.4f} → {self.reentry_price():.4f} 에서 1차{wk}")
             for o in st.orders.values():
                 if o["kind"] == "entry":
                     lines.append(f"재진입 1차 지정가 {o['price']:.4f} x {o['qty']:g} 걸려 있음")

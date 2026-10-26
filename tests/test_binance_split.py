@@ -1,9 +1,10 @@
 import tempfile
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 
 from binancebot.client import BinanceError
-from binancebot.split import SplitConfig, SplitTrader, fvg_conflict
+from binancebot.split import SplitConfig, SplitTrader, fvg_conflict, us_weekend
 
 META = {"symbols": [{"symbol": "SOXLUSDT", "filters": [
     {"filterType": "PRICE_FILTER", "tickSize": "0.01"},
@@ -135,16 +136,16 @@ class FakeExchange:
 
 
 def cfg(dry, **kw):
-    c = SplitConfig(dry_run=dry, capital=1000.0, splits=5, leverage=1.0, box_pct=10.0, stop_steps=2.0,
+    c = SplitConfig(dry_run=dry, capital=1000.0, splits=5, leverage=1.0, box_pct=10.0, stop_steps=2.0, weekend_first=False,
                     state_dir=tempfile.mkdtemp(), api_key="k" if not dry else "", api_secret="s" if not dry else "")
     for k, v in kw.items():
         setattr(c, k, v)
     return c
 
 
-def run(seq, dry=True, **kw):
+def run(seq, dry=True, now=None, **kw):
     ex = FakeExchange(seq)
-    tr = SplitTrader(ex, cfg(dry, **kw), sleep_fn=lambda s: None)
+    tr = SplitTrader(ex, cfg(dry, **kw), now_fn=(lambda: now) if now else None, sleep_fn=lambda s: None)
     tr.last_check = -1e9
     tr.run(max_ticks=len(seq))
     return tr, ex
@@ -228,6 +229,27 @@ class SplitTest(unittest.TestCase):
         self.assertAlmostEqual(ex.pos, held, places=6)
         self.assertIsNotNone(ex.stop)
         self.assertEqual(st.paused, "")
+
+    def test_us_weekend(self):
+        utc = timezone.utc
+        self.assertFalse(us_weekend(datetime(2026, 10, 23, 19, 59, tzinfo=utc)))  # 금 15:59 동부
+        self.assertTrue(us_weekend(datetime(2026, 10, 23, 20, 0, tzinfo=utc)))    # 금 16:00
+        self.assertTrue(us_weekend(datetime(2026, 10, 25, 23, 0, tzinfo=utc)))    # 일 19:00
+        self.assertTrue(us_weekend(datetime(2026, 10, 26, 13, 29, tzinfo=utc)))   # 월 09:29
+        self.assertFalse(us_weekend(datetime(2026, 10, 26, 13, 30, tzinfo=utc)))  # 월 09:30
+
+    def test_live_weekend_reentry_at_previous_first(self):
+        # 20분할: 간격 0.5, 1차 100 → 익절 100.6. 고점 -2% = 98.7 지만 미국 주말엔 직전 1차 100.00 에 다시 삼
+        seq = [100, 100.7, 100.7, 100.3, 99.95, 99.95]
+        sat = datetime(2026, 10, 24, 16, 0, tzinfo=timezone.utc)
+        tr, ex = run(seq, dry=False, now=sat, splits=20, weekend_first=True)
+        self.assertEqual(tr.st.cycle, 2)
+        self.assertAlmostEqual(tr.st.start_price, 100.0)
+        self.assertEqual(sum(1 for e in ex.log if e[0] == "BUY" and e[1] == "MARKET"), 1)
+        wed = datetime(2026, 10, 21, 16, 0, tzinfo=timezone.utc)
+        tr, _ = run(seq, dry=False, now=wed, splits=20, weekend_first=True)
+        self.assertEqual(tr.st.cycle, 1)                    # 평일엔 고점 -2%(98.7) 까지 기다림
+        self.assertIsNotNone(tr.st.waiting_high)
 
     def test_live_lagging_open_orders_no_double_buy(self):
         seq = [100, 99.5, 99.4, 99.3, 98.5, 97.9, 97.5, 96.5, 95.9, 95.5, 97, 98.3, 99, 100.3, 101, 102.2, 103]

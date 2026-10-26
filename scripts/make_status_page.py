@@ -14,7 +14,7 @@ import html
 import json
 import re
 import struct
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -405,8 +405,116 @@ def binance_section(links: bool = False) -> tuple[str, str, dict]:
                      live, summary, body), ("실전" if live else "드라이런"), acct
 
 
+# ------------------------------------------------------------------ 바이낸스 스플릿
+def kst(utc: str) -> str:
+    """trades.csv 의 UTC 시각 → 한국 시각 'MM-DD HH:MM'."""
+    try:
+        return (datetime.fromisoformat(utc) + timedelta(hours=9)).strftime("%m-%d %H:%M")
+    except (TypeError, ValueError):
+        return esc(utc or "-")
+
+
+def split_section(links: bool = False) -> tuple[str, str, dict]:
+    sdir = ROOT / "state_binance_split"
+    env = ROOT / ".env.binance_split"
+    live = env_flag(env, "BINANCE_DRY_RUN") is False
+    st = read_json(sdir / "state.json") or {}
+    capital = env_num(env, "SP_CAPITAL") or 0.0
+    drop = env_num(env, "SP_REENTRY_DROP")
+    drop = 2.0 if drop is None else drop
+    logs = read_lines(sdir / "bot.log")
+    mode_line = next((l.split(" ", 2)[2] for l in reversed(logs) if "주문 모드" in l), "")
+    try:
+        with open(sdir / "trades.csv", newline="", encoding="utf-8") as fh:
+            rows = [r for r in csv.DictReader(fh) if r.get("mode") == ("live" if live else "dry")]
+    except OSError:
+        rows = []
+
+    # 사이클별로 묶기
+    cycles: dict[int, dict] = {}
+    for r in rows:
+        try:
+            c = int(r["cycle"])
+            k, px, pnl = int(r["k"] or 0), float(r["price"]), float(r["pnl"])
+        except (KeyError, ValueError):
+            continue
+        cy = cycles.setdefault(c, {"start": r["time"], "end": r["time"], "first": None, "deep": 0, "buys": 0, "tps": 0,
+                                   "stop": False, "pnl": 0.0})
+        cy["end"] = r["time"]
+        cy["pnl"] += pnl
+        if r["event"] == "buy":
+            cy["buys"] += 1
+            cy["deep"] = max(cy["deep"], k)
+            if k == 1 and cy["first"] is None:
+                cy["first"] = px
+        elif r["event"] == "tp":
+            cy["tps"] += 1
+        elif r["event"] == "stop":
+            cy["stop"] = True
+
+    cur = int(st.get("cycle") or 0)
+    held = [h for h in (st.get("held") or []) if h]
+    waiting = st.get("waiting_high") is not None
+    cyc_rows = []
+    for c in sorted(cycles, reverse=True):
+        cy = cycles[c]
+        if cy["stop"]:
+            result = "손절"
+        elif c == cur and not waiting:
+            result = f"진행 중 · {len(held)}차수 보유"
+        else:
+            result = "전 차수 익절"
+        cyc_rows.append(
+            f'<tr><th scope="row">{c}</th><td class="num">{kst(cy["start"])}</td>'
+            f'<td class="num">{"-" if result.startswith("진행") else kst(cy["end"])}</td>'
+            f'<td class="num">{cy["first"]:.2f}</td><td class="num">{cy["deep"]}차</td>'
+            f'<td class="num">{cy["buys"]}</td><td class="num">{cy["tps"]}</td>'
+            f'<td class="num {tone(cy["pnl"])}">{signed(cy["pnl"], "", 4)}</td><td>{esc(result)}</td></tr>'
+            if cy["first"] is not None else "")
+
+    stake = float(st.get("stake") or 0)
+    pnl = stake - capital if capital and stake else sum(cy["pnl"] for cy in cycles.values())
+    tps, stops = int(st.get("tps") or 0), int(st.get("stops") or 0)
+    if st.get("ended"):
+        now_txt, now_sub = "멈춤", st["ended"]
+    elif st.get("paused"):
+        now_txt, now_sub = "새 주문 멈춤", st["paused"]
+    elif waiting:
+        trig = float(st["waiting_high"]) * (1 - drop / 100)
+        entry = next((o for o in (st.get("orders") or {}).values() if o.get("kind") == "entry"), None)
+        now_txt = "재진입 대기"
+        now_sub = f"고점 {float(st['waiting_high']):.2f} → {trig:.2f} 에서 1차" + (f" (지정가 {entry['price']:.2f} 걸림)" if entry else "")
+    elif cur:
+        deep = max((i + 1 for i, h in enumerate(st.get("held") or []) if h), default=0)
+        now_txt = f"사이클 {cur} · {len(held)}차수 보유"
+        now_sub = f"1차 {float(st.get('start_price') or 0):.2f} · 가장 깊은 {deep}차 · 간격 {float(st.get('step') or 0):.4f}"
+    else:
+        now_txt, now_sub = "첫 실행 대기", ""
+    avg = (sum(h["price"] * h["qty"] for h in held) / sum(h["qty"] for h in held)) if held else 0.0
+    acct = {"name": "바이낸스 스플릿 봇", "since": kst(rows[0]["time"])[:5] if rows else "", "base": capital, "pnl": pnl,
+            "unit": "USDT", "n": tps + stops, "note": "장부 기준 (지정가 0.02%·시장가 0.05% 수수료 포함, 펀딩비 제외)"}
+    summary = (
+        f'<dl class="facts">'
+        f'<div><dt>지금</dt><dd>{esc(now_txt)}<small>{esc(now_sub)}</small></dd></div>'
+        f'<div><dt>보유</dt><dd>{sum(h["qty"] for h in held):g}개<small>{"평균 " + format(avg, ".2f") if held else "보유 없음"}</small></dd></div>'
+        f'<div><dt>장부 금액</dt><dd>{stake:,.2f}<small>시작 {capital:g} USDT</small></dd></div>'
+        f'<div><dt>손익 (USDT)</dt><dd class="{tone(pnl)}">{signed(pnl, "", 2)}<small>익절 {tps}번 · 손절 {stops}번 · 사이클 {len(cycles)}</small></dd></div>'
+        + ret_fact(pnl, capital, f"시작 {capital:g} USDT 대비 (수수료 포함)" if capital else "시작 금액 기록 없음")
+        + '</dl>')
+    body = (
+        (f'<p class="note">{esc(mode_line)}</p>' if mode_line else "")
+        + f'<h3>사이클별 요약</h3><p class="note">사이클 = 1차를 사서 모든 차수가 익절되거나 손절될 때까지. '
+          f'손익은 그 사이클의 익절·손절 손익에서 매수 수수료를 뺀 값입니다. 시각은 한국 시각.</p>'
+          f'<div class="scroll"><table><thead><tr><th>사이클</th><th class="num">시작</th><th class="num">끝</th>'
+          f'<th class="num">1차 가격</th><th class="num">가장 깊이</th><th class="num">매수</th><th class="num">익절</th>'
+          f'<th class="num">손익</th><th>결과</th></tr></thead>'
+          f'<tbody>{"".join(cyc_rows) or empty_row(9, "아직 거래 없음")}</tbody></table></div>')
+    return bot_block("split", "바이낸스 스플릿 봇", "SOXL 무기한 선물 · 박스 10% 20분할 3배 · 차수마다 1간격 익절 · 전 차수 익절 뒤 고점 -2% 재진입",
+                     live, summary, body), ("실전" if live else "드라이런"), acct
+
+
 # ------------------------------------------------------------------ 페이지
-ICONS = {"toss": "toss_bot.ico", "kiwoom": "kiwoom_bot.ico", "binance": "binance_bot.ico"}
+ICONS = {"toss": "toss_bot.ico", "kiwoom": "kiwoom_bot.ico", "binance": "binance_bot.ico", "split": "split_bot.ico"}
 
 
 def bot_block(key: str, name: str, desc: str, live: bool, summary: str, body: str) -> str:
@@ -514,7 +622,7 @@ def accounts_table(accts: list[dict]) -> str:
 def build(toolbar: str = "", links: bool = False, sell: bool = False) -> str:
     """sell=True 면 토스 보유 종목에 '팔기' 버튼을 넣는다 (status_server 가 이 PC 에서 연 페이지에만 켬)."""
     now = datetime.now().astimezone()
-    parts = [toss_section(links, sell), kiwoom_section(links), binance_section(links)]
+    parts = [toss_section(links, sell), kiwoom_section(links), binance_section(links), split_section(links)]
     blocks = [accounts_table([p[2] for p in parts])] + [p[0] for p in parts]
     return (
         '<title>봇 매매현황</title>\n'

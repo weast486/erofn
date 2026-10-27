@@ -61,6 +61,7 @@ class SplitConfig:
     reentry_drop_pct: float = 2.0  # 전 차수 익절 뒤 고점에서 이 % 내려오면 재진입 (0 = 기다리지 않고 바로 재진입)
     reentry_limit: bool = True    # 재진입 1차를 시장가 대신 미리 거는 Post Only 지정가로 (2026-10-25 사용자 요청)
     weekend_first: bool = True    # 미국 주말(동부 금 16:00 ~ 월 9:30)에는 재진입가 = max(직전 1차 가격, 고점 -N%) (2026-10-26 사용자 요청)
+    size_by_account: bool = True  # 새 사이클 차수당 금액을 장부 대신 선물 계좌 잔고(USDT 평가금액)로 (2026-10-27 사용자 요청)
     first_tp_steps: float = 1.0   # 1차만 익절 = 매수가 + 간격 x 이 값 + 0.1% (나머지 차수는 1간격)
     exchange_leverage: int = 5    # 바이낸스 레버리지 설정값 (격리 마진 증거금용)
     margin_type: str = "ISOLATED"
@@ -90,6 +91,7 @@ class SplitConfig:
             reentry_drop_pct=f("SP_REENTRY_DROP", "reentry_drop_pct"),
             reentry_limit=_bool(os.environ.get("SP_REENTRY_LIMIT"), True),
             weekend_first=_bool(os.environ.get("SP_WEEKEND_FIRST"), True),
+            size_by_account=_bool(os.environ.get("SP_SIZE_BY_ACCOUNT"), True),
             first_tp_steps=f("SP_FIRST_TP_STEPS", "first_tp_steps"),
             exchange_leverage=f("SP_EXCHANGE_LEVERAGE", "exchange_leverage", int),
             margin_type=_get("SP_MARGIN_TYPE", cls.margin_type).upper(),
@@ -108,7 +110,8 @@ class SplitConfig:
             re += ", 미국 주말엔 직전 1차 가격이 더 높으면 그 가격"
         return (f"{self.symbol} 박스 {self.box_pct:g}% {self.splits}분할 x {self.leverage:g}배, "
                 f"익절 +1간격+{self.tp_extra_pct:g}%{first}, 손절 마지막 차수 -{self.stop_steps:g}간격, "
-                f"{re}, 시작 금액 {self.capital:g} USDT 복리 "
+                f"{re}, " + ("차수당 금액 = 선물 계좌 잔고 기준 " if self.size_by_account and not self.dry_run
+                             else f"시작 금액 {self.capital:g} USDT 복리 ") +
                 f"({'드라이런' if self.dry_run else '실제 주문'})")
 
 
@@ -217,10 +220,16 @@ class SplitTrader:
 
     # ------------------------------------------------------------ 사이클
     def entry_notional(self) -> float | None:
-        """새 사이클의 차수당 금액 = 장부 / N x 배율. 최소 주문 금액 아래면 멈추고 None."""
+        """새 사이클의 차수당 금액 = 장부(또는 선물 계좌 잔고) / N x 배율. 최소 주문 금액 아래면 멈추고 None."""
         st, cfg = self.st, self.cfg
-        notional = st.stake / cfg.splits * cfg.leverage
-        if notional < self.f["min_notional"] * 1.05 or st.stake <= 0:
+        base = st.stake
+        if cfg.size_by_account and not cfg.dry_run:
+            try:
+                base = self.c.equity()  # 새 사이클 직전엔 SOXL 포지션이 없어 = 지갑 잔고 (입출금이 바로 반영됨)
+            except BinanceError as exc:
+                log.warning("계좌 잔고 조회 실패, 장부 금액 %.2f 로 계산: %s", st.stake, exc)
+        notional = base / cfg.splits * cfg.leverage
+        if notional < self.f["min_notional"] * 1.05 or base <= 0:
             st.ended = f"차수당 금액 {notional:.2f} USDT 가 최소 주문 금액({self.f['min_notional']:g}) 아래 → 멈춤"
             log.warning(st.ended)
             self.save()

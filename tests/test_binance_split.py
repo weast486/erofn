@@ -27,6 +27,7 @@ class FakeExchange:
         self.log = []
         self.trades = []
         self.next_id = 0
+        self.balance = 1000.0
 
     # 시세
     def exchange_info(self):
@@ -75,7 +76,7 @@ class FakeExchange:
         return round(self.pos, 9), 0.0
 
     def equity(self):
-        return 1000.0
+        return self.balance
 
     def order(self, **q):
         qty = float(q["quantity"])
@@ -229,6 +230,21 @@ class SplitTest(unittest.TestCase):
         self.assertAlmostEqual(ex.pos, held, places=6)
         self.assertIsNotNone(ex.stop)
         self.assertEqual(st.paused, "")
+
+    def test_live_size_by_account_balance(self):
+        ex = FakeExchange([100, 100])
+        ex.balance = 1500.0  # 입금으로 계좌가 장부(1000)보다 많음
+        tr = SplitTrader(ex, cfg(False), sleep_fn=lambda s: None)
+        tr.last_check = -1e9
+        tr.run(max_ticks=2)
+        self.assertAlmostEqual(tr.st.notional, 1500.0 / 5)
+        self.assertAlmostEqual(tr.st.stake, 1000.0, delta=1)  # 장부는 그대로 (손익 기록용)
+        ex2 = FakeExchange([100, 100])
+        ex2.balance = 1500.0
+        tr2 = SplitTrader(ex2, cfg(False, size_by_account=False), sleep_fn=lambda s: None)
+        tr2.last_check = -1e9
+        tr2.run(max_ticks=2)
+        self.assertAlmostEqual(tr2.st.notional, 1000.0 / 5)
 
     def test_us_weekend(self):
         utc = timezone.utc

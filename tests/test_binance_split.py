@@ -48,13 +48,15 @@ class FakeExchange:
                 del self.orders[cid]
         if self.stop is not None and self.p <= self.stop and self.pos > 0:
             self.log.append(("stop", self.p, self.pos))
+            self.next_id += 1
+            self.trades.append({"orderId": self.next_id, "side": "SELL", "price": self.p, "qty": self.pos})
             self.pos = 0.0
             self.stop = None
 
     def _fill(self, o, px):
         o["executedQty"] = o["origQty"]
         o["avgPrice"] = px
-        self.trades.append({"orderId": o["orderId"], "price": px, "qty": o["origQty"]})
+        self.trades.append({"orderId": o["orderId"], "side": o["side"], "price": px, "qty": o["origQty"]})
         self.pos += o["origQty"] if o["side"] == "BUY" else -o["origQty"]
         self.log.append((o["side"], o.get("type"), px, o["origQty"]))
 
@@ -312,6 +314,22 @@ class SplitTest(unittest.TestCase):
         held = sum(h["qty"] for h in st.held if h)
         self.assertAlmostEqual(ex.pos, held, places=6)        # 새 1차만 들고 있음
         self.assertIsNotNone(ex.stop)                         # 새 사이클 손절 다시 걸림
+
+    def test_live_exchange_stop_while_bot_off(self):
+        # 봇이 꺼져 있는 사이 거래소 손절이 체결된 뒤 다시 켜짐: 첫 확인에서 포지션 0 ≠ 장부 → 멈추지 말고 손절로 처리
+        ex = FakeExchange([100, 98, 96, 94, 92, 90.5, 87.0, 86.0, 86.0])
+        tr = SplitTrader(ex, cfg(False), sleep_fn=lambda s: setattr(tr, "last_check", -1e9))
+        tr.last_check = -1e9
+        tr.run(max_ticks=9)
+        st = tr.st
+        self.assertEqual(st.paused, "")
+        self.assertEqual(st.stops, 1)
+        self.assertEqual(st.cycle, 2)
+        rows = (Path(tr.cfg.state_dir) / "trades.csv").read_text(encoding="utf-8").splitlines()
+        stop_rows = [r for r in rows if ",stop," in r]
+        self.assertTrue(stop_rows and all(",87.0000," in r for r in stop_rows))  # 거래소 체결가로 기록
+        held = sum(h["qty"] for h in st.held if h)
+        self.assertAlmostEqual(ex.pos, held, places=6)
 
     def test_live_pause_on_position_mismatch(self):
         ex = FakeExchange([100, 100, 100, 100])

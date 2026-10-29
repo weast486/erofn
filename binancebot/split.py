@@ -344,11 +344,13 @@ class SplitTrader:
             if st.held[k] is None and p <= lv[k]:
                 self.apply_buy(k, round_tick(lv[k], self.f["tick"]), self.qty_for(lv[k]), True)
 
-    def stop_out(self, p: float) -> None:
-        """손절: 전부 시장가로 정리하고 그 가격에서 다시 시작."""
+    def stop_out(self, p: float, fill_px: float | None = None) -> None:
+        """손절: 전부 시장가로 정리하고 그 가격에서 다시 시작.
+        fill_px = 거래소 손절이 이미 체결된 것을 알아챘을 때 그 체결가 (새 사이클은 지금 가격에서 시작)."""
         st = self.st
         log.warning("손절선 %.4f 도달 (현재가 %.4f) → 전부 정리", self.stop_price(), p)
         px = p
+        restart = p
         if not self.cfg.dry_run:
             stop_px = self.stop_price()
             self.cancel_everything()
@@ -357,14 +359,18 @@ class SplitTrader:
                 r = self.c.order(symbol=self.cfg.symbol, side="SELL", type="MARKET", quantity=fmt(round_step(amt, self.f["step"])),
                                  reduceOnly="true", newClientOrderId=self.cid("stop", 0), newOrderRespType="RESULT")
                 px = self.fill_avg(r, p)
-            else:  # 거래소 손절이 먼저 체결됨 → 손절가로 기록 (실제 체결가는 trades 내역에서 확인)
-                px = stop_px
+            else:  # 거래소 손절이 먼저 체결됨 → 그 체결가(모르면 손절가)로 기록, 새 사이클은 지금 가격에서
+                px = fill_px or stop_px
+            if amt <= 0 or fill_px:
+                restart = p
+            else:
+                restart = px
         for k in range(self.cfg.splits):
             if st.held[k]:
                 self.apply_sell(k, px, st.held[k]["qty"], False, "stop")
         st.held = [None] * self.cfg.splits
         st.stops += 1
-        self.start_cycle(px)
+        self.start_cycle(restart if not self.cfg.dry_run else px)
 
     # ------------------------------------------------------------ 실제 주문
     def cid(self, kind: str, k: int) -> str:
@@ -543,6 +549,14 @@ class SplitTrader:
             self.sync_orders()
             amt, _ = self.c.position_amt(self.cfg.symbol)
             mine = self.held_qty()
+        if abs(amt - mine) > tol and amt <= tol and mine > tol and self.st.stop_placed:
+            # 포지션이 0 인데 장부엔 남아 있음 = 거래소 손절이 (봇이 꺼져 있던 사이 등) 먼저 체결됨 → 멈추지 말고 손절로 처리
+            self.ex_stop = self.stop_fill_price(mine) or 0.0
+            log.warning("거래소 손절이 이미 체결돼 있음 (체결가 %s) → 손절로 기록하고 새 사이클",
+                        f"{self.ex_stop:.4f}" if self.ex_stop else "모름")
+            if self.st.paused:
+                self.st.paused = ""
+            return
         if abs(amt - mine) > tol:
             if not self.st.paused:
                 self.st.paused = f"거래소 포지션 {amt:g} ≠ 장부 {mine:g} (다른 봇·앱에서 같은 종목을 사고팔았는지 확인)"
@@ -551,6 +565,22 @@ class SplitTrader:
             log.info("포지션이 다시 맞아서 이어서 진행")
             self.st.paused = ""
 
+    def stop_fill_price(self, qty: float) -> float | None:
+        """가장 최근 매도 주문(거래소 손절)의 체결 평균가. 수량이 장부와 맞지 않으면 None."""
+        try:
+            sells = [t for t in self.c.fills(self.cfg.symbol) if t.get("side", "SELL") == "SELL"]
+        except BinanceError as exc:
+            log.warning("체결 내역 조회 실패: %s", exc)
+            return None
+        if not sells:
+            return None
+        oid = sells[-1]["orderId"]
+        part = [t for t in sells if t["orderId"] == oid]
+        q = sum(float(t["qty"]) for t in part)
+        if abs(q - qty) > max(self.f["step"] * 2, qty * 0.01):
+            return None
+        return sum(float(t["price"]) * float(t["qty"]) for t in part) / q
+
     def tick_live(self, p: float) -> None:
         st, n, cfg = self.st, self.cfg.splits, self.cfg
         self.sync_orders()
@@ -558,7 +588,13 @@ class SplitTrader:
             if self.start_cycle(p):
                 self.place_stop()
             return
+        self.ex_stop = None
         self.check_position()
+        if self.ex_stop is not None:
+            self.stop_out(p, self.ex_stop or None)
+            if not st.ended and not st.pending_entry:
+                self.place_stop()
+            return
         if st.paused:
             return
         if st.waiting_high is not None:

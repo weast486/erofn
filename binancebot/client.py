@@ -145,9 +145,10 @@ class BinanceClient:
                 return float(p.get("positionAmt", 0)), float(p.get("entryPrice", 0))
         return 0.0, 0.0
 
-    def fills(self, symbol: str, start_ms: int | None = None, order_id=None) -> list[dict]:
-        """내 체결 내역 (userTrades): 조각마다 side·price·qty·time·orderId·commission."""
-        params = {"symbol": symbol, "limit": 200}
+    def fills(self, symbol: str, start_ms: int | None = None, order_id=None, limit: int = 200) -> list[dict]:
+        """내 체결 내역 (userTrades): 조각마다 side·price·qty·time·orderId·commission.
+        시작 시각 없이 부르면 최근 7일 중 '앞쪽' limit 개가 와서 최근 체결이 빠질 수 있음."""
+        params = {"symbol": symbol, "limit": limit}
         if order_id:
             params["orderId"] = order_id
         if start_ms:

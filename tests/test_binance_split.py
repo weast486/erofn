@@ -108,7 +108,7 @@ class FakeExchange:
             return o
         raise AssertionError(q)
 
-    def fills(self, symbol, start_ms=None, order_id=None):
+    def fills(self, symbol, start_ms=None, order_id=None, limit=200):
         return [t for t in self.trades if order_id is None or t["orderId"] == order_id]
 
     def open_orders(self, symbol):

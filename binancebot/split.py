@@ -567,11 +567,17 @@ class SplitTrader:
 
     def stop_fill_price(self, qty: float) -> float | None:
         """가장 최근 매도 주문(거래소 손절)의 체결 평균가. 수량이 장부와 맞지 않으면 None."""
-        try:
-            sells = [t for t in self.c.fills(self.cfg.symbol) if t.get("side", "SELL") == "SELL"]
-        except BinanceError as exc:
-            log.warning("체결 내역 조회 실패: %s", exc)
-            return None
+        now = _time.time() * 1000
+        sells = []
+        for hours in (3, 24, 24 * 7):  # 최근부터 넓혀 가며 (시작 시각 없이 조회하면 오래된 체결부터 옴)
+            try:
+                got = self.c.fills(self.cfg.symbol, start_ms=now - hours * 3600_000, limit=1000)
+            except BinanceError as exc:
+                log.warning("체결 내역 조회 실패: %s", exc)
+                return None
+            sells = [t for t in got if t.get("side", "SELL") == "SELL"]
+            if sells and len(got) < 1000:
+                break
         if not sells:
             return None
         oid = sells[-1]["orderId"]

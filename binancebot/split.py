@@ -63,6 +63,7 @@ class SplitConfig:
     weekend_first: bool = True    # 미국 주말(동부 금 16:00 ~ 월 9:30)에는 재진입가 = max(직전 1차 가격, 고점 -N%) (2026-10-26 사용자 요청)
     size_by_account: bool = True  # 새 사이클 차수당 금액을 장부 대신 선물 계좌 잔고(USDT 평가금액)로 (2026-10-27 사용자 요청)
     first_tp_steps: float = 1.0   # 1차만 익절 = 매수가 + 간격 x 이 값 + 0.1% (나머지 차수는 1간격)
+    first_mult: float = 1.0       # 1차만 물량 x 이 값, 총 투입은 같게 = 차수당 금액 = 장부 / (N - 1 + 이 값) (2026-10-31 사용자 요청)
     exchange_leverage: int = 5    # 바이낸스 레버리지 설정값 (격리 마진 증거금용)
     margin_type: str = "ISOLATED"
     maker_fee: float = 0.0002     # 장부 계산용 수수료
@@ -93,6 +94,7 @@ class SplitConfig:
             weekend_first=_bool(os.environ.get("SP_WEEKEND_FIRST"), True),
             size_by_account=_bool(os.environ.get("SP_SIZE_BY_ACCOUNT"), True),
             first_tp_steps=f("SP_FIRST_TP_STEPS", "first_tp_steps"),
+            first_mult=f("SP_FIRST_MULT", "first_mult"),
             exchange_leverage=f("SP_EXCHANGE_LEVERAGE", "exchange_leverage", int),
             margin_type=_get("SP_MARGIN_TYPE", cls.margin_type).upper(),
             poll_seconds=f("SP_POLL_SECONDS", "poll_seconds"),
@@ -102,13 +104,14 @@ class SplitConfig:
 
     def describe(self) -> str:
         first = f" (1차는 +{self.first_tp_steps:g}간격)" if self.first_tp_steps != 1 else ""
+        mult = f", 1차 물량 {self.first_mult:g}배" if self.first_mult != 1 else ""
         re = (f"전 차수 익절 뒤 고점 -{self.reentry_drop_pct:g}% 재진입" if self.reentry_drop_pct > 0
               else "전 차수 익절 뒤 바로 재진입")
         if self.reentry_drop_pct > 0 and self.reentry_limit:
             re += "(지정가)"
         if self.reentry_drop_pct > 0 and self.weekend_first:
             re += ", 미국 주말엔 직전 1차 가격이 더 높으면 그 가격"
-        return (f"{self.symbol} 박스 {self.box_pct:g}% {self.splits}분할 x {self.leverage:g}배, "
+        return (f"{self.symbol} 박스 {self.box_pct:g}% {self.splits}분할 x {self.leverage:g}배{mult}, "
                 f"익절 +1간격+{self.tp_extra_pct:g}%{first}, 손절 마지막 차수 -{self.stop_steps:g}간격, "
                 f"{re}, " + ("차수당 금액 = 선물 계좌 잔고 기준 " if self.size_by_account and not self.dry_run
                              else f"시작 금액 {self.capital:g} USDT 복리 ") +
@@ -185,8 +188,9 @@ class SplitTrader:
     def stop_price(self) -> float:
         return round_tick(self.st.levels(self.cfg.splits)[-1] - self.st.step * self.cfg.stop_steps, self.f["tick"])
 
-    def qty_for(self, price: float) -> float:
-        return round_step(self.st.notional / price, self.f["step"])
+    def qty_for(self, price: float, k: int = 1) -> float:
+        mult = self.cfg.first_mult if k == 0 else 1.0
+        return round_step(self.st.notional * mult / price, self.f["step"])
 
     def all_empty(self) -> bool:
         return all(h is None for h in self.st.held)
@@ -220,7 +224,8 @@ class SplitTrader:
 
     # ------------------------------------------------------------ 사이클
     def entry_notional(self) -> float | None:
-        """새 사이클의 차수당 금액 = 장부(또는 선물 계좌 잔고) / N x 배율. 최소 주문 금액 아래면 멈추고 None."""
+        """새 사이클의 차수당 금액 = 장부(또는 선물 계좌 잔고) / (N - 1 + 1차 배수) x 배율 (1차는 이 금액 x 1차 배수).
+        최소 주문 금액 아래면 멈추고 None."""
         st, cfg = self.st, self.cfg
         base = st.stake
         if cfg.size_by_account and not cfg.dry_run:
@@ -228,7 +233,7 @@ class SplitTrader:
                 base = self.c.equity()  # 새 사이클 직전엔 SOXL 포지션이 없어 = 지갑 잔고 (입출금이 바로 반영됨)
             except BinanceError as exc:
                 log.warning("계좌 잔고 조회 실패, 장부 금액 %.2f 로 계산: %s", st.stake, exc)
-        notional = base / cfg.splits * cfg.leverage
+        notional = base / (cfg.splits - 1 + cfg.first_mult) * cfg.leverage
         if notional < self.f["min_notional"] * 1.05 or base <= 0:
             st.ended = f"차수당 금액 {notional:.2f} USDT 가 최소 주문 금액({self.f['min_notional']:g}) 아래 → 멈춤"
             log.warning(st.ended)
@@ -398,7 +403,7 @@ class SplitTrader:
 
     def buy_now(self, k: int, price: float, kind: str) -> bool:
         """지금 바로 사기. 1차 진입(첫 진입·손절 뒤·재진입)은 시장가, 이미 지나친 차수는 그 차수 가격 IOC 지정가."""
-        qty = self.qty_for(price)
+        qty = self.qty_for(price, k)
         if self.cfg.dry_run:
             self.apply_buy(k, round_tick(price, self.f["tick"]), qty, False)
             return True
@@ -482,7 +487,7 @@ class SplitTrader:
         notional = self.entry_notional()
         if notional is None:
             return
-        qty = round_step(notional / trig, self.f["step"])
+        qty = round_step(notional * self.cfg.first_mult / trig, self.f["step"])
         new = self.cid("entry", 0)
         try:
             self.c.order(symbol=self.cfg.symbol, side="BUY", type="LIMIT", timeInForce="GTX", price=fmt(trig),

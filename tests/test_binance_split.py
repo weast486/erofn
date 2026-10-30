@@ -233,6 +233,22 @@ class SplitTest(unittest.TestCase):
         self.assertIsNotNone(ex.stop)
         self.assertEqual(st.paused, "")
 
+    def test_first_level_double_same_total(self):
+        # 1차만 2배: 차수당 = 1000 / (5 - 1 + 2) = 166.67, 1차 333.33 (총 투입 1000 그대로)
+        tr, _ = run([100, 97.9], first_mult=2.0)
+        st = tr.st
+        self.assertAlmostEqual(st.notional, 1000.0 / 6, delta=0.01)
+        self.assertAlmostEqual(st.held[0]["qty"], 2 * st.held[1]["qty"] * 98 / 100, delta=0.02)
+        self.assertAlmostEqual(st.held[0]["qty"] * 100, 333.33, delta=0.5)
+
+    def test_live_first_level_double_reentry_limit(self):
+        seq = [100, 99.5, 98.5, 97.9, 96.5, 95.9, 97, 98.3, 99, 100.3, 101, 102.2, 103, 103, 105, 104, 102.5, 102.5]
+        tr, ex = run(seq, dry=False, first_mult=2.0)
+        st = tr.st
+        self.assertEqual(st.cycle, 2)
+        self.assertAlmostEqual(st.held[0]["qty"] * st.held[0]["price"], 2 * st.notional, delta=1.0)
+        self.assertAlmostEqual(ex.pos, sum(h["qty"] for h in st.held if h), places=6)
+
     def test_live_size_by_account_balance(self):
         ex = FakeExchange([100, 100])
         ex.balance = 1500.0  # 입금으로 계좌가 장부(1000)보다 많음

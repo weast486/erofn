@@ -1,18 +1,36 @@
 """스플릿 봇 명령 (split check / run / status). 키 값은 화면·로그에 남기지 않는다."""
 from __future__ import annotations
 
+import json
 import logging
+from pathlib import Path
 
 from tossbot.config import load_dotenv
 
 from .botmain import setup_logging
 from .client import BinanceClient
-from .split import SplitConfig, SplitTrader, fvg_conflict
+from .split import AFTER_STOP_REQUEST, SplitConfig, SplitTrader, fvg_conflict
 
 
-def split_main(action: str, env: str) -> None:
+def split_main(action: str, env: str, values: list[str] | None = None) -> None:
     load_dotenv(env)
     cfg = SplitConfig.from_env()
+    if action == "after-stop":
+        values = values or []
+        if values[:1] == ["off"]:
+            plan = {}
+        elif len(values) == 3:
+            lev, sl, tp = (float(v) for v in values)
+            plan = {"lev": lev, "stop_pct": sl, "tp_pct": tp}
+        else:
+            print("사용법: split after-stop 배율 손절% 익절%  (예: 2 3 10) / split after-stop off")
+            return
+        d = Path(cfg.state_dir)
+        d.mkdir(parents=True, exist_ok=True)
+        (d / AFTER_STOP_REQUEST).write_text(json.dumps(plan), encoding="utf-8")
+        print("다음 손절 때 한 번 롱 예약:" if plan else "손절 뒤 롱 예약 취소:", plan or "",
+              "(켜져 있는 봇이 몇 초 안에 읽음, 꺼져 있으면 켤 때 읽음)")
+        return
     if action == "status":
         print(SplitTrader(BinanceClient(), cfg).status())
         return

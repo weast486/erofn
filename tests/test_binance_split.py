@@ -46,12 +46,18 @@ class FakeExchange:
                 self._fill(o, o["price"])
                 self.done[cid] = dict(o, status="FILLED")
                 del self.orders[cid]
+        if getattr(self, "tp", None) is not None and self.p >= self.tp and self.pos > 0:
+            self.log.append(("tp", self.p, self.pos))
+            self.next_id += 1
+            self.trades.append({"orderId": self.next_id, "side": "SELL", "price": self.p, "qty": self.pos})
+            self.pos = 0.0
+            self.stop = self.tp = None
         if self.stop is not None and self.p <= self.stop and self.pos > 0:
             self.log.append(("stop", self.p, self.pos))
             self.next_id += 1
             self.trades.append({"orderId": self.next_id, "side": "SELL", "price": self.p, "qty": self.pos})
             self.pos = 0.0
-            self.stop = None
+            self.stop = self.tp = None
 
     def _fill(self, o, px):
         o["executedQty"] = o["origQty"]
@@ -126,15 +132,18 @@ class FakeExchange:
         for cid, o in self.orders.items():
             self.done[cid] = dict(o, status="CANCELED")
         self.orders = {}
-        self.stop = None
+        self.stop = self.tp = None
 
     def cancel_order(self, symbol, cid):
         if cid not in self.orders:
             raise BinanceError(400, -2011, "Unknown order sent.")
         self.done[cid] = dict(self.orders.pop(cid), status="CANCELED")
 
-    def stop_market(self, symbol, side, stop):
-        self.stop = stop
+    def stop_market(self, symbol, side, stop, kind="STOP_MARKET"):
+        if kind == "TAKE_PROFIT_MARKET":
+            self.tp = stop
+        else:
+            self.stop = stop
         return "algo"
 
 
@@ -346,6 +355,44 @@ class SplitTest(unittest.TestCase):
         self.assertTrue(stop_rows and all(",87.0000," in r for r in stop_rows))  # 거래소 체결가로 기록
         held = sum(h["qty"] for h in st.held if h)
         self.assertAlmostEqual(ex.pos, held, places=6)
+
+    def test_dry_long_after_stop_then_tp(self):
+        # 손절(88 아래) → 스플릿 멈추고 2배 롱, 손절 -3% / 익절 +10% → 익절 뒤 고점 -2% 재진입 대기
+        ex = FakeExchange([100, 98, 96, 94, 92, 90, 87.5, 90, 96.3, 97, 97])
+        tr = SplitTrader(ex, cfg(True), sleep_fn=lambda s: None)
+        (Path(tr.cfg.state_dir) / "after_stop_request.json").write_text('{"lev": 2, "stop_pct": 3, "tp_pct": 10}')
+        tr.run(max_ticks=9)
+        st = tr.st
+        self.assertEqual(st.stops, 1)
+        self.assertEqual(st.cycle, 1)          # 손절 뒤 새 사이클 대신 롱
+        self.assertEqual(st.after_stop, {})    # 한 번만
+        self.assertEqual(st.long, {})
+        self.assertTrue(tr.all_empty())
+        self.assertEqual(st.waiting_high, 96.3)
+        rows = (Path(tr.cfg.state_dir) / "trades.csv").read_text(encoding="utf-8").splitlines()
+        self.assertTrue(any(",long_buy,,87.5000," in r for r in rows))
+        self.assertTrue(any(",long_tp,,96.2500," in r for r in rows))
+
+    def test_live_long_after_exchange_stop(self):
+        # 거래소 손절 → 그 자리에서 평가금액 1000 x 2배 롱, 거래소 손절 -3%·익절 +10% → -3% 에서 거래소 손절
+        ex = FakeExchange([100, 98, 96, 94, 92, 90.5, 87.9, 87.9, 87.9, 86, 85.2, 85.2])
+        tr = SplitTrader(ex, cfg(False), sleep_fn=lambda s: setattr(tr, "last_check", -1e9))
+        tr.last_check = -1e9
+        (Path(tr.cfg.state_dir) / "after_stop_request.json").write_text('{"lev": 2, "stop_pct": 3, "tp_pct": 10}')
+        tr.run(max_ticks=9)
+        st = tr.st
+        self.assertEqual(st.stops, 1)
+        self.assertAlmostEqual(st.long["qty"], round(2000 / 87.9, 3), places=6)
+        self.assertAlmostEqual(ex.pos, st.long["qty"], places=6)
+        self.assertEqual((ex.stop, ex.tp), (st.long["stop"], st.long["tp"]))
+        self.assertAlmostEqual(st.long["stop"], 85.26)
+        tr.st.ended = ""
+        tr.run(max_ticks=3)
+        self.assertEqual(st.long, {})
+        self.assertEqual(ex.pos, 0.0)
+        self.assertIsNotNone(st.waiting_high)
+        self.assertEqual(st.cycle, 1)
+        self.assertEqual(st.paused, "")
 
     def test_live_pause_on_position_mismatch(self):
         ex = FakeExchange([100, 100, 100, 100])

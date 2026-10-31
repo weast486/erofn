@@ -184,17 +184,18 @@ class BinanceClient:
             except BinanceError as exc:
                 log.info("%s 주문 취소 응답: %s", path, exc)
 
-    def stop_market(self, symbol: str, side: str, stop: float) -> str:
+    def stop_market(self, symbol: str, side: str, stop: float, kind: str = "STOP_MARKET") -> str:
         """거래소 손절(STOP_MARKET, 포지션 전량). 2025-12 부터 조건부 주문은 algoOrder 로 옮겨져서 먼저 그쪽으로,
-        안 되면 예전 주문 경로로. 둘 다 안 되면 예외 (봇이 가격을 보고 직접 손절)."""
+        안 되면 예전 주문 경로로. 둘 다 안 되면 예외 (봇이 가격을 보고 직접 손절).
+        kind="TAKE_PROFIT_MARKET" 이면 같은 방식의 거래소 익절."""
         try:
             self._req("POST", "/fapi/v1/algoOrder", {"algoType": "CONDITIONAL", "symbol": symbol, "side": side,
-                                                     "type": "STOP_MARKET", "triggerPrice": fmt(stop),
+                                                     "type": kind, "triggerPrice": fmt(stop),
                                                      "closePosition": "true", "workingType": "CONTRACT_PRICE"},
                       signed=True)
             return "algo"
         except BinanceError as exc:
-            log.info("algoOrder 손절 실패 (%s) → 예전 방식으로 시도", exc)
-        self.order(symbol=symbol, side=side, type="STOP_MARKET", stopPrice=fmt(stop), closePosition="true",
+            log.info("algoOrder %s 실패 (%s) → 예전 방식으로 시도", kind, exc)
+        self.order(symbol=symbol, side=side, type=kind, stopPrice=fmt(stop), closePosition="true",
                    workingType="CONTRACT_PRICE")
         return "order"

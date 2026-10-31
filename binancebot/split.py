@@ -118,6 +118,9 @@ class SplitConfig:
                 f"({'드라이런' if self.dry_run else '실제 주문'})")
 
 
+AFTER_STOP_REQUEST = "after_stop_request.json"
+
+
 @dataclass
 class SplitState:
     stake: float = 0.0                 # 봇 장부 금액 (시작 금액 + 실현 손익 - 수수료)
@@ -135,6 +138,8 @@ class SplitState:
     pending_entry: bool = False        # 1차 진입 주문이 실패해서 다음 확인 때 다시 (손절·첫 진입)
     ended: str = ""                    # 멈춘 이유
     paused: str = ""                   # 포지션 불일치 등으로 새 주문 멈춤
+    after_stop: dict = field(default_factory=dict)  # 다음 손절 때 한 번: 스플릿 대신 롱 {"lev", "stop_pct", "tp_pct"}
+    long: dict = field(default_factory=dict)        # 그 롱 보유 중 {"entry", "qty", "stop", "tp"} (끝나면 재진입 대기로)
 
     def levels(self, n: int) -> list[float]:
         return [self.start_price - self.step * k for k in range(n)]
@@ -312,12 +317,36 @@ class SplitTrader:
     def tick(self) -> None:
         if self.st.ended:
             return
+        self.read_after_stop_request()
         p = self.price()
         self.last_price = p
-        if self.cfg.dry_run:
+        if self.st.long:
+            self.tick_long(p)
+        elif self.cfg.dry_run:
             self.tick_dry(p)
         else:
             self.tick_live(p)
+        self.save()
+
+    def read_after_stop_request(self) -> None:
+        """`split after-stop` 명령이 남긴 요청 파일을 읽어 다음 손절 때 할 롱을 걸어 두거나(빈 값이면) 끔."""
+        req = self.dir / AFTER_STOP_REQUEST
+        if not req.exists():
+            return
+        try:
+            plan = json.loads(req.read_text(encoding="utf-8")) or {}
+        except (OSError, ValueError) as exc:
+            log.warning("손절 뒤 롱 요청 파일을 못 읽음: %s", exc)
+            plan = None
+        req.unlink(missing_ok=True)
+        if plan is None:
+            return
+        self.st.after_stop = plan
+        if plan:
+            log.warning("다음 손절 때 한 번: 스플릿을 쉬고 그 자리에서 평가금액 x %g배 롱, 손절 -%g%% / 익절 +%g%%",
+                        float(plan["lev"]), float(plan["stop_pct"]), float(plan["tp_pct"]))
+        else:
+            log.info("손절 뒤 롱 예약 취소")
         self.save()
 
     def tick_dry(self, p: float) -> None:
@@ -375,7 +404,110 @@ class SplitTrader:
                 self.apply_sell(k, px, st.held[k]["qty"], False, "stop")
         st.held = [None] * self.cfg.splits
         st.stops += 1
-        self.start_cycle(restart if not self.cfg.dry_run else px)
+        restart = restart if not self.cfg.dry_run else px
+        if st.after_stop:  # 이번 손절 한 번만: 스플릿을 쉬고 그 자리에서 롱 (2026-10-31 사용자 요청)
+            self.open_long(restart)
+            return
+        self.start_cycle(restart)
+
+    # ------------------------------------------------------------ 손절 뒤 한 번 롱
+    def open_long(self, p: float) -> None:
+        """손절 자리에서 평가금액 x 배율 시장가 롱, 거래소 손절(-stop_pct%)·익절(+tp_pct%) 을 걸어 둠.
+        끝나면(손절·익절) 스플릿은 '고점 -N% 재진입 대기'로 돌아감."""
+        st, cfg, plan = self.st, self.cfg, self.st.after_stop
+        base = st.stake
+        if not cfg.dry_run:
+            try:
+                base = self.c.equity()
+            except BinanceError as exc:
+                log.warning("계좌 잔고 조회 실패, 장부 금액 %.2f 로 계산: %s", st.stake, exc)
+        qty = round_step(base * float(plan["lev"]) / p, self.f["step"])
+        if qty * p < self.f["min_notional"]:
+            log.warning("손절 뒤 롱 금액 %.2f USDT 가 최소 주문 금액 아래 → 롱 없이 스플릿 계속", qty * p)
+            st.after_stop = {}
+            self.start_cycle(p)
+            return
+        entry = round_tick(p, self.f["tick"])
+        if not cfg.dry_run:
+            try:
+                r = self.c.order(symbol=cfg.symbol, side="BUY", type="MARKET", quantity=fmt(qty),
+                                 newClientOrderId=self.cid("long", 0), newOrderRespType="RESULT")
+            except BinanceError as exc:
+                log.warning("손절 뒤 롱 매수 실패, 다음 확인 때 다시: %s", exc)
+                st.long = {"pending": True}
+                self.save()
+                return
+            done = float(r.get("executedQty") or 0)
+            if done <= 0:
+                log.warning("손절 뒤 롱 매수가 체결되지 않음, 다음 확인 때 다시")
+                st.long = {"pending": True}
+                self.save()
+                return
+            entry, qty = self.fill_avg(r, p), done
+        fee = entry * qty * cfg.taker_fee
+        st.stake -= fee
+        stop = round_tick(entry * (1 - float(plan["stop_pct"]) / 100), self.f["tick"])
+        tp = round_tick(entry * (1 + float(plan["tp_pct"]) / 100), self.f["tick"])
+        st.long = {"entry": entry, "qty": qty, "stop": stop, "tp": tp}
+        st.after_stop = {}
+        st.waiting_high = None
+        self.record("long_buy", None, entry, qty, -fee)
+        log.warning("스플릿 멈춤 → 손절 자리에서 롱 %.4f x %g (%.2f USDT, 평가금액 %.2f 의 %g배), 손절 %.4f / 익절 %.4f",
+                    entry, qty, entry * qty, base, float(plan["lev"]), stop, tp)
+        if not cfg.dry_run:
+            for kind, px in (("STOP_MARKET", stop), ("TAKE_PROFIT_MARKET", tp)):
+                try:
+                    self.c.stop_market(cfg.symbol, "SELL", px, kind)
+                    log.info("거래소 %s %.4f 걸어 둠", "손절" if kind == "STOP_MARKET" else "익절", px)
+                except BinanceError as exc:
+                    log.warning("거래소 %s 실패 (%s) → 봇이 가격 보고 정리", kind, exc)
+        self.save()
+
+    def tick_long(self, p: float) -> None:
+        st, cfg, L = self.st, self.cfg, self.st.long
+        if L.get("pending"):
+            st.long = {}
+            self.open_long(p)
+            return
+        if cfg.dry_run:
+            if p <= L["stop"]:
+                self.finish_long(L["stop"], p)
+            elif p >= L["tp"]:
+                self.finish_long(L["tp"], p)
+            return
+        amt, _ = self.c.position_amt(cfg.symbol)
+        tol = max(self.f["step"] * 2, L["qty"] * 0.01)
+        if amt <= tol:  # 거래소 손절·익절이 체결됨 (또는 앱에서 정리)
+            px = self.stop_fill_price(L["qty"]) or (L["tp"] if abs(p - L["tp"]) < abs(p - L["stop"]) else L["stop"])
+            self.finish_long(px, p)
+            return
+        if p <= L["stop"] or p >= L["tp"]:  # 거래소 주문이 없거나 아직 → 봇이 시장가로
+            self.c.cancel_all(cfg.symbol)
+            amt, _ = self.c.position_amt(cfg.symbol)
+            px = p
+            if amt > 0:
+                r = self.c.order(symbol=cfg.symbol, side="SELL", type="MARKET", quantity=fmt(round_step(amt, self.f["step"])),
+                                 reduceOnly="true", newClientOrderId=self.cid("longx", 0), newOrderRespType="RESULT")
+                px = self.fill_avg(r, p)
+            self.finish_long(px, p)
+
+    def finish_long(self, px: float, p: float) -> None:
+        st, L = self.st, self.st.long
+        if not self.cfg.dry_run:
+            self.c.cancel_all(self.cfg.symbol)  # 남은 거래소 손절·익절 취소
+        pnl = L["qty"] * (px - L["entry"]) - px * L["qty"] * self.cfg.taker_fee
+        st.stake += pnl
+        event = "long_tp" if px >= L["entry"] else "long_stop"
+        self.record(event, None, px, L["qty"], pnl)
+        log.warning("손절 뒤 롱 %s: %.4f → %.4f x %g 손익 %+.4f (장부 %.2f) → 스플릿 재진입 대기",
+                    "익절" if event == "long_tp" else "손절", L["entry"], px, L["qty"], pnl, st.stake)
+        st.long = {}
+        st.held = [None] * self.cfg.splits
+        st.orders = {}
+        st.stop_placed = False
+        st.start_price = 0.0   # 주말 규칙(직전 1차 가격 이상)이 손절 전 사이클 가격을 쓰지 않게
+        st.waiting_high = p
+        self.save()
 
     # ------------------------------------------------------------ 실제 주문
     def cid(self, kind: str, k: int) -> str:
@@ -697,7 +829,7 @@ class SplitTrader:
 
     def place_stop(self) -> None:
         """거래소 손절(STOP_MARKET 전량)을 사이클 시작 때 걸어 둠. 실패하면 봇이 가격을 보고 직접 손절."""
-        if self.cfg.dry_run or self.st.stop_placed or self.st.ended:
+        if self.cfg.dry_run or self.st.stop_placed or self.st.ended or self.st.long:
             return
         try:
             self.c.stop_market(self.cfg.symbol, "SELL", self.stop_price())
@@ -729,6 +861,15 @@ class SplitTrader:
             lines.append(f"멈춤: {st.ended}")
         if st.paused:
             lines.append(f"새 주문 멈춤: {st.paused}")
+        if st.after_stop:
+            a = st.after_stop
+            lines.append(f"다음 손절 때 한 번: 스플릿 멈추고 그 자리에서 {float(a['lev']):g}배 롱, "
+                         f"손절 -{float(a['stop_pct']):g}% / 익절 +{float(a['tp_pct']):g}%")
+        if st.long.get("entry"):
+            L = st.long
+            lines.append(f"스플릿 멈춤 · 롱 보유 {L['entry']:.4f} x {L['qty']:g}, 손절 {L['stop']:.4f} / 익절 {L['tp']:.4f} "
+                         "(끝나면 고점 -N% 재진입 대기)")
+            return "\n".join(lines)
         if st.waiting_high is not None:
             wk = " (미국 주말: 직전 1차 가격 이상)" if self.cfg.weekend_first and us_weekend(self.now()) else ""
             lines.append(f"재진입 대기: 고점 {st.waiting_high:.4f} → {self.reentry_price():.4f} 에서 1차{wk}")

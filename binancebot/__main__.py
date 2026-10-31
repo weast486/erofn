@@ -16,6 +16,7 @@ SOXL 스플릿 매매 봇 (설정 .env.binance_split, 기본 드라이런):
     python -m binancebot split check   # 설정·현재가·차수 가격 확인 (주문 없음)
     python -m binancebot split run     # 켜 둔 채 계속 매매
     python -m binancebot split status  # 장부·보유 차수 보기
+    python -m binancebot split after-stop 2 3 10  # 다음 손절 때 한 번: 스플릿 멈추고 2배 롱·손절 -3%·익절 +10% (off = 취소)
 """
 from __future__ import annotations
 
@@ -165,7 +166,8 @@ def main() -> None:
         sp = sub.add_parser(name, help=hlp)
         sp.add_argument("--env", default=".env.binance")
     spl = sub.add_parser("split", help="SOXL 스플릿 매매 봇 (설정 .env.binance_split, 기본 드라이런): check / run / status")
-    spl.add_argument("action", choices=["check", "run", "status"])
+    spl.add_argument("action", choices=["check", "run", "status", "after-stop"])
+    spl.add_argument("values", nargs="*", help="after-stop: 배율 손절%% 익절%% (예: 2 3 10), off = 취소")
     spl.add_argument("--env", default=".env.binance_split")
     mn = sub.add_parser("manual", help="조건 주문 (테스트 매매만): add / list / cancel / run")
     mn.add_argument("action", choices=["add", "list", "cancel", "run"])
@@ -200,7 +202,7 @@ def main() -> None:
         return
     if a.cmd == "split":
         from .splitmain import split_main
-        split_main(a.action, a.env)
+        split_main(a.action, a.env, a.values)
         return
     if a.cmd in ("check", "run", "loop", "update-settings"):
         from .botmain import bot_main

@@ -373,6 +373,17 @@ class SplitTest(unittest.TestCase):
         self.assertTrue(any(",long_buy,,87.5000," in r for r in rows))
         self.assertTrue(any(",long_tp,,96.2500," in r for r in rows))
 
+    def test_after_stop_dropped_when_cycle_ends_with_tp(self):
+        # 예약은 이번 사이클이 손절로 끝날 때만: 모든 차수 익절로 끝나면 지워지고, 다음 사이클 손절엔 롱 없음
+        ex = FakeExchange([100, 98, 105, 110, 107.8, 105, 103, 101, 99, 97, 95, 94, 94])
+        tr = SplitTrader(ex, cfg(True), sleep_fn=lambda s: None)
+        (Path(tr.cfg.state_dir) / "after_stop_request.json").write_text('{"lev": 2, "stop_pct": 3, "tp_pct": 10}')
+        tr.run(max_ticks=3)
+        self.assertTrue(tr.all_empty())
+        self.assertEqual(tr.st.after_stop, {})
+        tr.run(max_ticks=10)
+        self.assertEqual(tr.st.long, {})
+
     def test_live_long_after_exchange_stop(self):
         # 거래소 손절 → 그 자리에서 평가금액 1000 x 2배 롱, 거래소 손절 -3%·익절 +10% → -3% 에서 거래소 손절
         ex = FakeExchange([100, 98, 96, 94, 92, 90.5, 87.9, 87.9, 87.9, 86, 85.2, 85.2])

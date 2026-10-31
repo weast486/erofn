@@ -349,6 +349,13 @@ class SplitTrader:
             log.info("손절 뒤 롱 예약 취소")
         self.save()
 
+    def drop_after_stop(self) -> None:
+        """손절 뒤 롱 예약은 '이번 사이클이 손절로 끝날 때'만. 모든 차수 익절로 끝나면 예약을 지움 (2026-10-31 사용자 요청)."""
+        if self.st.after_stop:
+            self.st.after_stop = {}
+            log.warning("이번 사이클이 모든 차수 익절로 끝남 → 손절 뒤 롱 예약 취소")
+            self.save()
+
     def tick_dry(self, p: float) -> None:
         st, n = self.st, self.cfg.splits
         if st.cycle == 0:
@@ -366,6 +373,7 @@ class SplitTrader:
             if st.held[k] and p >= self.tp_price(k):
                 self.apply_sell(k, self.tp_price(k), st.held[k]["qty"], True)
         if self.all_empty():
+            self.drop_after_stop()
             if self.cfg.reentry_drop_pct <= 0:
                 log.info("모든 차수 익절 → 바로 재진입")
                 self.start_cycle(p)
@@ -756,6 +764,7 @@ class SplitTrader:
         if self.all_empty():
             self.cancel_everything()   # 아래 차수에 걸어 둔 매수·손절 취소 (취소 직전 체결분은 반영)
             if self.all_empty():
+                self.drop_after_stop()
                 if cfg.reentry_drop_pct <= 0:
                     log.info("모든 차수 익절 → 바로 재진입")
                     if self.start_cycle(p):

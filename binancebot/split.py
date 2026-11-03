@@ -618,6 +618,10 @@ class SplitTrader:
             self.cancel_entry(cid)
             if st.waiting_high is None:  # 취소 직전에 체결돼서 사이클이 시작됨
                 return
+            if self.order_for("entry", 0):
+                # 취소가 확인되지 않음 → 새로 걸지 않고 다음 확인 때 다시 취소 (2026-11-03 실전: 방금 낸 주문 취소가
+                # 'Unknown order' 로 거절된 채 새 주문을 걸어 재진입 지정가가 두 개씩 걸렸고 둘 다 체결돼 0.23 → 0.46)
+                return
         if p <= trig * (1 - 0.0005):
             if self.start_cycle(p):
                 self.place_stop()
@@ -803,13 +807,19 @@ class SplitTrader:
         oid = r.get("orderId")
         fn = getattr(self.c, "fills", None)
         if oid and fn:
-            try:
-                rows = [t for t in fn(self.cfg.symbol, order_id=oid) if str(t.get("orderId")) == str(oid)]
-                q = sum(float(t["qty"]) for t in rows)
-                if q > 0:
-                    return sum(float(t["price"]) * float(t["qty"]) for t in rows) / q
-            except BinanceError as exc:
-                log.info("체결 내역 조회 실패 (%s), 응답 가격으로 기록", exc)
+            # 방금 체결된 주문은 체결 내역에 늦게 보일 수 있어 한 번 더 조회 (2026-11-03 실전: 4차 IOC 가 71.50 에
+            # 체결됐는데 내역이 비어 주문가 72.29 로 기록됨 → 익절가도 그만큼 높게 걸림)
+            for attempt in range(2):
+                try:
+                    rows = [t for t in fn(self.cfg.symbol, order_id=oid) if str(t.get("orderId")) == str(oid)]
+                    q = sum(float(t["qty"]) for t in rows)
+                    if q > 0:
+                        return sum(float(t["price"]) * float(t["qty"]) for t in rows) / q
+                except BinanceError as exc:
+                    log.info("체결 내역 조회 실패 (%s), 응답 가격으로 기록", exc)
+                    break
+                if attempt == 0:
+                    self.sleep(0.5)
         avg = float(r.get("avgPrice") or 0)
         return avg if avg > 0 else fallback
 

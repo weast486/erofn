@@ -135,6 +135,10 @@ class FakeExchange:
         self.stop = self.tp = None
 
     def cancel_order(self, symbol, cid):
+        if getattr(self, "cancel_lag", False) and cid not in getattr(self, "cancel_tried", set()):
+            # 방금 낸 주문은 첫 취소가 'Unknown order' 로 거절되고 주문은 그대로 살아 있음 (2026-11-03 실전)
+            self.cancel_tried = getattr(self, "cancel_tried", set()) | {cid}
+            raise BinanceError(400, -2011, "Unknown order sent.")
         if cid not in self.orders:
             raise BinanceError(400, -2011, "Unknown order sent.")
         self.done[cid] = dict(self.orders.pop(cid), status="CANCELED")
@@ -257,6 +261,23 @@ class SplitTest(unittest.TestCase):
         self.assertEqual(st.cycle, 2)
         self.assertAlmostEqual(st.held[0]["qty"] * st.held[0]["price"], 2 * st.notional, delta=1.0)
         self.assertAlmostEqual(ex.pos, sum(h["qty"] for h in st.held if h), places=6)
+
+    def test_live_reentry_cancel_rejected_no_double_entry(self):
+        # 고점이 계속 올라 재진입 지정가를 옮기는데 첫 취소가 거절돼도 재진입 주문은 늘 하나만, 체결도 한 번만
+        seq = [100, 99.5, 98.5, 97.9, 96.5, 95.9, 97, 98.3, 99, 100.3, 101, 102.2, 103, 103, 104, 104, 105, 105,
+               106, 106, 106, 104, 103.5, 103.5]
+        ex = FakeExchange(seq)
+        ex.cancel_lag = True
+        tr = SplitTrader(ex, cfg(False, first_mult=2.0), sleep_fn=lambda s: None)
+        tr.last_check = -1e9
+        live = []
+        orig = ex.prices
+        ex.prices = lambda: (live.append(sum("entry" in c for c in ex.orders)), orig())[1]
+        tr.run(max_ticks=len(seq))
+        self.assertLessEqual(max(live), 1)
+        self.assertEqual(tr.st.cycle, 2)
+        self.assertAlmostEqual(ex.pos, sum(h["qty"] for h in tr.st.held if h), places=6)
+        self.assertEqual(tr.st.paused, "")
 
     def test_live_size_by_account_balance(self):
         ex = FakeExchange([100, 100])

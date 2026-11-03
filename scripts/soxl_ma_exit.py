@@ -1,4 +1,4 @@
-r"""SOXL 한 번 롱: 지금 시장가로 진입 → 끝난 5분봉 종가가 단순 11선 아래면 시장가로 전량 매도 (2026-11-03 사용자 요청).
+r"""SOXL 한 번 롱: 지금 시장가로 진입 → 끝난 5분봉 종가가 단순 11선 아래면 손절·현재가가 15분봉 거래량가중 100선에 닿으면 익절 (2026-11-03 사용자 요청).
 
   python scripts/soxl_ma_exit.py enter   # 잔고 1/4 x 3배 시장가 롱 (이미 들고 있으면 안 삼)
   python scripts/soxl_ma_exit.py watch   # 10초마다 확인, 이탈하면 매도하고 끝 (windows\soxl_ma_exit.bat)
@@ -53,6 +53,21 @@ def closed_ma(c: BinanceClient) -> tuple[float, float, int]:
     return closes[-1], sum(closes) / len(closes), int(done[-1][0])
 
 
+_vw_cache: dict = {}
+
+
+def vwma15(c: BinanceClient, n: int = 100) -> float:
+    """끝난 15분봉 n개의 거래량가중 이평(종가 x 거래량 / 거래량, 24시간 봉 = 바이낸스 차트). 15분마다 한 번만 조회."""
+    now = int(time.time() * 1000)
+    key = now // (15 * 60_000)
+    if key not in _vw_cache:
+        rows = c.klines(SYMBOL, now - 15 * 60_000 * (n + 3), limit=n + 5, interval="15m")
+        done = [r for r in rows if int(r[6]) < now][-n:]
+        _vw_cache.clear()
+        _vw_cache[key] = sum(float(r[4]) * float(r[5]) for r in done) / sum(float(r[5]) for r in done)
+    return _vw_cache[key]
+
+
 def avg_fill(c: BinanceClient, r: dict, fallback: float) -> float:
     for attempt in range(3):
         rows = [t for t in c.fills(SYMBOL, order_id=r.get("orderId")) if str(t.get("orderId")) == str(r.get("orderId"))]
@@ -96,7 +111,8 @@ def watch(c: BinanceClient) -> None:
         log.info("진입 기록이 없어 감시할 것이 없음")
         return
     pos = json.loads(STATE.read_text(encoding="utf-8"))
-    log.info("감시 시작: 진입 %.4f x %g, 끝난 5분봉 종가 < 단순 %d선 이면 시장가 전량 매도", pos["entry"], pos["qty"], MA)
+    log.info("감시 시작: 진입 %.4f x %g, 끝난 5분봉 종가 < 단순 %d선 이면 손절·현재가가 15분봉 거래량가중 100선에 닿으면 "
+             "익절(둘 다 시장가 전량)", pos["entry"], pos["qty"], MA)
     last_bar = None
     while True:
         try:
@@ -106,17 +122,25 @@ def watch(c: BinanceClient) -> None:
                 STATE.unlink(missing_ok=True)
                 return
             close, ma, bar = closed_ma(c)
+            vw = vwma15(c)
+            p = c.prices()[SYMBOL]
             if bar != last_bar:
-                log.info("5분봉 %s 종가 %.4f / 11선 %.4f", datetime.fromtimestamp(bar / 1000).strftime("%H:%M"), close, ma)
+                log.info("5분봉 %s 종가 %.4f / 11선 %.4f · 15분봉 거래량가중 100선(익절) %.4f · 현재가 %.4f",
+                         datetime.fromtimestamp(bar / 1000).strftime("%H:%M"), close, ma, vw, p)
                 last_bar = bar
-            if close < ma:
+            why = None
+            if p >= vw:
+                why = f"익절: 현재가 {p:.4f} 가 15분봉 거래량가중 100선 {vw:.4f} 에 닿음"
+            elif close < ma:
+                why = f"11선 이탈: 5분봉 종가 {close:.4f} < {ma:.4f}"
+            if why:
                 r = c.order(symbol=SYMBOL, side="SELL", type="MARKET", quantity=fmt(amt), reduceOnly="true",
                             newClientOrderId=f"maexit_sell_{int(time.time())}", newOrderRespType="RESULT")
-                px = avg_fill(c, r, close)
+                px = avg_fill(c, r, p)
                 q = float(r.get("executedQty") or amt)
                 pnl = q * (px - pos["entry"]) - (px + pos["entry"]) * q * 0.0005
-                record("sell", px, q, pnl)
-                log.info("11선 이탈 (종가 %.4f < %.4f) → 시장가 매도 %.4f x %g, 손익 %+.4f USDT", close, ma, px, q, pnl)
+                record("tp" if p >= vw else "sell", px, q, pnl)
+                log.info("%s → 시장가 매도 %.4f x %g, 손익 %+.4f USDT", why, px, q, pnl)
                 STATE.unlink(missing_ok=True)
                 return
         except Exception as exc:  # noqa: BLE001 네트워크 오류는 다음 확인 때 다시

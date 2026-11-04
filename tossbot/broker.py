@@ -99,6 +99,15 @@ class Broker:
             return order
         return self.client.get_order(order_id)
 
+    def closed_order(self, order_id: str, symbol: str) -> dict | None:
+        """끝난 주문 목록에서 이 주문을 찾음 (없으면 None). 모의 주문은 늘 None."""
+        if order_id.startswith("DRY-"):
+            return None
+        for o in self.client.get_closed_orders(symbol):
+            if o.get("orderId") == order_id:
+                return o
+        return None
+
     def cancel(self, order_id: str) -> None:
         if order_id.startswith("DRY-"):
             order = self._dry_orders.get(order_id)

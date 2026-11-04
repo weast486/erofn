@@ -7,6 +7,8 @@
     python -m tossbot run          # 자동매매 상주 실행
     python -m tossbot liquidate    # 봇 보유 종목 즉시 전량 매도 (비상용)
     python -m tossbot sell 종목코드  # 봇 보유 종목 중 그 종목만 즉시 매도 (봇이 켜져 있으면 봇에게 맡김)
+    python -m tossbot split        # 스플릿 매매(SPLIT_*) 현황, `split resume` = 멈춤 풀기,
+                                   #   `split regap 150` = 보유 차수 아래를 새 간격으로 (봇을 끄고)
                                    #   정규장 = 시장가, 넥스트레이드 프리·애프터마켓 = 현재가보다 조금 낮은 지정가
 """
 from __future__ import annotations
@@ -23,6 +25,7 @@ from .client import TossClient
 from .config import KST, Config, load_dotenv
 from .market_calendar import TradingDay, trading_day_from_api
 from .selector import build_watchlist, entry_signal
+from .split import SplitConfig, SplitStore, SplitTrader
 from .state import StateStore
 from .breakout import select_breakouts
 from .rsi import select_rsi
@@ -270,7 +273,41 @@ def cmd_sell(cfg: Config, client: TossClient, strategy: PullbackStrategy, wanted
             print(f"  {s} {h.get('name', '')}: 매도 완료 {h.get('return_pct')}%")
 
 
+def make_split(cfg: Config, strategy: PullbackStrategy) -> SplitTrader | None:
+    """SPLIT_ENABLED=true 면 한 종목 스플릿 매매 (손절 없음, tossbot/split.py). 봇 포지션과 기록은 따로."""
+    sc = SplitConfig.from_env()
+    if not sc.enabled:
+        return None
+    name = f"split_{sc.symbol}{'.dry' if cfg.dry_run else ''}.json"
+    return SplitTrader(sc, strategy.broker, SplitStore(Path(cfg.state_dir) / name),
+                       bot_symbols=lambda: set(strategy.state.positions))
+
+
+def cmd_split(cfg: Config, _c, strategy: PullbackStrategy, args: list[str]) -> None:
+    trader = make_split(cfg, strategy)
+    if trader is None:
+        print("스플릿 매매가 꺼져 있습니다 (.env 에 SPLIT_ENABLED=true).")
+        return
+    if args[:1] == ["regap"] and len(args) == 2:
+        from .split import regap
+        alive = Path(cfg.state_dir) / ALIVE_FILE
+        if alive.exists() and time.time() - alive.stat().st_mtime < ALIVE_MAX_AGE:
+            print("토스 봇이 켜져 있습니다. 봇 창을 닫고 다시 실행해 주세요 (켜진 봇이 옛 차수로 덮어씀).")
+            return
+        n = regap(trader.st, int(args[1]))
+        trader.store.save(trader.st)
+        print(f"보유 차수 아래 {n}개 차수를 간격 {int(args[1]):,}원으로 다시 만들었습니다 (보유 차수의 익절 폭은 그대로).")
+    if args[:1] == ["resume"]:
+        trader.st.paused = ""
+        trader.store.save(trader.st)
+        print("멈춤을 풀었습니다. (켜져 있는 봇은 다시 켜야 반영됩니다)")
+    print(trader.summary())
+
+
 def cmd_run(cfg: Config, client: TossClient, strategy: PullbackStrategy) -> None:
+    split = make_split(cfg, strategy)
+    if split is not None:
+        log.info("스플릿 매매 켬 (손절 없음)\n%s", split.summary())
     if cfg.strategy == "combo":
         log.info(
             "신고가 + RSI 한 계좌 자동매매 시작 [%s] %s~%s, 최대 %d종목. 신고가 먼저(손절 -%s%% 익절 +%s%%), "
@@ -305,6 +342,11 @@ def cmd_run(cfg: Config, client: TossClient, strategy: PullbackStrategy) -> None
                 log.info("%s 개장=%s", cached.today, cached.is_open)
             handle_sell_requests(cfg, client, strategy, now, cached)
             strategy.tick(now, cached)
+            if split is not None:
+                try:
+                    split.tick(now, cached)
+                except Exception:  # noqa: BLE001  스플릿 오류가 본 전략을 막지 않게
+                    log.exception("스플릿 처리 중 오류")
             if manual_pending(strategy) and sell_session(now, cached) == "nxt":
                 strategy.sync_orders()  # 정규장 밖에서는 tick 이 아무것도 안 하므로 직접 매도 체결만 따로 확인
                 fast = manual_pending(strategy)
@@ -329,7 +371,7 @@ def cmd_run(cfg: Config, client: TossClient, strategy: PullbackStrategy) -> None
 
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(prog="tossbot", description="토스증권 자동매매 봇 (신고가 돌파 / 신고가+RSI / 눌림목)")
-    parser.add_argument("command", choices=["config", "check", "select", "status", "run", "liquidate", "sell"])
+    parser.add_argument("command", choices=["config", "check", "select", "status", "run", "liquidate", "sell", "split"])
     parser.add_argument("symbols", nargs="*", help="sell: 즉시 매도할 종목코드 (여러 개 가능)")
     parser.add_argument("--env", default=".env", help=".env 파일 경로")
     parser.add_argument("-v", "--verbose", action="store_true")
@@ -342,6 +384,9 @@ def main(argv: list[str] | None = None) -> None:
         return
     setup_logging(cfg, args.verbose)
     client, strategy = build(cfg)
+    if args.command == "split":
+        cmd_split(cfg, client, strategy, args.symbols)
+        return
     if args.command == "sell":
         if not args.symbols:
             cmd_status(cfg, client, strategy)

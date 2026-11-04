@@ -272,6 +272,15 @@ class TossClient:
             "orders", []
         )
 
+    def get_closed_orders(self, symbol: str | None = None) -> list[dict]:
+        """끝난 주문(체결·취소) 최근 목록. 단건 조회가 PENDING 으로 남아 있어도 여기엔 실제 상태가 나옴."""
+        params = {"status": "CLOSED"}
+        if symbol:
+            params["symbol"] = symbol
+        return (self._request("GET", "/api/v1/orders", params=params, account=True) or {}).get(
+            "orders", []
+        )
+
     def cancel_order(self, order_id: str) -> dict:
         return self._request("POST", f"/api/v1/orders/{order_id}/cancel", json={}, account=True)
 

@@ -39,6 +39,9 @@ log = logging.getLogger("binancebot")
 class BotConfig:
     api_key: str = ""
     api_secret: str = ""
+    exchange: str = "binance"     # binance / okx (2026-10-28 추가, OKX 는 .env.okx·okx_client.py)
+    api_passphrase: str = ""      # OKX 만
+    demo: bool = False            # OKX 모의 거래(x-simulated-trading)
     dry_run: bool = True          # true 면 주문 없이 로그만
     leverage: float = 5.0         # 종목마다 평가금액 x 이 배수만큼 진입 (2종목이면 합계 최대 10배)
     exchange_leverage: int = 20   # 바이낸스 레버리지 설정값 (증거금 계산용; 교차 마진이라 청산 위험은 실제 진입 금액이 결정)
@@ -47,13 +50,16 @@ class BotConfig:
     extra_symbols: str = ""       # 순위와 상관없이 늘 넣을 종목 (예 BTCUSDT,ETHUSDT — 백테스트 안 됨)
     exclude: str = "SOXSUSDT,SQQQUSDT,SKDDUSDT"  # 순위에서 뺄 종목: 롱 짝(SOXL·TQQQ·SKUU)이 있는 인버스 ETF
     max_stop_pct: float = 5.0     # 진입가~손절선 거리가 이 % 를 넘는 신호는 건너뜀 (0 = 제한 없음)
+    # 숏인데 이미 많이 내려온 자리는 건너뜀 (2026-10-21 사용자 결정, 10-20 NVDA 같은 자리, 0 = 끔)
+    short_max_used: float = 0.6   # 그날 고점 → 진입가 하락폭이 ADR 의 이 배수 이상이면 제외
+    short_max_need: float = 2.0   # 익절가까지 가려면 그날 폭(고점 → 익절가)이 ADR 의 이 배수 이상 필요하면 제외
     target_r: float = 2.0         # 익절 = 손절 거리 x R (0 = 익절 없음)
     exit_minutes: int = 350       # 9:30 부터 N분 뒤 정리 (350 = 15:20)
     side: str = "both"            # both / long / short
     entry: str = "full"           # full = 갭 다 메움 / mid / edge
     loc: str = "zone"             # zone = 갭 전체가 첫 봉 밖 / mid
     poll_seconds: float = 1.0
-    dry_equity: float = 1000.0    # 드라이런인데 키가 없을 때 쓸 평가금액 (USDT)
+    dry_equity: float = 1000.0    # 드라이런 평가금액 (USDT, 키가 있어도 드라이런이면 이 값)
     state_dir: str = "state_binance"
     # 종가 매매(오버나이트, 롱만 — overnight.py): 장중 -on_drop% 이하 + 저가 근처 마감 종목을 15:58 에 사서 다음 거래일 9:30 에 팖
     on_enabled: bool = False
@@ -69,10 +75,15 @@ class BotConfig:
         def f(name, attr, typ=float):
             return typ(_get(name, str(getattr(cls, attr))))
 
+        ex = _get("EXCHANGE", "binance").lower()
+        pre = "OKX" if ex == "okx" else "BINANCE"
         return cls(
-            api_key=os.environ.get("BINANCE_API_KEY", ""),
-            api_secret=os.environ.get("BINANCE_API_SECRET", ""),
-            dry_run=_bool(os.environ.get("BINANCE_DRY_RUN"), True),
+            exchange=ex,
+            api_key=os.environ.get(f"{pre}_API_KEY", ""),
+            api_secret=os.environ.get(f"{pre}_API_SECRET", ""),
+            api_passphrase=os.environ.get("OKX_API_PASSPHRASE", ""),
+            demo=_bool(os.environ.get("OKX_DEMO"), False),
+            dry_run=_bool(os.environ.get(f"{pre}_DRY_RUN"), True),
             leverage=f("BN_LEVERAGE", "leverage"),
             exchange_leverage=f("BN_EXCHANGE_LEVERAGE", "exchange_leverage", int),
             max_trades=f("BN_MAX_TRADES", "max_trades", int),
@@ -80,6 +91,8 @@ class BotConfig:
             extra_symbols=_get("BN_EXTRA_SYMBOLS", cls.extra_symbols),
             exclude=os.environ.get("BN_EXCLUDE", cls.exclude),
             max_stop_pct=f("BN_MAX_STOP_PCT", "max_stop_pct"),
+            short_max_used=f("BN_SHORT_MAX_USED", "short_max_used"),
+            short_max_need=f("BN_SHORT_MAX_NEED", "short_max_need"),
             target_r=f("BN_TARGET_R", "target_r"),
             exit_minutes=f("BN_EXIT_MINUTES", "exit_minutes", int),
             side=_get("BN_SIDE", cls.side),
@@ -87,7 +100,7 @@ class BotConfig:
             loc=_get("BN_LOC", cls.loc),
             poll_seconds=f("BN_POLL_SECONDS", "poll_seconds"),
             dry_equity=f("BN_DRY_EQUITY", "dry_equity"),
-            state_dir=_get("BN_STATE_DIR", cls.state_dir),
+            state_dir=_get("BN_STATE_DIR", "state_okx" if ex == "okx" else cls.state_dir),
             on_enabled=_bool(os.environ.get("BN_ON_ENABLED"), False),
             on_leverage=f("BN_ON_LEVERAGE", "on_leverage"),
             on_max=f("BN_ON_MAX", "on_max", int),
@@ -99,7 +112,7 @@ class BotConfig:
 
     def describe(self) -> str:
         extra = f" + {self.extra_symbols}" if self.extra_symbols else ""
-        return (f"전날 거래대금 상위 {self.top_n}{extra}, 첫 5분봉 + 1분봉 FVG({self.entry}) {self.side}, "
+        return (f"[{self.exchange.upper()}] 전날 거래대금 상위 {self.top_n}{extra}, 첫 5분봉 + 1분봉 FVG({self.entry}) {self.side}, "
                 f"손절 첫 봉 반대편{f'(거리 {self.max_stop_pct:g}% 이하만)' if self.max_stop_pct > 0 else ''}"
                 f" / 익절 {self.target_r:g}R / 9:30+{self.exit_minutes}분 정리, "
                 f"종목당 평가금액 x {self.leverage:g}배, 하루 최대 {self.max_trades}종목"
@@ -208,7 +221,10 @@ class FvgTrader:
             if m.get("underlyingType") != "EQUITY" or sym in skip:
                 continue
             try:
-                rows = self.c.klines(sym, ms(start), limit=n_min)
+                if self.cfg.exchange == "okx":  # OKX 는 한 번에 300봉까지라 30분봉으로 (9:30 시작이라 합은 같음)
+                    rows = self.c.klines(sym, ms(start), limit=(n_min + 29) // 30, interval="30m")
+                else:
+                    rows = self.c.klines(sym, ms(start), limit=n_min)
             except BinanceError as exc:  # 한 종목 조회가 계속 실패해도 나머지로 순위 계산
                 log.warning("%s 전날 1분봉 조회 실패, 순위에서 빠짐 (%s)", sym, exc)
                 continue
@@ -241,7 +257,8 @@ class FvgTrader:
         return out
 
     def equity(self) -> float:
-        if self.cfg.api_key and self.cfg.api_secret:
+        # 드라이런은 키가 있어도 고정 평가금액 (실전 계좌 잔고가 0 이어도 시범 운용이 되게, 2026-11-02)
+        if self.cfg.api_key and self.cfg.api_secret and not self.cfg.dry_run:
             return self.c.equity()
         return self.cfg.dry_equity
 
@@ -326,6 +343,8 @@ class FvgTrader:
                         if self.cfg.max_stop_pct > 0 and dist > self.cfg.max_stop_pct:
                             st.dropped.append(sym)
                             log.info("%s 손절 거리 %.2f%% 가 한도 %g%% 를 넘어 제외", sym, dist, self.cfg.max_stop_pct)
+                        elif sig[0] == -1 and self.short_exhausted(sym, sig[1], h1, bars, st.adr.get(sym, 0.0)):
+                            st.dropped.append(sym)
                         self.save(st)
             waiting = slots and any(s not in st.dropped and s not in st.positions for s in st.signals)
             if not waiting and not self.open_positions(st):
@@ -358,6 +377,22 @@ class FvgTrader:
         log.info("오늘 끝: %s (FVG %d개, 제외 %d개)", st.result, len(st.signals), len(st.dropped))
         self.save(st)
         return st
+
+    def short_exhausted(self, sym: str, lvl: float, h1: float, bars: list[MinBar], adr: float) -> bool:
+        """숏인데 그날 고점에서 이미 많이 내려왔거나 익절가까지 남은 여유가 적은 자리인지 (ADR 모르면 거르지 않음)."""
+        if adr <= 0:
+            return False
+        hi = max([h1] + [b.h for b in bars])
+        tp = lvl - self.cfg.target_r * (h1 - lvl)
+        used = (hi - lvl) / lvl * 100 / adr
+        need = (hi - tp) / lvl * 100 / adr
+        if self.cfg.short_max_used > 0 and used >= self.cfg.short_max_used:
+            log.info("%s 숏 제외: 그날 고점 %g 에서 이미 ADR 의 %.2f배 내려온 자리 (한도 %g배)", sym, hi, used, self.cfg.short_max_used)
+            return True
+        if self.cfg.target_r > 0 and self.cfg.short_max_need > 0 and need >= self.cfg.short_max_need:
+            log.info("%s 숏 제외: 익절가 %g 까지 그날 폭이 ADR 의 %.2f배 필요 (한도 %g배)", sym, tp, need, self.cfg.short_max_need)
+            return True
+        return False
 
     def enter(self, st: DayState, sym: str, side: int, lvl: float, stop: float, price: float) -> bool:
         f = filters_of(self.meta.get(sym, {}))

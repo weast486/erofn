@@ -15,3 +15,5 @@ state_binance_split/
 .env.bak
 .env.*.bak
 .env.bak_*
+.env.okx
+state_okx/

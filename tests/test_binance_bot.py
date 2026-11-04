@@ -114,6 +114,20 @@ class BotTest(unittest.TestCase):
         st = trader.run(DAY)
         self.assertEqual((st.dropped, st.positions, st.result["reason"]), (["AUSDT"], {}, "no_trade"))
 
+    def test_short_after_big_drop_skipped(self):
+        first = [(100, 101, 99, 99.5)] * 5
+        fvg = [(99, 98.8, 98.5, 98.6), (98.6, 98.6, 97, 97.1), (97.1, 97.8, 96.8, 97.0)]  # 숏 98.5, 고점 101 에서 2.5% 내려온 자리
+        back = [(97.0, 98.7, 96.9, 98.6)] + [(98.6, 98.7, 98.0, 98.2)] * 5
+        trader, _ = self._setup(first + fvg + back)
+        trader.adr = lambda day, syms: {s: 2.0 for s in syms}               # ADR 2% → 1.27배 내려옴 → 제외
+        trader.cfg.exit_minutes = 40
+        st = trader.run(DAY)
+        self.assertEqual((st.dropped, st.positions), (["AUSDT"], {}))
+        trader2, _ = self._setup(first + fvg + back)
+        trader2.adr = lambda day, syms: {s: 10.0 for s in syms}             # ADR 10% 면 0.25배 → 진입
+        trader2.cfg.exit_minutes = 40
+        self.assertIn("AUSDT", trader2.run(DAY).positions)
+
     def test_no_fvg_no_trade(self):
         trader, clock = self._setup([(100, 101, 99, 100)] * 400)
         trader.cfg.exit_minutes = 40  # 테스트 시간을 줄임

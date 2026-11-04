@@ -165,6 +165,10 @@ def main() -> None:
                       ("update-settings", "봇: .env.binance 를 최신 설정으로 (API 키 유지)")]:
         sp = sub.add_parser(name, help=hlp)
         sp.add_argument("--env", default=".env.binance")
+    ot = sub.add_parser("okx-test", help="OKX 실주문 시험: 최소 수량 사고 손절 걸고 취소하고 바로 팜 (몇 센트 수수료)")
+    ot.add_argument("--env", default=".env.okx")
+    ot.add_argument("--symbol", default="SOXLUSDT")
+    ot.add_argument("--yes", action="store_true", help="확인 질문 없이 진행")
     spl = sub.add_parser("split", help="SOXL 스플릿 매매 봇 (설정 .env.binance_split, 기본 드라이런): check / run / status")
     spl.add_argument("action", choices=["check", "run", "status", "after-stop"])
     spl.add_argument("values", nargs="*", help="after-stop: 배율 손절%% 익절%% (예: 2 3 10), off = 취소")
@@ -203,6 +207,10 @@ def main() -> None:
     if a.cmd == "split":
         from .splitmain import split_main
         split_main(a.action, a.env, a.values)
+        return
+    if a.cmd == "okx-test":
+        from .botmain import okx_order_test
+        okx_order_test(a.env, a.symbol, a.yes)
         return
     if a.cmd in ("check", "run", "loop", "update-settings"):
         from .botmain import bot_main

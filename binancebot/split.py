@@ -72,6 +72,9 @@ class SplitConfig:
     dry_equity: float = 0.0       # (사용 안 함, 호환용)
     state_dir: str = "state_binance_split"
     fvg_env: str = ".env.binance"  # 같은 계좌 FVG 봇 설정 (종목 겹침 확인용)
+    external_qty: float = 0.0     # 사용자가 따로 들고 있는 같은 종목 수량 (2026-11-05 사용자 요청: 그 물량은 건드리지 않음)
+                                  # > 0 이면 포지션 확인에 더해서 보고, 거래소 손절(closePosition = 전량)을 걸지 않고 봇이 직접 손절,
+                                  # 주문 취소도 봇 주문만
 
     @classmethod
     def from_env(cls) -> "SplitConfig":
@@ -100,6 +103,7 @@ class SplitConfig:
             poll_seconds=f("SP_POLL_SECONDS", "poll_seconds"),
             state_dir=_get("SP_STATE_DIR", cls.state_dir),
             fvg_env=_get("SP_FVG_ENV", cls.fvg_env),
+            external_qty=f("SP_EXTERNAL_QTY", "external_qty"),
         )
 
     def describe(self) -> str:
@@ -115,7 +119,8 @@ class SplitConfig:
                 f"익절 +1간격+{self.tp_extra_pct:g}%{first}, 손절 마지막 차수 -{self.stop_steps:g}간격, "
                 f"{re}, " + ("차수당 금액 = 선물 계좌 잔고 기준 " if self.size_by_account and not self.dry_run
                              else f"시작 금액 {self.capital:g} USDT 복리 ") +
-                f"({'드라이런' if self.dry_run else '실제 주문'})")
+                f"({'드라이런' if self.dry_run else '실제 주문'})" +
+                (f", 사용자 보유 {self.external_qty:g}개는 빼고 계산·거래소 손절 대신 봇이 손절" if self.external_qty > 0 else ""))
 
 
 AFTER_STOP_REQUEST = "after_stop_request.json"
@@ -397,7 +402,8 @@ class SplitTrader:
             stop_px = self.stop_price()
             self.cancel_everything()
             amt, _ = self.c.position_amt(self.cfg.symbol)
-            if amt > 0:
+            amt = min(amt - self.cfg.external_qty, self.held_qty()) if self.cfg.external_qty > 0 else amt
+            if amt > self.f["step"] / 2:
                 r = self.c.order(symbol=self.cfg.symbol, side="SELL", type="MARKET", quantity=fmt(round_step(amt, self.f["step"])),
                                  reduceOnly="true", newClientOrderId=self.cid("stop", 0), newOrderRespType="RESULT")
                 px = self.fill_avg(r, p)
@@ -524,7 +530,14 @@ class SplitTrader:
 
     def cancel_everything(self) -> None:
         """이 종목 주문을 모두 취소하고, 취소 직전에 체결된 분량이 있으면 장부에 반영."""
-        self.c.cancel_all(self.cfg.symbol)
+        if self.cfg.external_qty > 0:  # 사용자 주문은 남기고 봇 주문만
+            for cid in list(self.st.orders):
+                try:
+                    self.c.cancel_order(self.cfg.symbol, cid)
+                except BinanceError as exc:
+                    log.info("주문 취소 응답 %s: %s", cid, exc)
+        else:
+            self.c.cancel_all(self.cfg.symbol)
         for cid, o in list(self.st.orders.items()):
             try:
                 r = self.c.query_order(self.cfg.symbol, cid)
@@ -691,12 +704,15 @@ class SplitTrader:
         if _time.monotonic() - self.last_check < 30 or self.order_for("entry", 0):
             return  # 재진입 지정가가 걸려 있는 동안은 부분 체결이 있을 수 있어 건너뜀
         self.last_check = _time.monotonic()
+        ext = self.cfg.external_qty
         amt, _ = self.c.position_amt(self.cfg.symbol)
+        amt -= ext
         mine = self.held_qty()
         tol = max(self.f["step"] * 2, mine * 0.01)
         if abs(amt - mine) > tol:  # 방금 체결된 주문일 수 있으니 한 번 더 맞춰 보고 판단
             self.sync_orders()
             amt, _ = self.c.position_amt(self.cfg.symbol)
+            amt -= ext
             mine = self.held_qty()
         if abs(amt - mine) > tol and amt <= tol and mine > tol and self.st.stop_placed:
             # 포지션이 0 인데 장부엔 남아 있음 = 거래소 손절이 (봇이 꺼져 있던 사이 등) 먼저 체결됨 → 멈추지 말고 손절로 처리
@@ -708,7 +724,8 @@ class SplitTrader:
             return
         if abs(amt - mine) > tol:
             if not self.st.paused:
-                self.st.paused = f"거래소 포지션 {amt:g} ≠ 장부 {mine:g} (다른 봇·앱에서 같은 종목을 사고팔았는지 확인)"
+                self.st.paused = (f"거래소 포지션 {amt + ext:g}" + (f" - 사용자 {ext:g}" if ext else "") +
+                                  f" ≠ 장부 {mine:g} (다른 봇·앱에서 같은 종목을 사고팔았는지 확인)")
                 log.error("새 주문 멈춤: %s", self.st.paused)
         elif self.st.paused:
             log.info("포지션이 다시 맞아서 이어서 진행")
@@ -849,6 +866,9 @@ class SplitTrader:
     def place_stop(self) -> None:
         """거래소 손절(STOP_MARKET 전량)을 사이클 시작 때 걸어 둠. 실패하면 봇이 가격을 보고 직접 손절."""
         if self.cfg.dry_run or self.st.stop_placed or self.st.ended or self.st.long:
+            return
+        if self.cfg.external_qty > 0:  # 거래소 손절은 전량(closePosition)이라 사용자 물량까지 팔림 → 봇이 가격 보고 손절
+            log.info("사용자 보유 %g개가 있어 거래소 손절은 안 걸고 봇이 %.4f 에서 손절", self.cfg.external_qty, self.stop_price())
             return
         try:
             self.c.stop_market(self.cfg.symbol, "SELL", self.stop_price())

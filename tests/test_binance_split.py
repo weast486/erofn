@@ -436,6 +436,25 @@ class SplitTest(unittest.TestCase):
         tr.tick()
         self.assertIn("포지션", tr.st.paused)
 
+    def test_live_external_qty_untouched(self):
+        # 사용자가 따로 3개 + 매도 지정가 120 을 들고 있음: 봇은 그 물량·주문을 건드리지 않고, 거래소 손절 대신 직접 손절
+        seq = [100, 98, 96, 94, 92, 90, 87.5, 87.5, 87.5]
+        ex = FakeExchange(seq)
+        ex.pos = 3.0
+        ex.next_id += 1
+        ex.orders["user1"] = {"side": "SELL", "type": "LIMIT", "origQty": 3.0, "executedQty": 0.0, "avgPrice": 0.0,
+                              "clientOrderId": "user1", "orderId": ex.next_id, "price": 120.0}
+        tr = SplitTrader(ex, cfg(False, external_qty=3.0), sleep_fn=lambda s: None)
+        tr.last_check = -1e9
+        tr.run(max_ticks=len(seq))
+        st = tr.st
+        self.assertEqual(st.paused, "")
+        self.assertIsNone(ex.stop)                      # 전량 거래소 손절은 안 걸음
+        self.assertEqual(st.stops, 1)                   # 봇이 직접 손절
+        self.assertIn("user1", ex.orders)               # 사용자 주문은 그대로
+        held = sum(h["qty"] for h in st.held if h)
+        self.assertAlmostEqual(ex.pos, 3.0 + held, places=6)
+
     def test_fvg_conflict(self):
         d = tempfile.mkdtemp()
         p = Path(d) / ".env.binance"

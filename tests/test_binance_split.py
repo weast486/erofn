@@ -455,6 +455,15 @@ class SplitTest(unittest.TestCase):
         held = sum(h["qty"] for h in st.held if h)
         self.assertAlmostEqual(ex.pos, 3.0 + held, places=6)
 
+    def test_no_stop(self):
+        seq = [100, 98, 96, 94, 92, 90, 87.5, 80, 80]
+        for dry in (True, False):
+            tr, ex = run(seq, dry=dry, no_stop=True)
+            self.assertEqual(tr.st.stops, 0)
+            self.assertEqual(tr.st.cycle, 1)
+            self.assertIsNone(ex.stop)
+            self.assertEqual(sum(1 for h in tr.st.held if h), 5)   # 5차까지 다 들고 버팀
+
     def test_fvg_conflict(self):
         d = tempfile.mkdtemp()
         p = Path(d) / ".env.binance"

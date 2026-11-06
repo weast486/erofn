@@ -26,13 +26,14 @@ from decimal import Decimal
 from pathlib import Path
 
 from .broker import Broker, TERMINAL_STATUSES, round_down_to_tick, round_up_to_tick, tick_size
-from .config import _bool, _get
+from .config import KST, _bool, _get
 from .market_calendar import TradingDay
 
 log = logging.getLogger(__name__)
 
 GONE_STATUSES = TERMINAL_STATUSES | {"EXPIRED"}
 LAST_ORDER_BEFORE_CLOSE = timedelta(minutes=10)  # 마감 직전(동시호가)에는 새 주문을 내지 않음
+BUY_RETRY_AFTER = timedelta(minutes=5)  # 현금 부족이 아닌 매수 거절 뒤 다시 시도할 때까지
 
 
 @dataclass
@@ -154,7 +155,9 @@ class SplitTrader:
                          len(st.lots), f"{st.lots[-1].price:,}")
         self.st = st
         self.checked_day = None  # 계좌 보유 수량을 확인한 날 (하루 한 번)
-        self.buy_blocked_day = None  # 현금 부족 등으로 매수를 못 낸 날 (그날은 매수 쉼)
+        self.buy_blocked_day = None  # 현금 부족으로 매수를 못 낸 날 (그날은 매수 쉼)
+        self.buy_blocked_until = None  # 그 밖의 거절(서킷브레이커 등)은 잠깐만 쉼
+        self.now = None
         self.today = None
 
     def real_quantity(self) -> int | None:
@@ -289,7 +292,7 @@ class SplitTrader:
     def place(self, key: str, lot: Lot, price: int, qty: int) -> None:
         side = "BUY" if key == "buy_order" else "SELL"
         if side == "BUY":
-            if self.buy_blocked_day == self.today:
+            if self.buy_blocked():
                 return
             reason = ""
             try:
@@ -304,13 +307,23 @@ class SplitTrader:
                     return
                 reason = f"주문 거절 ({exc})"
             if reason:
-                self.buy_blocked_day = self.today  # 오늘은 다시 시도하지 않음 (매분 같은 오류 방지)
-                log.warning("스플릿 %s %d차 매수 %s원 못 냄: %s → 오늘은 매수 쉼", self.st.symbol, lot.level,
-                            f"{price:,}", reason)
+                if reason.startswith("현금 부족"):
+                    self.buy_blocked_day = self.today  # 오늘은 다시 시도하지 않음 (매분 같은 오류 방지)
+                    wait = "오늘은 매수 쉼"
+                else:  # 서킷브레이커 등 잠깐 거절 → 몇 분 뒤 다시 (2026-11-06: 하루를 통째로 막아 23·24차를 놓침)
+                    self.buy_blocked_until = (self.now or datetime.now(KST)) + BUY_RETRY_AFTER
+                    wait = f"{int(BUY_RETRY_AFTER.total_seconds() // 60)}분 뒤 다시"
+                log.warning("스플릿 %s %d차 매수 %s원 못 냄: %s → %s", self.st.symbol, lot.level,
+                            f"{price:,}", reason, wait)
                 return
         else:
             oid = self.broker.sell_limit(self.st.symbol, qty, price)
         setattr(self.st, key, {"id": oid, "level": lot.level, "price": price, "qty": qty})
+
+    def buy_blocked(self) -> bool:
+        if self.buy_blocked_day == self.today:
+            return True
+        return bool(self.buy_blocked_until and self.now and self.now < self.buy_blocked_until)
 
     def can_order(self, now: datetime, day: TradingDay | None) -> bool:
         if day is None or not day.is_open or day.market_open is None or day.market_close is None:
@@ -320,6 +333,7 @@ class SplitTrader:
     # --------------------------------------------------------------- tick
     def tick(self, now: datetime, day: TradingDay | None) -> None:
         self.today = now.date()
+        self.now = now
         if self.sync(now):
             self.store.save(self.st)
         if self.st.symbol in self.bot_symbols():
@@ -367,7 +381,7 @@ class SplitTrader:
         price = float(self.broker.last_prices([self.st.symbol])[self.st.symbol])
         cur = "buy_order" if self.st.buy_order else "sell_order" if self.st.sell_order else None
         want = self.pick_side(price, buy, sell, cur)
-        if want == "buy_order" and self.buy_blocked_day == self.today and sell:
+        if want == "buy_order" and self.buy_blocked() and sell:
             want = "sell_order"  # 오늘은 매수를 못 내니 익절 주문이라도 걸어 둠
         if cur and cur != want:
             self.cancel(cur)

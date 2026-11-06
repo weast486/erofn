@@ -252,6 +252,24 @@ class SplitTest(unittest.TestCase):
         self.assertEqual(self.broker.pending(), [("BUY", 12420)])
         self.assertEqual(self.t.held_qty(), 8)
 
+    def test_temporary_reject_retries_later(self):
+        # 서킷브레이커 같은 거절은 하루가 아니라 몇 분만 쉼 (2026-11-06 실전)
+        real = self.broker.buy_limit
+        calls = {"n": 0}
+
+        def cb(symbol, qty, price):
+            calls["n"] += 1
+            raise RuntimeError("[422] stock-restricted: CB발동중으로 주문처리가 불가합니다.")
+        self.broker.buy_limit = cb
+        self.step(12500)
+        self.assertEqual(calls["n"], 1)
+        self.step(12500, datetime(2026, 10, 29, 10, 3, tzinfo=KST))  # 5분 안: 다시 안 냄
+        self.assertEqual(calls["n"], 1)
+        self.broker.buy_limit = real
+        self.step(12400, datetime(2026, 10, 29, 10, 6, tzinfo=KST))  # 5분 뒤: 다시 냄 → 체결
+        self.step(12400, datetime(2026, 10, 29, 10, 7, tzinfo=KST))
+        self.assertEqual(self.t.held_qty(), 9)
+
     def test_pause_when_bot_holds_symbol(self):
         t = SplitTrader(self.cfg, self.broker, SplitStore(Path(self.dir.name) / "s2.json"),
                         bot_symbols=lambda: {"229200"})

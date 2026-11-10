@@ -1,6 +1,7 @@
 r"""SOXL 1시간봉 20선 이탈 숏 (2026-11-10 사용자 요청): 끝난 1시간봉 종가가 단순 20선 아래로 내려가면
 (직전 봉은 20선 이상) 선물 계좌 평가금액 x 2배를 시장가 숏 → 거래소 손절(진입가 +5%)·익절(진입가 -10%)을
 전량 조건 주문(closePosition)으로 걸어 둠. 한 번 매매로 끝.
+미국 정규장이 끝나면(동부 16:00, 사용자 요청) 숏은 시장가로 정리하고, 아직 진입 전이면 감시를 끝냄.
 
   python scripts/soxl_ma20_short.py run     # 감시 (windows\soxl_ma20_short.bat), 다시 켜면 이어서
   python scripts/soxl_ma20_short.py check   # 지금 20선·포지션·주문만 보여 줌 (주문 없음)
@@ -16,7 +17,9 @@ import os
 import sys
 import time
 from datetime import datetime
+from datetime import timedelta
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -29,6 +32,18 @@ SYMBOL, LEVERAGE, MA, STOP_PCT, TP_PCT = "SOXLUSDT", 2.0, 20, 5.0, 10.0
 DIR = ROOT / "state_binance_split"
 STATE, TRADES = DIR / "ma20_short.json", DIR / "ma20_short_trades.csv"
 log = logging.getLogger("ma20short")
+ET = ZoneInfo("America/New_York")
+
+
+def next_close_ms() -> int:
+    """다음 미국 정규장 마감(동부 16:00, 주말이면 다음 평일) 시각."""
+    now = datetime.now(ET)
+    d = now.replace(hour=16, minute=0, second=0, microsecond=0)
+    if now >= d:
+        d += timedelta(days=1)
+    while d.weekday() >= 5:
+        d += timedelta(days=1)
+    return int(d.timestamp() * 1000)
 
 
 def setup() -> BinanceClient:
@@ -93,7 +108,7 @@ def finish(c: BinanceClient, st: dict) -> None:
     bp = sum(float(t["price"]) * float(t["qty"]) for t in buys) / bq if bq else 0.0
     fee = sum(float(t.get("commission") or 0) for t in rows)
     pnl = st["qty"] * st["entry"] - bq * bp - fee
-    reason = "stop" if bp >= st["stop"] * 0.998 else "tp" if bp and bp <= st["tp"] * 1.002 else "close"
+    reason = "time" if time.time() * 1000 >= st.get("deadline", 1e18) else "stop" if bp >= st["stop"] * 0.998 else "tp" if bp and bp <= st["tp"] * 1.002 else "close"
     new = not TRADES.exists()
     with open(TRADES, "a", newline="", encoding="utf-8") as fh:
         w = csv.writer(fh)
@@ -107,6 +122,11 @@ def finish(c: BinanceClient, st: dict) -> None:
 
 def run(c: BinanceClient) -> None:
     st = json.loads(STATE.read_text(encoding="utf-8")) if STATE.exists() else {"entered": False, "last_bar": 0}
+    if not st.get("deadline"):
+        st["deadline"] = next_close_ms()
+        save(st)
+    log.info("미국 정규장 마감 %s (한국 시각) 에 정리·종료",
+             datetime.fromtimestamp(st["deadline"] / 1000).strftime("%m-%d %H:%M"))
     if not st["entered"]:
         amt, _ = c.position_amt(SYMBOL)
         if amt != 0:
@@ -115,6 +135,20 @@ def run(c: BinanceClient) -> None:
                  MA, LEVERAGE, STOP_PCT, TP_PCT)
     while True:
         try:
+            if time.time() * 1000 >= st["deadline"]:
+                if not st["entered"]:
+                    log.info("미국 정규장 마감 → 진입 없이 감시 끝")
+                    STATE.unlink(missing_ok=True)
+                    return
+                amt, _ = c.position_amt(SYMBOL)
+                c.cancel_all(SYMBOL)
+                if amt < 0:
+                    c.order(symbol=SYMBOL, side="BUY", type="MARKET", quantity=fmt(-amt), reduceOnly="true",
+                            newClientOrderId=f"ma20s_t_{int(time.time())}")
+                    log.info("미국 정규장 마감 → 숏 %g 시장가 정리", -amt)
+                    time.sleep(2)
+                finish(c, st)
+                return
             if not st["entered"]:
                 hit, bar, close, sma = signal(closed_bars(c))
                 if bar != st.get("last_bar"):

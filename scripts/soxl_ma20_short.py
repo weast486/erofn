@@ -30,6 +30,7 @@ from binancebot.client import BinanceClient, filters_of, fmt, round_step, round_
 
 SYMBOL, LEVERAGE, MA, STOP_PCT, TP_PCT = "SOXLUSDT", 2.0, 20, 5.0, 10.0
 TP_MA = 50  # 2026-11-10 사용자 요청: 가격이 1시간봉 50선에 닿으면 바로 익절
+STOP_MA = 200  # 2026-11-10 사용자 요청: 끝난 1시간봉 종가가 200선 위면 손절 (+5% 거래소 손절 대신)
 DIR = ROOT / "state_binance_split"
 STATE, TRADES = DIR / "ma20_short.json", DIR / "ma20_short_trades.csv"
 log = logging.getLogger("ma20short")
@@ -73,6 +74,14 @@ def ma_now(c: BinanceClient, n: int = TP_MA) -> float:
     """차트에 보이는 지금 1시간봉 n선 (진행 중 봉은 현재가로)."""
     k = c._req("GET", "/fapi/v1/klines", {"symbol": SYMBOL, "interval": "1h", "limit": n})
     return sum(float(x[4]) for x in k[-n:]) / n
+
+
+def above_stop_ma(c: BinanceClient) -> tuple[int, float, float]:
+    """마지막 끝난 1시간봉 (시작 ms, 종가, 200선)."""
+    k = c._req("GET", "/fapi/v1/klines", {"symbol": SYMBOL, "interval": "1h", "limit": STOP_MA + 2})
+    now = int(time.time() * 1000)
+    done = [x for x in k if int(x[6]) < now][-STOP_MA:]
+    return int(done[-1][0]), float(done[-1][4]), sum(float(x[4]) for x in done) / len(done)
 
 
 def signal(bars) -> tuple[bool, int, float, float]:
@@ -140,6 +149,13 @@ def run(c: BinanceClient) -> None:
             raise SystemExit(f"이미 포지션 {amt} 이 있어 시작 안 함")
         log.info("감시 시작: 1시간봉 종가가 %d선 아래로 내려가면 평가금액 x %g배 숏, 손절 +%g%% · 익절 -%g%%",
                  MA, LEVERAGE, STOP_PCT, TP_PCT)
+    if st["entered"] and st.get("stop_mode") != "ma200":
+        c.cancel_all(SYMBOL)
+        c.stop_market(SYMBOL, "BUY", st["tp"], kind="TAKE_PROFIT_MARKET")
+        st["stop_mode"] = "ma200"
+        save(st)
+        log.info("거래소 +%g%% 손절 취소, 익절 %.2f 만 다시 걸어 둠 → 손절은 1시간봉 종가가 %d선 위일 때",
+                 STOP_PCT, st["tp"], STOP_MA)
     while True:
         try:
             if time.time() * 1000 >= st["deadline"]:
@@ -172,6 +188,21 @@ def run(c: BinanceClient) -> None:
                     log.info("포지션 0 (손절·익절·앱에서 정리) → 남은 주문 취소하고 끝")
                     finish(c, st)
                     return
+                bar, close, m200 = above_stop_ma(c)
+                if bar != st.get("stop_bar"):
+                    st["stop_bar"] = bar
+                    save(st)
+                    log.info("%s 봉 종가 %.2f / %d선 %.3f → %s", datetime.fromtimestamp(bar / 1000).strftime("%m-%d %H:%M"),
+                             close, STOP_MA, m200, "위! 손절" if close > m200 else "보유")
+                    if close > m200:
+                        c.cancel_all(SYMBOL)
+                        c.order(symbol=SYMBOL, side="BUY", type="MARKET", quantity=fmt(-amt), reduceOnly="true",
+                                newClientOrderId=f"ma20s_s_{int(time.time())}")
+                        st["reason"] = "ma200"
+                        save(st)
+                        time.sleep(2)
+                        finish(c, st)
+                        return
                 p = c.prices()[SYMBOL]
                 m50 = ma_now(c)
                 if p <= m50:
@@ -184,7 +215,7 @@ def run(c: BinanceClient) -> None:
                     time.sleep(2)
                     finish(c, st)
                     return
-                if p >= st["stop"] * 1.003 or p <= st["tp"] * 0.997:  # 거래소 주문이 안 걸렸을 때 대비
+                if (st.get("stop_mode") != "ma200" and p >= st["stop"] * 1.003) or p <= st["tp"] * 0.997:  # 거래소 주문이 안 걸렸을 때 대비
                     c.cancel_all(SYMBOL)
                     c.order(symbol=SYMBOL, side="BUY", type="MARKET", quantity=fmt(-amt), reduceOnly="true",
                             newClientOrderId=f"ma20s_x_{int(time.time())}")
@@ -202,6 +233,6 @@ if __name__ == "__main__":
         hit, bar, close, sma = signal(closed_bars(client))
         print("마지막 끝난 봉", datetime.fromtimestamp(bar / 1000).strftime("%m-%d %H:%M"), "종가", close,
               "20선", round(sma, 3), "신호" if hit else "")
-        print("포지션", client.position_amt(SYMBOL), "현재가", client.prices()[SYMBOL], f"{TP_MA}선", round(ma_now(client), 3))
+        print("포지션", client.position_amt(SYMBOL), "현재가", client.prices()[SYMBOL], f"{TP_MA}선", round(ma_now(client), 3), f"{STOP_MA}선(끝난 봉)", round(above_stop_ma(client)[2], 3))
         for o in client.open_orders(SYMBOL):
             print(o.get("clientOrderId"), o.get("side"), o.get("type"), o.get("price"), o.get("origQty"))

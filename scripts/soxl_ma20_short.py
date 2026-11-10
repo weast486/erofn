@@ -76,12 +76,13 @@ def ma_now(c: BinanceClient, n: int = TP_MA) -> float:
     return sum(float(x[4]) for x in k[-n:]) / n
 
 
-def above_stop_ma(c: BinanceClient) -> tuple[int, float, float]:
-    """마지막 끝난 1시간봉 (시작 ms, 종가, 200선)."""
+def above_stop_ma(c: BinanceClient) -> tuple[int, float, float, float]:
+    """마지막 끝난 1시간봉 (시작 ms, 종가, 200선, 20선)."""
     k = c._req("GET", "/fapi/v1/klines", {"symbol": SYMBOL, "interval": "1h", "limit": STOP_MA + 2})
     now = int(time.time() * 1000)
     done = [x for x in k if int(x[6]) < now][-STOP_MA:]
-    return int(done[-1][0]), float(done[-1][4]), sum(float(x[4]) for x in done) / len(done)
+    m20 = sum(float(x[4]) for x in done[-MA:]) / MA
+    return int(done[-1][0]), float(done[-1][4]), sum(float(x[4]) for x in done) / len(done), m20
 
 
 def signal(bars) -> tuple[bool, int, float, float]:
@@ -127,7 +128,7 @@ def finish(c: BinanceClient, st: dict) -> None:
     lp = float(buys[-1]["price"]) if buys else 0.0  # 마지막으로 되산 가격으로 사유 판정
     reason = st.get("reason") or ("time" if time.time() * 1000 >= st.get("deadline", 1e18) else "stop" if lp >= st["stop"] * 0.998 else "tp" if lp and lp <= st["tp"] * 1.002 else "close")
     if st.get("half_done"):
-        reason = "half_ma50+" + ("be" if reason == "stop" else reason)
+        reason = "half+" + ("be" if reason == "stop" else reason)
     new = not TRADES.exists()
     with open(TRADES, "a", newline="", encoding="utf-8") as fh:
         w = csv.writer(fh)
@@ -191,17 +192,18 @@ def run(c: BinanceClient) -> None:
                     log.info("포지션 0 (손절·익절·앱에서 정리) → 남은 주문 취소하고 끝")
                     finish(c, st)
                     return
-                bar, close, m200 = above_stop_ma(c)
+                bar, close, m200, m20 = above_stop_ma(c)
+                out = close > m200 or (st.get("half_done") and close > m20)  # 2026-11-10: 절반 익절 뒤엔 20선 위 마감도 손절
                 if bar != st.get("stop_bar"):
                     st["stop_bar"] = bar
                     save(st)
-                    log.info("%s 봉 종가 %.2f / %d선 %.3f → %s", datetime.fromtimestamp(bar / 1000).strftime("%m-%d %H:%M"),
-                             close, STOP_MA, m200, "위! 손절" if close > m200 else "보유")
-                    if close > m200:
+                    log.info("%s 봉 종가 %.2f / %d선 %.3f / %d선 %.3f → %s", datetime.fromtimestamp(bar / 1000).strftime("%m-%d %H:%M"),
+                             close, STOP_MA, m200, MA, m20, "위! 손절" if out else "보유")
+                    if out:
                         c.cancel_all(SYMBOL)
                         c.order(symbol=SYMBOL, side="BUY", type="MARKET", quantity=fmt(-amt), reduceOnly="true",
                                 newClientOrderId=f"ma20s_s_{int(time.time())}")
-                        st["reason"] = "ma200"
+                        st["reason"] = "ma200" if close > m200 else "ma20"
                         save(st)
                         time.sleep(2)
                         finish(c, st)
@@ -245,6 +247,6 @@ if __name__ == "__main__":
         hit, bar, close, sma = signal(closed_bars(client))
         print("마지막 끝난 봉", datetime.fromtimestamp(bar / 1000).strftime("%m-%d %H:%M"), "종가", close,
               "20선", round(sma, 3), "신호" if hit else "")
-        print("포지션", client.position_amt(SYMBOL), "현재가", client.prices()[SYMBOL], f"{TP_MA}선", round(ma_now(client), 3), f"{STOP_MA}선(끝난 봉)", round(above_stop_ma(client)[2], 3))
+        print("포지션", client.position_amt(SYMBOL), "현재가", client.prices()[SYMBOL], f"{TP_MA}선", round(ma_now(client), 3), f"{STOP_MA}선(끝난 봉)", round(above_stop_ma(client)[2], 3), f"{MA}선(끝난 봉)", round(above_stop_ma(client)[3], 3))
         for o in client.open_orders(SYMBOL):
             print(o.get("clientOrderId"), o.get("side"), o.get("type"), o.get("price"), o.get("origQty"))

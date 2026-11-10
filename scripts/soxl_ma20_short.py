@@ -29,6 +29,7 @@ from tossbot.config import load_dotenv  # noqa: E402
 from binancebot.client import BinanceClient, filters_of, fmt, round_step, round_tick  # noqa: E402
 
 SYMBOL, LEVERAGE, MA, STOP_PCT, TP_PCT = "SOXLUSDT", 2.0, 20, 5.0, 10.0
+TP_MA = 50  # 2026-11-10 사용자 요청: 가격이 1시간봉 50선에 닿으면 바로 익절
 DIR = ROOT / "state_binance_split"
 STATE, TRADES = DIR / "ma20_short.json", DIR / "ma20_short_trades.csv"
 log = logging.getLogger("ma20short")
@@ -66,6 +67,12 @@ def closed_bars(c: BinanceClient) -> list[tuple[int, float]]:
     k = c._req("GET", "/fapi/v1/klines", {"symbol": SYMBOL, "interval": "1h", "limit": MA + 5})
     now = int(time.time() * 1000)
     return [(int(x[0]), float(x[4])) for x in k if int(x[6]) < now]
+
+
+def ma_now(c: BinanceClient, n: int = TP_MA) -> float:
+    """차트에 보이는 지금 1시간봉 n선 (진행 중 봉은 현재가로)."""
+    k = c._req("GET", "/fapi/v1/klines", {"symbol": SYMBOL, "interval": "1h", "limit": n})
+    return sum(float(x[4]) for x in k[-n:]) / n
 
 
 def signal(bars) -> tuple[bool, int, float, float]:
@@ -108,7 +115,7 @@ def finish(c: BinanceClient, st: dict) -> None:
     bp = sum(float(t["price"]) * float(t["qty"]) for t in buys) / bq if bq else 0.0
     fee = sum(float(t.get("commission") or 0) for t in rows)
     pnl = st["qty"] * st["entry"] - bq * bp - fee
-    reason = "time" if time.time() * 1000 >= st.get("deadline", 1e18) else "stop" if bp >= st["stop"] * 0.998 else "tp" if bp and bp <= st["tp"] * 1.002 else "close"
+    reason = st.get("reason") or ("time" if time.time() * 1000 >= st.get("deadline", 1e18) else "stop" if bp >= st["stop"] * 0.998 else "tp" if bp and bp <= st["tp"] * 1.002 else "close")
     new = not TRADES.exists()
     with open(TRADES, "a", newline="", encoding="utf-8") as fh:
         w = csv.writer(fh)
@@ -166,6 +173,17 @@ def run(c: BinanceClient) -> None:
                     finish(c, st)
                     return
                 p = c.prices()[SYMBOL]
+                m50 = ma_now(c)
+                if p <= m50:
+                    c.cancel_all(SYMBOL)
+                    c.order(symbol=SYMBOL, side="BUY", type="MARKET", quantity=fmt(-amt), reduceOnly="true",
+                            newClientOrderId=f"ma20s_m_{int(time.time())}")
+                    st["reason"] = "ma50"
+                    save(st)
+                    log.info("현재가 %.4f 가 %d선 %.4f 에 닿음 → 시장가 익절", p, TP_MA, m50)
+                    time.sleep(2)
+                    finish(c, st)
+                    return
                 if p >= st["stop"] * 1.003 or p <= st["tp"] * 0.997:  # 거래소 주문이 안 걸렸을 때 대비
                     c.cancel_all(SYMBOL)
                     c.order(symbol=SYMBOL, side="BUY", type="MARKET", quantity=fmt(-amt), reduceOnly="true",
@@ -184,6 +202,6 @@ if __name__ == "__main__":
         hit, bar, close, sma = signal(closed_bars(client))
         print("마지막 끝난 봉", datetime.fromtimestamp(bar / 1000).strftime("%m-%d %H:%M"), "종가", close,
               "20선", round(sma, 3), "신호" if hit else "")
-        print("포지션", client.position_amt(SYMBOL), "현재가", client.prices()[SYMBOL])
+        print("포지션", client.position_amt(SYMBOL), "현재가", client.prices()[SYMBOL], f"{TP_MA}선", round(ma_now(client), 3))
         for o in client.open_orders(SYMBOL):
             print(o.get("clientOrderId"), o.get("side"), o.get("type"), o.get("price"), o.get("origQty"))

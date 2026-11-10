@@ -1,6 +1,6 @@
 r"""SOXL 1시간봉 20선 이탈 숏 (2026-11-10 사용자 요청): 끝난 1시간봉 종가가 단순 20선 아래로 내려가면
 (직전 봉은 20선 이상) 선물 계좌 평가금액 x 2배를 시장가 숏 → 거래소 손절(진입가 +5%)·익절(진입가 -10%)을
-전량 조건 주문(closePosition)으로 걸어 둠. 한 번 매매로 끝.
+전량 조건 주문(closePosition)으로 걸어 둠. 한 번 매매로 끝. 50선에 닿으면 절반 익절·나머지는 본절 손절(2026-11-10).
 미국 정규장이 끝나면(동부 16:00, 사용자 요청) 숏은 시장가로 정리하고, 아직 진입 전이면 감시를 끝냄.
 
   python scripts/soxl_ma20_short.py run     # 감시 (windows\soxl_ma20_short.bat), 다시 켜면 이어서
@@ -124,7 +124,10 @@ def finish(c: BinanceClient, st: dict) -> None:
     bp = sum(float(t["price"]) * float(t["qty"]) for t in buys) / bq if bq else 0.0
     fee = sum(float(t.get("commission") or 0) for t in rows)
     pnl = st["qty"] * st["entry"] - bq * bp - fee
-    reason = st.get("reason") or ("time" if time.time() * 1000 >= st.get("deadline", 1e18) else "stop" if bp >= st["stop"] * 0.998 else "tp" if bp and bp <= st["tp"] * 1.002 else "close")
+    lp = float(buys[-1]["price"]) if buys else 0.0  # 마지막으로 되산 가격으로 사유 판정
+    reason = st.get("reason") or ("time" if time.time() * 1000 >= st.get("deadline", 1e18) else "stop" if lp >= st["stop"] * 0.998 else "tp" if lp and lp <= st["tp"] * 1.002 else "close")
+    if st.get("half_done"):
+        reason = "half_ma50+" + ("be" if reason == "stop" else reason)
     new = not TRADES.exists()
     with open(TRADES, "a", newline="", encoding="utf-8") as fh:
         w = csv.writer(fh)
@@ -149,7 +152,7 @@ def run(c: BinanceClient) -> None:
             raise SystemExit(f"이미 포지션 {amt} 이 있어 시작 안 함")
         log.info("감시 시작: 1시간봉 종가가 %d선 아래로 내려가면 평가금액 x %g배 숏, 손절 +%g%% · 익절 -%g%%",
                  MA, LEVERAGE, STOP_PCT, TP_PCT)
-    if st["entered"] and st.get("stop_mode") != "ma200":
+    if st["entered"] and st.get("stop_mode") not in ("ma200", "be"):
         c.cancel_all(SYMBOL)
         c.stop_market(SYMBOL, "BUY", st["tp"], kind="TAKE_PROFIT_MARKET")
         st["stop_mode"] = "ma200"
@@ -204,17 +207,26 @@ def run(c: BinanceClient) -> None:
                         finish(c, st)
                         return
                 p = c.prices()[SYMBOL]
-                m50 = ma_now(c)
-                if p <= m50:
+                m50 = ma_now(c) if not st.get("half_done") else 0.0
+                if not st.get("half_done") and p <= m50:
+                    # 2026-11-10 사용자 요청: 50선에 닿으면 절반만 익절, 나머지는 손절선을 진입가(본절)로
+                    f = filters_of(next(s for s in c.exchange_info()["symbols"] if s["symbol"] == SYMBOL))
+                    half = round_step(-amt / 2, f["step"])
                     c.cancel_all(SYMBOL)
-                    c.order(symbol=SYMBOL, side="BUY", type="MARKET", quantity=fmt(-amt), reduceOnly="true",
-                            newClientOrderId=f"ma20s_m_{int(time.time())}")
-                    st["reason"] = "ma50"
+                    c.order(symbol=SYMBOL, side="BUY", type="MARKET", quantity=fmt(half), reduceOnly="true",
+                            newClientOrderId=f"ma20s_h_{int(time.time())}")
+                    be = round_tick(st["entry"], f["tick"])
+                    st.update(half_done=True, stop=be, stop_mode="be")
                     save(st)
-                    log.info("현재가 %.4f 가 %d선 %.4f 에 닿음 → 시장가 익절", p, TP_MA, m50)
-                    time.sleep(2)
-                    finish(c, st)
-                    return
+                    log.info("현재가 %.4f 가 %d선 %.4f 에 닿음 → 절반 %g 시장가 익절, 나머지 손절 = 본절 %.2f",
+                             p, TP_MA, m50, half, be)
+                    for kind, px in (("STOP_MARKET", be), ("TAKE_PROFIT_MARKET", st["tp"])):
+                        try:
+                            c.stop_market(SYMBOL, "BUY", px, kind=kind)
+                            log.info("거래소 %s %.2f 걸어 둠 (남은 전량)", "본절 손절" if kind == "STOP_MARKET" else "익절", px)
+                        except Exception as exc:  # noqa: BLE001
+                            log.warning("거래소 %s 실패 (%s) → 이 창이 가격 보고 처리", kind, exc)
+                    continue
                 if (st.get("stop_mode") != "ma200" and p >= st["stop"] * 1.003) or p <= st["tp"] * 0.997:  # 거래소 주문이 안 걸렸을 때 대비
                     c.cancel_all(SYMBOL)
                     c.order(symbol=SYMBOL, side="BUY", type="MARKET", quantity=fmt(-amt), reduceOnly="true",

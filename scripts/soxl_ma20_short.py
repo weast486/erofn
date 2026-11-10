@@ -1,0 +1,155 @@
+r"""SOXL 1시간봉 20선 이탈 숏 (2026-11-10 사용자 요청): 끝난 1시간봉 종가가 단순 20선 아래로 내려가면
+(직전 봉은 20선 이상) 선물 계좌 평가금액 x 2배를 시장가 숏 → 거래소 손절(진입가 +5%)·익절(진입가 -10%)을
+전량 조건 주문(closePosition)으로 걸어 둠. 한 번 매매로 끝.
+
+  python scripts/soxl_ma20_short.py run     # 감시 (windows\soxl_ma20_short.bat), 다시 켜면 이어서
+  python scripts/soxl_ma20_short.py check   # 지금 20선·포지션·주문만 보여 줌 (주문 없음)
+
+키는 .env.binance_split. 같은 계정·같은 종목이라 스플릿 봇은 꺼 둬야 함.
+"""
+from __future__ import annotations
+
+import csv
+import json
+import logging
+import os
+import sys
+import time
+from datetime import datetime
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+
+from tossbot.config import load_dotenv  # noqa: E402
+
+from binancebot.client import BinanceClient, filters_of, fmt, round_step, round_tick  # noqa: E402
+
+SYMBOL, LEVERAGE, MA, STOP_PCT, TP_PCT = "SOXLUSDT", 2.0, 20, 5.0, 10.0
+DIR = ROOT / "state_binance_split"
+STATE, TRADES = DIR / "ma20_short.json", DIR / "ma20_short_trades.csv"
+log = logging.getLogger("ma20short")
+
+
+def setup() -> BinanceClient:
+    load_dotenv(str(ROOT / ".env.binance_split"))
+    DIR.mkdir(exist_ok=True)
+    f = logging.Formatter("%(asctime)s %(message)s")
+    log.setLevel(logging.INFO)
+    for h in (logging.StreamHandler(), logging.FileHandler(DIR / "ma20_short.log", encoding="utf-8")):
+        h.setFormatter(f)
+        log.addHandler(h)
+    return BinanceClient(os.environ["BINANCE_API_KEY"], os.environ["BINANCE_API_SECRET"])
+
+
+def save(st: dict) -> None:
+    STATE.write_text(json.dumps(st), encoding="utf-8")
+
+
+def closed_bars(c: BinanceClient) -> list[tuple[int, float]]:
+    """끝난 1시간봉 (시작 ms, 종가) 목록, 마지막 진행 중 봉은 뺌."""
+    k = c._req("GET", "/fapi/v1/klines", {"symbol": SYMBOL, "interval": "1h", "limit": MA + 5})
+    now = int(time.time() * 1000)
+    return [(int(x[0]), float(x[4])) for x in k if int(x[6]) < now]
+
+
+def signal(bars) -> tuple[bool, int, float, float]:
+    closes = [b[1] for b in bars]
+    sma = sum(closes[-MA:]) / MA
+    prev_sma = sum(closes[-MA - 1:-1]) / MA
+    return closes[-1] < sma and closes[-2] >= prev_sma, bars[-1][0], closes[-1], sma
+
+
+def enter(c: BinanceClient, st: dict) -> None:
+    f = filters_of(next(s for s in c.exchange_info()["symbols"] if s["symbol"] == SYMBOL))
+    p = c.prices()[SYMBOL]
+    eq = c.equity()
+    qty = round_step(eq * LEVERAGE / p, f["step"])
+    st["start"] = int(time.time() * 1000)
+    c.order(symbol=SYMBOL, side="SELL", type="MARKET", quantity=fmt(qty),
+            newClientOrderId=f"ma20s_e_{int(time.time())}", newOrderRespType="RESULT")
+    time.sleep(1)
+    rows = [t for t in c.fills(SYMBOL, start_ms=st["start"] - 5000) if t["side"] == "SELL"]
+    q = sum(float(t["qty"]) for t in rows)
+    entry = sum(float(t["price"]) * float(t["qty"]) for t in rows) / q if q else p
+    st.update(entered=True, entry=entry, qty=q or qty, equity=eq,
+              stop=round_tick(entry * (1 + STOP_PCT / 100), f["tick"]),
+              tp=round_tick(entry * (1 - TP_PCT / 100), f["tick"]))
+    save(st)
+    log.info("숏 진입 %.4f x %g (평가금액 %.2f x %g배)", entry, st["qty"], eq, LEVERAGE)
+    for kind, px in (("STOP_MARKET", st["stop"]), ("TAKE_PROFIT_MARKET", st["tp"])):
+        try:
+            c.stop_market(SYMBOL, "BUY", px, kind=kind)
+            log.info("거래소 %s %.2f 걸어 둠 (전량)", "손절" if kind == "STOP_MARKET" else "익절", px)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("거래소 %s 실패 (%s) → 이 창이 가격 보고 처리", kind, exc)
+
+
+def finish(c: BinanceClient, st: dict) -> None:
+    c.cancel_all(SYMBOL)
+    rows = [t for t in c.fills(SYMBOL, start_ms=st["start"] - 5000)]
+    buys = [t for t in rows if t["side"] == "BUY"]
+    bq = sum(float(t["qty"]) for t in buys)
+    bp = sum(float(t["price"]) * float(t["qty"]) for t in buys) / bq if bq else 0.0
+    fee = sum(float(t.get("commission") or 0) for t in rows)
+    pnl = st["qty"] * st["entry"] - bq * bp - fee
+    reason = "stop" if bp >= st["stop"] * 0.998 else "tp" if bp and bp <= st["tp"] * 1.002 else "close"
+    new = not TRADES.exists()
+    with open(TRADES, "a", newline="", encoding="utf-8") as fh:
+        w = csv.writer(fh)
+        if new:
+            w.writerow(["time", "entry", "exit", "qty", "pnl", "reason"])
+        w.writerow([datetime.now().strftime("%Y-%m-%d %H:%M:%S"), f"{st['entry']:.4f}", f"{bp:.4f}",
+                    f"{st['qty']:g}", f"{pnl:.4f}", reason])
+    log.info("정리 끝 (%s): 숏 %.4f → 되사기 %.4f x %g, 손익 %+.4f USDT (수수료 포함)", reason, st["entry"], bp, bq, pnl)
+    STATE.unlink(missing_ok=True)
+
+
+def run(c: BinanceClient) -> None:
+    st = json.loads(STATE.read_text(encoding="utf-8")) if STATE.exists() else {"entered": False, "last_bar": 0}
+    if not st["entered"]:
+        amt, _ = c.position_amt(SYMBOL)
+        if amt != 0:
+            raise SystemExit(f"이미 포지션 {amt} 이 있어 시작 안 함")
+        log.info("감시 시작: 1시간봉 종가가 %d선 아래로 내려가면 평가금액 x %g배 숏, 손절 +%g%% · 익절 -%g%%",
+                 MA, LEVERAGE, STOP_PCT, TP_PCT)
+    while True:
+        try:
+            if not st["entered"]:
+                hit, bar, close, sma = signal(closed_bars(c))
+                if bar != st.get("last_bar"):
+                    st["last_bar"] = bar
+                    save(st)
+                    log.info("%s 봉 종가 %.2f / 20선 %.3f → %s",
+                             datetime.fromtimestamp(bar / 1000).strftime("%m-%d %H:%M"), close, sma,
+                             "이탈! 숏 진입" if hit else "대기")
+                    if hit:
+                        enter(c, st)
+            else:
+                amt, _ = c.position_amt(SYMBOL)
+                if amt >= 0:
+                    log.info("포지션 0 (손절·익절·앱에서 정리) → 남은 주문 취소하고 끝")
+                    finish(c, st)
+                    return
+                p = c.prices()[SYMBOL]
+                if p >= st["stop"] * 1.003 or p <= st["tp"] * 0.997:  # 거래소 주문이 안 걸렸을 때 대비
+                    c.cancel_all(SYMBOL)
+                    c.order(symbol=SYMBOL, side="BUY", type="MARKET", quantity=fmt(-amt), reduceOnly="true",
+                            newClientOrderId=f"ma20s_x_{int(time.time())}")
+                    log.info("현재가 %.4f → 직접 시장가 정리", p)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("확인 실패, 다시: %s", exc)
+        time.sleep(15)
+
+
+if __name__ == "__main__":
+    client = setup()
+    if (sys.argv[1] if len(sys.argv) > 1 else "check") == "run":
+        run(client)
+    else:
+        hit, bar, close, sma = signal(closed_bars(client))
+        print("마지막 끝난 봉", datetime.fromtimestamp(bar / 1000).strftime("%m-%d %H:%M"), "종가", close,
+              "20선", round(sma, 3), "신호" if hit else "")
+        print("포지션", client.position_amt(SYMBOL), "현재가", client.prices()[SYMBOL])
+        for o in client.open_orders(SYMBOL):
+            print(o.get("clientOrderId"), o.get("side"), o.get("type"), o.get("price"), o.get("origQty"))

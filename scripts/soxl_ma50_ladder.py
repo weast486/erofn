@@ -1,5 +1,5 @@
 r"""SOXL 5분봉 50선 4분할 매수 (2026-11-11 사용자 요청): 시작할 때의 5분봉 단순 50선 ±0.5달러 범위를
-4등분한 가격(50선+0.5, +0.17, -0.17, -0.5)에 평가금액 x 2배를 4분의 1씩 지정가 매수(롱).
+4등분한 가격(50선+0.5, +0.17, -0.17, -0.5, 안 산 차수는 50선을 따라 계속 옮김)에 평가금액 x 2배를 4분의 1씩 지정가 매수(롱).
 체결될 때마다 평균 진입가 기준 거래소 익절 +6%·손절 -2%(포지션 전량 closePosition)를 다시 걸어 둠.
 포지션이 0 이 되면(익절·손절·앱에서 정리) 남은 매수 주문을 취소하고 끝. 한 번 매매로 끝.
 
@@ -31,6 +31,7 @@ from binancebot.client import BinanceClient, BinanceError, filters_of, fmt, roun
 
 SYMBOL, LEVERAGE, MA, BAND, PARTS, TP_PCT, SL_PCT = "SOXLUSDT", 2.0, 50, 0.5, 4, 6.0, 2.0
 LIMIT_ROOM = 0.972  # 지정가 허용 범위(현재가 -3%)보다 조금 안쪽
+MOVE_MIN = 0.05  # 걸린 주문을 옮기는 최소 차이(달러)
 DIR = ROOT / "state_binance_split"
 STATE, TRADES = DIR / "ma50_ladder.json", DIR / "ma50_ladder_trades.csv"
 log = logging.getLogger("ma50ladder")
@@ -83,17 +84,47 @@ def new_plan(c: BinanceClient) -> dict:
     return st
 
 
-def place_ready(c: BinanceClient, st: dict, mp: float) -> None:
-    for lv in st["levels"]:
-        if lv["status"] == "wait" and lv["price"] >= mp * LIMIT_ROOM:
+def offsets() -> list[float]:
+    return [BAND - 2 * BAND * i / (PARTS - 1) for i in range(PARTS)]
+
+
+def follow(c: BinanceClient, st: dict, mp: float) -> None:
+    """2026-11-11 사용자 요청: 아직 안 산 차수의 매수 가격을 지금 5분봉 50선(진행 중 봉 포함) ±0.5 로 계속 옮김.
+    걸려 있는 주문은 MOVE_MIN 이상 달라지면 취소하고 새 가격에 다시 걺, 일부 체결된 주문은 옮기지 않음."""
+    m = sma5m(c)
+    st["ma"] = m
+    for lv, off in zip(st["levels"], offsets()):
+        if lv["status"] == "filled":
+            continue
+        target = round_tick(m + off, st["tick"])
+        if lv["status"] == "open":
+            if abs(target - lv["price"]) < MOVE_MIN:
+                continue
+            o = c.query_order(SYMBOL, lv["cid"])
+            if o.get("status") == "FILLED" or float(o.get("executedQty") or 0) > 0:
+                if o.get("status") == "FILLED":
+                    lv["status"] = "filled"
+                    save(st)
+                continue
             try:
-                c.order(symbol=SYMBOL, side="BUY", type="LIMIT", timeInForce="GTC", price=fmt(lv["price"]),
-                        quantity=fmt(lv["qty"]), newClientOrderId=lv["cid"], newOrderRespType="RESULT")
-                lv["status"] = "open"
-                log.info("매수 주문 %.2f x %g 걸어 둠 (현재가 %.2f)", lv["price"], lv["qty"], mp)
+                c.cancel_order(SYMBOL, lv["cid"])
             except BinanceError as exc:
-                log.warning("매수 주문 %.2f 실패: %s", lv["price"], exc)
-            save(st)
+                log.info("매수 %.2f 취소 실패 (%s) → 다음에 다시 확인", lv["price"], exc)
+                continue
+            log.info("50선 %.3f → 매수 %.2f 취소, %.2f 로 옮김", m, lv["price"], target)
+            lv["status"] = "wait"
+        lv["price"] = target
+        if target < mp * LIMIT_ROOM:
+            continue  # 지정가 허용 범위 밖: 가격이 더 내려오면 냄
+        lv["cid"] = f"ma50l_{st['levels'].index(lv) + 1}_{int(time.time() * 1000) % 10**9}"
+        try:
+            c.order(symbol=SYMBOL, side="BUY", type="LIMIT", timeInForce="GTC", price=fmt(target),
+                    quantity=fmt(lv["qty"]), newClientOrderId=lv["cid"], newOrderRespType="RESULT")
+            lv["status"] = "open"
+            log.info("매수 주문 %.2f x %g 걸어 둠 (50선 %.3f, 현재가 %.2f)", target, lv["qty"], m, mp)
+        except BinanceError as exc:
+            log.warning("매수 주문 %.2f 실패: %s", target, exc)
+    save(st)
 
 
 def reset_exits(c: BinanceClient, st: dict, amt: float, avg: float) -> None:
@@ -147,7 +178,7 @@ def run(c: BinanceClient) -> None:
     while True:
         try:
             mp = mark(c)
-            place_ready(c, st, mp)
+            follow(c, st, mp)
             amt, avg = c.position_amt(SYMBOL)
             if amt > 0 and abs(amt - st["held"]) > 1e-9:
                 reset_exits(c, st, amt, avg)

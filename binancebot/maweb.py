@@ -367,7 +367,7 @@ class Market:
 
     def bars(self, symbol: str, interval: str, count: int) -> list[dict]:
         """최근 count 개 봉 (마지막은 진행 중인 봉). 1500개씩 뒤로 이어 받음."""
-        count = max(50, min(MAX_BARS, count))
+        count = max(2, min(MAX_BARS, count))
         rows: list[list] = []
         end = None
         while len(rows) < count:
@@ -425,6 +425,63 @@ def run(market: Market, q: dict) -> dict:
     return result
 
 
+# ------------------------------------------------------------ 종목 찾기
+def near_line(bars: list[dict], kind: str, n: int) -> dict | None:
+    """마지막으로 끝난 봉까지의 이평선 값과 지금 가격(진행 중인 봉 종가)의 거리 %."""
+    if len(bars) < n + 1:
+        return None
+    done = bars[:-1]
+    ma = moving_average(kind, n, [b["c"] for b in done], [b["v"] for b in done])[-1]
+    if not ma:
+        return None
+    price = bars[-1]["c"]
+    return {"ma": ma, "price": price, "dist_pct": (price / ma - 1) * 100}
+
+
+def scan(market: Market, q: dict) -> dict:
+    """모든 종목에서 지금 가격이 이평선(기본 거래량가중 100선) ±pct% 안에 있는 종목 찾기.
+
+    tfs: 봉 목록 (기본 5m,15m), mode: all = 모든 봉에서 범위 안 / any = 하나라도.
+    """
+    ma = parse_ma(q.get("ma", "vwma:100"))
+    if ma is None:
+        raise ValueError("이평선을 골라 주세요")
+    tfs = [t for t in q.get("tfs", "5m,15m").split(",") if t]
+    if not tfs or any(t not in INTERVALS for t in tfs):
+        raise ValueError(f"봉은 {', '.join(INTERVALS)} 중에서")
+    pct = float(q.get("pct", 1) or 1)
+    mode = q.get("mode", "all")
+    side = q.get("side", "both")  # both / above(선 위) / below(선 아래)
+    min_qv = float(q.get("min_qv", 0) or 0) * 1e6  # 24시간 거래대금 하한 (백만 달러)
+    syms = [s for s in market.symbols() if s["qv"] >= min_qv]
+
+    def one(s: dict) -> dict | None:
+        res = {}
+        for tf in tfs:
+            try:
+                res[tf] = near_line(market.bars(s["symbol"], tf, ma[1] + 2), ma[0], ma[1])
+            except Exception:  # noqa: BLE001 한 종목 오류는 건너뜀
+                res[tf] = None
+        def ok(r):
+            if r is None or abs(r["dist_pct"]) > pct:
+                return False
+            return side == "both" or (side == "above") == (r["dist_pct"] >= 0)
+        hits = [ok(res[tf]) for tf in tfs]
+        if not (all(hits) if mode == "all" else any(hits)):
+            return None
+        return {"symbol": s["symbol"], "group": s["group"], "qv": s["qv"],
+                "price": next(r["price"] for r in res.values() if r),
+                "tf": {tf: (None if r is None else {"ma": r["ma"], "dist_pct": r["dist_pct"], "in": h})
+                       for (tf, r), h in zip(res.items(), hits)}}
+
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=8) as ex:
+        found = [r for r in ex.map(one, syms) if r]
+    found.sort(key=lambda r: min(abs(v["dist_pct"]) for v in r["tf"].values() if v))
+    return {"ma": {"kind": ma[0], "n": ma[1]}, "tfs": tfs, "pct": pct, "mode": mode,
+            "checked": len(syms), "found": found, "time": int(time.time())}
+
+
 # ------------------------------------------------------------ 웹 서버
 class Handler(BaseHTTPRequestHandler):
     market: Market
@@ -451,6 +508,8 @@ class Handler(BaseHTTPRequestHandler):
                 data = self.market.symbols()
             elif u.path == "/api/run":
                 data = run(self.market, q)
+            elif u.path == "/api/scan":
+                data = scan(self.market, q)
             else:
                 self._send(404, b"not found", "text/plain")
                 return

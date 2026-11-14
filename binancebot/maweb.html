@@ -40,6 +40,10 @@ th{color:var(--mute);font-weight:600}
 #status{color:var(--mute);font-size:12px;margin-left:auto}
 #err{color:var(--down);margin-top:8px;font-size:13px}
 .note{color:var(--mute);font-size:12px;margin-top:10px}
+.scanrow{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:0 10px}
+#sc_tfs button{flex:1 0 28%;padding:5px 0}
+#sc_table tr.hit{cursor:pointer}#sc_table tr.hit:hover{background:#1d2430}
+.in{color:var(--accent);font-weight:700}
 .live{background:#1d2430;border:1px solid var(--accent);border-radius:10px;padding:10px;margin-top:12px}
 </style>
 </head>
@@ -114,7 +118,26 @@ th{color:var(--mute);font-weight:600}
     <div class="note" id="note"></div>
   </div>
   <div>
-    <div class="panel"><div id="chart"></div></div>
+    <div class="panel" id="scan">
+      <h2>종목 찾기 · 지금 가격이 이평선 근처인 종목</h2>
+      <div class="scanrow">
+        <div><label>이평선</label><div class="row">
+          <select id="sc_kind"><option value="vwma">VWMA (거래량가중)</option><option value="ema">EMA</option><option value="sma">MA</option></select>
+          <input id="sc_len" type="number" value="100" min="1" max="1000" style="max-width:70px"></div></div>
+        <div><label>봉 (여러 개 가능)</label><div class="tfs" id="sc_tfs"></div></div>
+        <div><label>범위 ± %</label><input id="sc_pct" type="number" value="1" min="0.1" step="0.1"></div>
+        <div><label>조건</label><select id="sc_mode"><option value="all">고른 봉 모두 범위 안</option><option value="any">하나라도 범위 안</option></select></div>
+        <div><label>가격 위치</label><select id="sc_side"><option value="both">선 위·아래 모두</option><option value="above">선 위만 (롱 눌림)</option><option value="below">선 아래만 (숏 되돌림)</option></select></div>
+        <div><label>24시간 거래대금 ≥ (백만$)</label><input id="sc_qv" type="number" value="1" min="0" step="1"></div>
+      </div>
+      <div class="row" style="margin-top:10px;align-items:center">
+        <button class="go" id="sc_go" style="margin:0;flex:0 0 140px">찾기</button>
+        <label class="chk" style="margin:0"><input type="checkbox" id="sc_auto"> 1분마다 다시 찾기</label>
+        <span id="sc_status" style="color:var(--mute);font-size:12px"></span>
+      </div>
+      <div class="tbl" style="margin-top:8px;max-height:260px"><table id="sc_table"></table></div>
+    </div>
+    <div class="panel" style="margin-top:12px"><div id="chart"></div></div>
     <div class="live" id="live"></div>
     <div class="cards" id="cards"></div>
     <div class="panel tbl"><table id="trades"></table></div>
@@ -194,7 +217,7 @@ const maName=l=>l?`${({sma:"MA",ema:"EMA",vwma:"VWMA"})[l.kind]}${l.n}`:"-";
 async function load(){
   const q={symbol:document.getElementById("symbol").value,interval:tf};
   FIELDS.forEach(f=>q[f]=document.getElementById(f).value);
-  try{localStorage.setItem("maweb",JSON.stringify({...q,tf,strat}))}catch(e){}
+  try{const old=JSON.parse(localStorage.getItem("maweb")||"{}");localStorage.setItem("maweb",JSON.stringify({...old,...q,tf,strat}))}catch(e){}
   const p=new URLSearchParams({...q,interval:tf,strat});
   [1,2,3].forEach(i=>p.set("ma"+i,q["kind"+i]==="off"?"off":`${q["kind"+i]}:${q["len"+i]}`));
   document.getElementById("status").textContent="불러오는 중…";
@@ -268,6 +291,43 @@ function schedule(){
   // 봉이 끝난 직후(+3초)에 다시 계산, 최소 15초·최대 5분 간격
   const wait=Math.min(300,Math.max(15,sec-(now%sec)+3));
   timer=setTimeout(load,wait*1000);
+}
+// ---------------- 종목 찾기
+const scTfs=document.getElementById("sc_tfs");
+let scSel=new Set(saved.sc_tfs||["5m","15m"]), scTimer=null, scBusy=false;
+TF.forEach(([k,n])=>{const b=document.createElement("button");b.textContent=n;b.dataset.k=k;
+  b.onclick=()=>{scSel.has(k)?scSel.delete(k):scSel.add(k);markSc()};scTfs.appendChild(b)});
+function markSc(){[...scTfs.children].forEach(b=>b.classList.toggle("on",scSel.has(b.dataset.k)))}
+markSc();
+const SC_FIELDS=["sc_kind","sc_len","sc_pct","sc_mode","sc_side","sc_qv"];
+SC_FIELDS.forEach(f=>{if(saved[f]!==undefined)document.getElementById(f).value=saved[f]});
+document.getElementById("sc_go").onclick=scan;
+document.getElementById("sc_auto").onchange=()=>{clearInterval(scTimer);if(document.getElementById("sc_auto").checked){scan();scTimer=setInterval(scan,60000)}};
+const fmtQ=v=>v>=1e9?(v/1e9).toFixed(1)+"B":v>=1e6?(v/1e6).toFixed(1)+"M":(v/1e3).toFixed(0)+"K";
+async function scan(){
+  if(scBusy)return;
+  const tfs=TF.map(x=>x[0]).filter(k=>scSel.has(k));
+  if(!tfs.length){document.getElementById("sc_status").textContent="봉을 하나 이상 고르세요";return}
+  const v=f=>document.getElementById(f).value;
+  try{const s=JSON.parse(localStorage.getItem("maweb")||"{}");SC_FIELDS.forEach(f=>s[f]=v(f));s.sc_tfs=tfs;localStorage.setItem("maweb",JSON.stringify(s))}catch(e){}
+  const p=new URLSearchParams({ma:`${v("sc_kind")}:${v("sc_len")}`,tfs:tfs.join(","),pct:v("sc_pct"),mode:v("sc_mode"),side:v("sc_side"),min_qv:v("sc_qv")});
+  scBusy=true;document.getElementById("sc_status").textContent="찾는 중… (종목 수에 따라 10~30초)";
+  try{
+    const d=await (await fetch("/api/scan?"+p)).json();
+    if(d.error)throw new Error(d.error);
+    const name=`${({sma:"MA",ema:"EMA",vwma:"VWMA"})[d.ma.kind]}${d.ma.n}`;
+    document.getElementById("sc_status").textContent=`${d.checked}종목 중 ${d.found.length}개 · ${fmtT(d.time)}`;
+    const head=`<tr><th>종목</th><th>가격</th>${d.tfs.map(t=>`<th>${TF.find(x=>x[0]===t)[1]} ${name} 거리</th>`).join("")}<th>24시간 거래대금</th></tr>`;
+    const rows=d.found.map(r=>`<tr class="hit" data-s="${r.symbol}"><td>${r.symbol.replace("USDT","")}</td><td>${fmtP(r.price)}</td>`+
+      d.tfs.map(t=>{const x=r.tf[t];return `<td class="${x&&x.in?"in":""}">${x?(x.dist_pct>=0?"+":"")+x.dist_pct.toFixed(2)+"%":"-"}</td>`}).join("")+
+      `<td>${fmtQ(r.qv)}</td></tr>`).join("");
+    const tb=document.getElementById("sc_table");
+    tb.innerHTML=head+(rows||`<tr><td colspan="9" style="text-align:left;color:var(--mute)">조건에 맞는 종목이 없어요</td></tr>`);
+    [...tb.querySelectorAll("tr.hit")].forEach(tr=>tr.onclick=()=>{
+      document.getElementById("symbol").value=tr.dataset.s; tf=d.tfs[0]; markTf(); load();
+      document.getElementById("chart").scrollIntoView({behavior:"smooth",block:"center"});});
+  }catch(e){document.getElementById("sc_status").textContent="오류: "+e.message}
+  scBusy=false;
 }
 function notify(msg){
   document.title="● "+msg;

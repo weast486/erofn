@@ -1,6 +1,6 @@
 import unittest
 
-from binancebot.maweb import backtest, moving_average, parse_ma, pullback, run
+from binancebot.maweb import backtest, moving_average, near_line, parse_ma, pullback, run, scan
 
 
 def bars_from(closes, vols=None):
@@ -161,6 +161,32 @@ class PullbackTest(unittest.TestCase):
         d = run(FakeMarket(), {"strat": "pullback", "ma1": "sma:2", "ma2": "sma:4", "trend": "both"})
         self.assertEqual(d["strat"], "pullback")
         self.assertIn("stats", d["sim"])
+
+
+class ScanMarket:
+    """BTC 는 선 바로 위, ETH 는 5분봉만 가까움, AAA 는 멀리."""
+    def symbols(self):
+        return [{"symbol": s, "group": "x", "qv": 5e6} for s in ("BTCUSDT", "ETHUSDT", "AAAUSDT")]
+
+    def bars(self, symbol, interval, count):
+        last = {"BTCUSDT": 100.5, "ETHUSDT": 100.5 if interval == "5m" else 103, "AAAUSDT": 110}[symbol]
+        return bars_from([100.0] * (count - 1) + [last])
+
+
+class ScanTest(unittest.TestCase):
+    def test_near_line_uses_closed_bars(self):
+        r = near_line(bars_from([100.0] * 5 + [101.0]), "vwma", 5)
+        self.assertAlmostEqual(r["ma"], 100.0)
+        self.assertAlmostEqual(r["dist_pct"], 1.0)
+        self.assertIsNone(near_line(bars_from([1, 2]), "sma", 5))
+
+    def test_scan_all_any_side(self):
+        q = {"ma": "vwma:100", "tfs": "5m,15m", "pct": "1"}
+        self.assertEqual([r["symbol"] for r in scan(ScanMarket(), q)["found"]], ["BTCUSDT"])
+        got = scan(ScanMarket(), {**q, "mode": "any"})["found"]
+        self.assertEqual(sorted(r["symbol"] for r in got), ["BTCUSDT", "ETHUSDT"])
+        self.assertEqual(scan(ScanMarket(), {**q, "side": "below"})["found"], [])
+        self.assertEqual(scan(ScanMarket(), {**q, "min_qv": "10"})["checked"], 0)
 
 
 if __name__ == "__main__":

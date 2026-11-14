@@ -2104,6 +2104,10 @@ class RsiSettings:
     # arm_below > 0 이면 매수 방식을 바꿈: RSI 가 arm_below 이하까지 내려갔다가 buy_below 를 위로 넘은 날 종가 매수
     arm_below: float = 0.0
     stop_rsi: float = 0.0  # 0 보다 크면 보유 중 RSI 가 이 값 이하로 마감하면 종가 매도
+    # ma_entry > 0 이면 매수 방식을 바꿈: RSI 가 buy_below 아래로 마감한 뒤(주목) 처음으로 종가가 N일선 위로
+    # 마감한 날 종가 매수 (그날 RSI 가 이미 sell_above 이상이면 매수 안 하고 주목 해제). ma_watch > 0 이면 주목은 N거래일까지만
+    ma_entry: int = 0
+    ma_watch: int = 0
 
 
 def rsi_second_flags(closes: list[float], rsi: list[float | None], r: RsiSettings) -> list[bool]:
@@ -2152,6 +2156,34 @@ def rsi_arm_flags(rsi: list[float | None], r: RsiSettings) -> list[bool]:
     return out
 
 
+def rsi_ma_entry_flags(closes: list[float], rsi: list[float | None], r: RsiSettings) -> list[bool]:
+    """i 날이 'RSI < buy_below 로 주목 → 처음 종가 > ma_entry 일선' 매수일인지."""
+    n = r.ma_entry
+    out = [False] * len(closes)
+    armed_at = None
+    run = 0.0
+    for i, c in enumerate(closes):
+        run += c
+        if i >= n:
+            run -= closes[i - n]
+        v = rsi[i]
+        if v is None:
+            armed_at = None
+            continue
+        if v < r.buy_below:
+            armed_at = i
+            continue  # 과매도 마감인 날은 주목 갱신만
+        if armed_at is None:
+            continue
+        if r.ma_watch and i - armed_at > r.ma_watch:
+            armed_at = None
+            continue
+        if i + 1 >= n and c > run / n:
+            out[i] = not (r.sell_above and v >= r.sell_above)
+            armed_at = None
+    return out
+
+
 def run_rsi(
     data: dict[str, tuple[str, list[Bar]]],
     start: date,
@@ -2168,6 +2200,8 @@ def run_rsi(
     second = {sym: rsi_second_flags([x.close for x in ser.bars], rsi[sym], r) for sym, ser in series.items()
               } if r.second_within else None
     armed = {sym: rsi_arm_flags(rsi[sym], r) for sym in series} if r.arm_below else None
+    if r.ma_entry:
+        armed = {sym: rsi_ma_entry_flags([x.close for x in ser.bars], rsi[sym], r) for sym, ser in series.items()}
     csum: dict[str, list[float]] = {}
     for sym, ser in series.items():
         acc, run = [0.0], 0.0
@@ -4376,6 +4410,9 @@ def main(argv: list[str] | None = None) -> None:
     r.add_argument("--rsi-second-reset", type=float, default=0.0, help="rsi: 두 과매도 사이 RSI 가 이 값 이상 회복 (0 = --rsi-buy)")
     r.add_argument("--rsi-arm", type=float, default=0,
                    help="rsi: N > 0 이면 RSI 가 N 이하까지 내려갔다가 --rsi-buy 를 위로 넘은 날 종가 매수")
+    r.add_argument("--rsi-ma-entry", type=int, default=0,
+                   help="rsi: N > 0 이면 RSI 가 --rsi-buy 아래로 마감한 뒤 처음 종가가 N일선 위로 마감한 날 종가 매수")
+    r.add_argument("--rsi-ma-watch", type=int, default=0, help="rsi --rsi-ma-entry: 주목은 마지막 과매도 뒤 N거래일까지 (0 = 제한 없음)")
     r.add_argument("--rsi-stop-below", type=float, default=0, help="rsi: 보유 중 RSI 가 N 이하로 마감하면 종가 매도 (0 = 없음)")
     r.add_argument("--rsi-diverge", action="store_true", help="rsi: 두 번째 종가 < 첫 최저 종가, RSI > 첫 최저 RSI 일 때만")
     r.add_argument("--er-ma", type=int, default=20, help="engulfretest: 하락 추세 = 음봉 종가가 N일선 아래 + N일선 하락")
@@ -4945,7 +4982,8 @@ def main(argv: list[str] | None = None) -> None:
                          trend_ma=args.rsi_trend_ma, exit_ma=args.rsi_exit_ma, stop_loss_pct=args.stop_loss,
                          max_hold_days=args.max_hold, min_amount=args.min_day_amount, max_price=args.max_price,
                          second_within=args.rsi_second, second_reset=args.rsi_second_reset,
-                         second_diverge=args.rsi_diverge, arm_below=args.rsi_arm, stop_rsi=args.rsi_stop_below)
+                         second_diverge=args.rsi_diverge, arm_below=args.rsi_arm, stop_rsi=args.rsi_stop_below,
+                         ma_entry=args.rsi_ma_entry, ma_watch=args.rsi_ma_watch)
         if args.top_universe:
             rs.universe, _ = load_top_universe(args.marcap_dir, f"{min(args.years) - 1}-12-01", top_n=args.top_universe)
         elif args.universe_marcap:

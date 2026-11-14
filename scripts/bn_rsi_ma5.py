@@ -1,6 +1,6 @@
 """BTC·ETH: RSI 가 N 아래로 마감하면 주목 → 처음 종가가 5봉 이평 위로 마감한 봉 다음 시가 롱 → RSI >= 50 마감 다음 시가 매도.
 
-python scripts/bn_rsi_ma5.py [--tf 4h|15m]
+python scripts/bn_rsi_ma5.py [--tf 4h|15m] [--ma 3]
 비교용으로 '지금 국내 RSI 규칙'(RSI < 30 마감하면 바로 다음 시가 매수)도 같이 계산.
 비용 왕복 0.1%, 손절은 봉 저가로 판정(시가가 이미 아래면 시가).
 계좌 = 두 종목에 평가금액 절반씩 따로 복리, 낙폭은 청산 손익 기준.
@@ -124,17 +124,19 @@ def summarize(label, per_sym):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--tf", default="4h", choices=["4h", "15m"])
+    ap.add_argument("--ma", type=int, default=5, help="매수 확인 이평 봉 수 (기본 5)")
     a = ap.parse_args()
     data = {s: load(s, a.tf) for s in ("BTC", "ETH")}
     hold = 20 * (6 if a.tf == "4h" else 96)  # 손절 변형의 최대 보유 = 20일
+    m = a.ma
     cases = [
-        ("RSI<25 주목→5선 위 매수→RSI50 (그대로)", dict(mode="ma", buy=25)),
-        ("  + 손절 -10% · 최대 20일", dict(mode="ma", buy=25, stop=10, max_hold=hold)),
-        ("  + 손절 -5% · 최대 20일", dict(mode="ma", buy=25, stop=5, max_hold=hold)),
-        ("RSI<30 주목→5선 위 매수→RSI50", dict(mode="ma", buy=30)),
-        ("RSI<20 주목→5선 위 매수→RSI50", dict(mode="ma", buy=20)),
-        ("RSI<25 주목→10선 위 매수→RSI50", dict(mode="ma", buy=25, ma_n=10)),
-        ("RSI<25 주목→5선 위 매수→RSI60", dict(mode="ma", buy=25, sell=60)),
+        (f"RSI<25 주목→{m}선 위 매수→RSI50 (그대로)", dict(mode="ma", buy=25, ma_n=m)),
+        ("  + 손절 -10% · 최대 20일", dict(mode="ma", buy=25, ma_n=m, stop=10, max_hold=hold)),
+        ("  + 손절 -5% · 최대 20일", dict(mode="ma", buy=25, ma_n=m, stop=5, max_hold=hold)),
+        (f"RSI<30 주목→{m}선 위 매수→RSI50", dict(mode="ma", buy=30, ma_n=m)),
+        (f"RSI<20 주목→{m}선 위 매수→RSI50", dict(mode="ma", buy=20, ma_n=m)),
+        (f"RSI<25 주목→10선 위 매수→RSI50", dict(mode="ma", buy=25, ma_n=10)),
+        (f"RSI<25 주목→{m}선 위 매수→RSI60", dict(mode="ma", buy=25, ma_n=m, sell=60)),
         ("비교: RSI<25 마감 바로 매수→RSI50", dict(mode="base", buy=25)),
         ("비교: RSI<30 마감 바로 매수→RSI50", dict(mode="base", buy=30)),
         ("비교: RSI<30 바로 · 손절 -10% · 20일", dict(mode="base", buy=30, stop=10, max_hold=hold)),

@@ -1,0 +1,278 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>이평선 매매</title>
+<script src="https://unpkg.com/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
+<style>
+:root{--bg:#0f1218;--panel:#171b23;--line:#262c38;--text:#e6e9ef;--mute:#8a93a6;--up:#26a69a;--down:#ef5350;--accent:#f0b90b}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font:14px/1.45 -apple-system,"Malgun Gothic","Apple SD Gothic Neo",sans-serif}
+header{display:flex;align-items:center;gap:12px;padding:12px 16px;border-bottom:1px solid var(--line)}
+header h1{font-size:17px;margin:0;color:var(--accent)}
+header .sub{color:var(--mute);font-size:12px}
+.wrap{display:grid;grid-template-columns:300px 1fr;gap:12px;padding:12px}
+.wrap>*{min-width:0}
+@media(max-width:900px){.wrap{grid-template-columns:1fr}header{flex-wrap:wrap}#status{margin-left:0}}
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:12px}
+.panel h2{font-size:13px;margin:0 0 8px;color:var(--mute);font-weight:600}
+label{display:block;font-size:12px;color:var(--mute);margin:8px 0 3px}
+select,input{width:100%;background:#0f1218;color:var(--text);border:1px solid var(--line);border-radius:6px;padding:6px 8px;font:inherit}
+.row{display:flex;gap:6px}.row>*{flex:1}
+.tfs{display:flex;flex-wrap:wrap;gap:4px}
+.tfs button{flex:1 0 30%;background:#0f1218;color:var(--text);border:1px solid var(--line);border-radius:6px;padding:6px 0;cursor:pointer;font:inherit}
+.tfs button.on{background:var(--accent);color:#111;border-color:var(--accent);font-weight:700}
+.ma{display:grid;grid-template-columns:14px 1fr 70px;gap:6px;align-items:center;margin-top:6px}
+.dot{width:12px;height:12px;border-radius:50%}
+.go{margin-top:12px;width:100%;background:var(--accent);color:#111;border:0;border-radius:8px;padding:9px;font-weight:700;cursor:pointer;font:inherit;font-weight:700}
+.chk{display:flex;align-items:center;gap:6px;margin-top:10px;font-size:13px}.chk input{width:auto}
+#chart{height:520px}
+.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:8px;margin-top:12px}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:10px}
+.card .k{color:var(--mute);font-size:12px}.card .v{font-size:18px;font-weight:700;margin-top:2px}
+.pos{color:var(--up)}.neg{color:var(--down)}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th,td{padding:6px 8px;border-bottom:1px solid var(--line);text-align:right;white-space:nowrap}
+th:first-child,td:first-child{text-align:left}
+th{color:var(--mute);font-weight:600}
+.tbl{max-height:320px;overflow:auto;margin-top:12px}
+#status{color:var(--mute);font-size:12px;margin-left:auto}
+#err{color:var(--down);margin-top:8px;font-size:13px}
+.note{color:var(--mute);font-size:12px;margin-top:10px}
+.live{background:#1d2430;border:1px solid var(--accent);border-radius:10px;padding:10px;margin-top:12px}
+</style>
+</head>
+<body>
+<header>
+  <h1>이평선 매매</h1>
+  <span class="sub">바이낸스 선물 시세 · 모의 매매 (주문 없음)</span>
+  <span id="status"></span>
+</header>
+<div class="wrap">
+  <div class="panel">
+    <h2>1. 종목</h2>
+    <select id="symbol"><option>BTCUSDT</option><option>ETHUSDT</option></select>
+    <h2 style="margin-top:14px">2. 봉</h2>
+    <div class="tfs" id="tfs"></div>
+    <label>불러올 봉 개수</label>
+    <input id="bars" type="number" value="1000" min="100" max="5000" step="100">
+    <h2 style="margin-top:14px">3. 이평선</h2>
+    <div id="mas"></div>
+    <h2 style="margin-top:14px">4. 매매 규칙</h2>
+    <div class="tfs" id="strats"><button data-k="pullback">눌림 매매</button><button data-k="cross">교차 매매</button></div>
+    <div id="p-cross">
+    <div class="row">
+      <div><label>빠른 선</label><select id="fast"><option value="1">선 1</option><option value="2">선 2</option><option value="3">선 3</option></select></div>
+      <div><label>느린 선</label><select id="slow"><option value="1">선 1</option><option value="2" selected>선 2</option><option value="3">선 3</option></select></div>
+    </div>
+    </div>
+    <div id="p-pullback">
+    <div class="row">
+      <div><label>눌림선 (여기서 삼)</label><select id="pb_line"><option value="1">선 1</option><option value="2">선 2</option><option value="3">선 3</option></select></div>
+      <div><label>그 전에 선 위 봉 수</label><input id="min_above" type="number" value="5" min="1" max="200"></div>
+    </div>
+    <div class="row">
+      <div><label>추세 조건</label><select id="trend">
+        <option value="none">없음</option>
+        <option value="rising">눌림선이 오르는 중</option>
+        <option value="above">눌림선이 추세선 위 (정배열)</option>
+        <option value="both">둘 다</option></select></div>
+      <div><label>추세선</label><select id="trend_line"><option value="1">선 1</option><option value="2" selected>선 2</option><option value="3">선 3</option></select></div>
+    </div>
+    <label>사는 방법</label>
+    <select id="entry">
+      <option value="touch">선에 닿으면 바로 (지정가)</option>
+      <option value="confirm">닿은 뒤 종가가 선 위로 마감하면 다음 봉 시가</option>
+    </select>
+    <div class="row">
+      <div><label>손절 방법</label><select id="stop_mode">
+        <option value="pct">매수가 -손절%</option>
+        <option value="line">종가가 손절선 -손절% 아래로 마감</option></select></div>
+      <div><label>손절선</label><select id="stop_line"><option value="1">선 1</option><option value="2" selected>선 2</option><option value="3">선 3</option></select></div>
+    </div>
+    <label>최대 보유 봉 수 (0=제한 없음)</label>
+    <input id="max_hold" type="number" value="0" min="0">
+    </div>
+    <label>방향</label>
+    <select id="side">
+      <option value="long">롱만</option>
+      <option value="short">숏만</option>
+      <option value="both">롱·숏</option>
+    </select>
+    <div class="row">
+      <div><label>손절 % (0=없음)</label><input id="sl" type="number" value="2" min="0" step="0.5"></div>
+      <div><label>익절 % (0=없음)</label><input id="tp" type="number" value="0" min="0" step="0.5"></div>
+    </div>
+    <div class="row">
+      <div><label>수수료 한쪽 %</label><input id="fee" type="number" value="0.05" min="0" step="0.01"></div>
+      <div><label>배율</label><input id="lev" type="number" value="1" min="1" max="20" step="1"></div>
+    </div>
+    <button class="go" id="go">계산하기</button>
+    <label class="chk"><input type="checkbox" id="auto"> 자동 새로고침 (봉에 맞춰)</label>
+    <div id="err"></div>
+    <div class="note" id="note"></div>
+  </div>
+  <div>
+    <div class="panel"><div id="chart"></div></div>
+    <div class="live" id="live"></div>
+    <div class="cards" id="cards"></div>
+    <div class="panel tbl"><table id="trades"></table></div>
+  </div>
+</div>
+<script>
+const TF=[["1m","1분"],["5m","5분"],["15m","15분"],["1h","1시간"],["4h","4시간"],["1d","일봉"]];
+const TF_SEC={"1m":60,"5m":300,"15m":900,"1h":3600,"4h":14400,"1d":86400};
+const COLORS=["#f0b90b","#42a5f5","#ab47bc"];
+const KST=9*3600;
+const REASON={cross:"교차",stop:"손절",take:"익절",line:"손절선",time:"시간"};
+const DEF=[["ema",20],["sma",50],["vwma",100]];
+let tf="1h", chart, candle, lineSeries=[], timer=null, lastSignal=null;
+
+const saved=(()=>{try{return JSON.parse(localStorage.getItem("maweb")||"{}")}catch(e){return {}}})();
+
+// 봉 버튼
+const tfs=document.getElementById("tfs");
+TF.forEach(([k,n])=>{const b=document.createElement("button");b.textContent=n;b.dataset.k=k;b.onclick=()=>{tf=k;markTf();load()};tfs.appendChild(b)});
+function markTf(){[...tfs.children].forEach(b=>b.classList.toggle("on",b.dataset.k===tf))}
+// 이평선 3줄
+const mas=document.getElementById("mas");
+DEF.forEach(([k,n],i)=>{
+  const d=document.createElement("div");d.className="ma";
+  d.innerHTML=`<span class="dot" style="background:${COLORS[i]}"></span>
+  <select id="kind${i+1}"><option value="sma">MA (단순)</option><option value="ema">EMA (지수)</option><option value="vwma">VWMA (거래량가중)</option><option value="off">끄기</option></select>
+  <input id="len${i+1}" type="number" min="1" max="1000" value="${n}">`;
+  mas.appendChild(d);document.getElementById("kind"+(i+1)).value=k;
+});
+// 저장된 설정 되살리기
+const FIELDS=["bars","fast","slow","side","sl","tp","fee","lev","kind1","len1","kind2","len2","kind3","len3",
+  "pb_line","min_above","trend","trend_line","entry","stop_mode","stop_line","max_hold"];
+FIELDS.forEach(f=>{if(saved[f]!==undefined)document.getElementById(f).value=saved[f]});
+if(saved.tf)tf=saved.tf;markTf();
+// 매매 방식 (눌림 / 교차)
+let strat=saved.strat||"pullback";
+const NOTES={
+  pullback:"롱: 직전 N봉의 종가가 모두 눌림선 위에 있다가 가격이 눌림선까지 내려오면 삼 (지정가 = 직전 봉까지 끝난 선 값). 숏은 반대. 산 봉에서는 손절만 확인하고 익절은 다음 봉부터 봐요. 시각은 한국 시간.",
+  cross:"빠른 선이 느린 선을 위로 넘으면 롱, 아래로 넘으면 청산(또는 숏). 교차는 봉이 끝났을 때 확인하고 다음 봉 시가에 사고판 것으로 계산해요. 같은 봉에서 손절·익절이 둘 다 닿으면 손절. 시각은 한국 시간."};
+const strats=document.getElementById("strats");
+[...strats.children].forEach(b=>b.onclick=()=>{strat=b.dataset.k;markStrat();load()});
+function markStrat(){[...strats.children].forEach(b=>b.classList.toggle("on",b.dataset.k===strat));
+  document.getElementById("p-cross").style.display=strat==="cross"?"":"none";
+  document.getElementById("p-pullback").style.display=strat==="pullback"?"":"none";
+  document.getElementById("note").textContent=NOTES[strat];}
+markStrat();
+
+// 차트
+chart=LightweightCharts.createChart(document.getElementById("chart"),{
+  layout:{background:{color:"#171b23"},textColor:"#c7cdd8"},
+  grid:{vertLines:{color:"#20252f"},horzLines:{color:"#20252f"}},
+  timeScale:{timeVisible:true,secondsVisible:false,borderColor:"#262c38"},
+  rightPriceScale:{borderColor:"#262c38"},crosshair:{mode:0}});
+candle=chart.addCandlestickSeries({upColor:"#26a69a",downColor:"#ef5350",borderVisible:false,wickUpColor:"#26a69a",wickDownColor:"#ef5350"});
+COLORS.forEach(c=>lineSeries.push(chart.addLineSeries({color:c,lineWidth:2,priceLineVisible:false,lastValueVisible:false})));
+new ResizeObserver(()=>chart.applyOptions({width:document.getElementById("chart").clientWidth})).observe(document.getElementById("chart"));
+
+// 종목 목록
+fetch("/api/symbols").then(r=>r.json()).then(list=>{
+  if(list.error)throw new Error(list.error);
+  const sel=document.getElementById("symbol");sel.innerHTML="";
+  let g=null,og;
+  list.forEach(s=>{if(s.group!==g){g=s.group;og=document.createElement("optgroup");og.label=g==="미국 주식"?"미국 주식 토큰 (24시간 거래대금 순)":g;sel.appendChild(og)}
+    const o=document.createElement("option");o.value=s.symbol;o.textContent=s.symbol.replace("USDT","");og.appendChild(o)});
+  sel.value=saved.symbol||"BTCUSDT";load();
+}).catch(e=>{document.getElementById("err").textContent="종목 목록 오류: "+e.message;load()});
+document.getElementById("symbol").onchange=load;
+document.getElementById("go").onclick=load;
+document.getElementById("auto").onchange=schedule;
+
+const fmtT=t=>{const d=new Date((t+KST)*1000);const p=n=>String(n).padStart(2,"0");
+  return `${d.getUTCFullYear()%100}-${p(d.getUTCMonth()+1)}-${p(d.getUTCDate())} ${p(d.getUTCHours())}:${p(d.getUTCMinutes())}`};
+const fmtP=p=>p>=1000?p.toFixed(1):p>=10?p.toFixed(2):p.toFixed(4);
+const pct=v=>`<span class="${v>=0?"pos":"neg"}">${v>=0?"+":""}${v.toFixed(2)}%</span>`;
+const maName=l=>l?`${({sma:"MA",ema:"EMA",vwma:"VWMA"})[l.kind]}${l.n}`:"-";
+
+async function load(){
+  const q={symbol:document.getElementById("symbol").value,interval:tf};
+  FIELDS.forEach(f=>q[f]=document.getElementById(f).value);
+  try{localStorage.setItem("maweb",JSON.stringify({...q,tf,strat}))}catch(e){}
+  const p=new URLSearchParams({...q,interval:tf,strat});
+  [1,2,3].forEach(i=>p.set("ma"+i,q["kind"+i]==="off"?"off":`${q["kind"+i]}:${q["len"+i]}`));
+  document.getElementById("status").textContent="불러오는 중…";
+  document.getElementById("err").textContent="";
+  try{
+    const r=await fetch("/api/run?"+p);const d=await r.json();
+    if(d.error)throw new Error(d.error);
+    draw(d);
+    document.getElementById("status").textContent=`${d.symbol} · ${TF.find(x=>x[0]===tf)[1]} · ${fmtT(Math.floor(Date.now()/1000))} 갱신`;
+  }catch(e){document.getElementById("err").textContent="오류: "+e.message;document.getElementById("status").textContent=""}
+  schedule();
+}
+
+function draw(d){
+  const sh=t=>t+KST;
+  candle.setData(d.bars.map(b=>({time:sh(b.t),open:b.o,high:b.h,low:b.l,close:b.c})));
+  d.lines.forEach((l,i)=>lineSeries[i].setData(l?l.values.map((v,j)=>v==null?null:{time:sh(d.bars[j].t),value:v}).filter(Boolean):[]));
+  const s=d.sim, markers=[];
+  if(s){
+    s.trades.forEach(t=>{
+      const L=t.dir==="long";
+      markers.push({time:sh(t.entry_time),position:L?"belowBar":"aboveBar",color:L?"#26a69a":"#ef5350",shape:L?"arrowUp":"arrowDown",text:L?"롱":"숏"});
+      markers.push({time:sh(t.exit_time),position:L?"aboveBar":"belowBar",color:"#c7cdd8",shape:"circle",text:REASON[t.reason]});
+    });
+    if(s.open){const L=s.open.dir==="long";markers.push({time:sh(s.open.entry_time),position:L?"belowBar":"aboveBar",color:L?"#26a69a":"#ef5350",shape:L?"arrowUp":"arrowDown",text:L?"롱(보유)":"숏(보유)"})}
+  }
+  markers.sort((a,b)=>a.time-b.time);candle.setMarkers(markers);
+
+  // 지금 상태
+  const live=document.getElementById("live");
+  const fl=d.lines[document.getElementById("fast").value-1], sl=d.lines[document.getElementById("slow").value-1];
+  if(!s){live.innerHTML="빠른 선과 느린 선을 서로 다른 켜진 선으로 골라 주세요.";}
+  else if(d.strat==="pullback"){
+    const pl=d.lines[document.getElementById("pb_line").value-1], k=d.bars.length-2, last=d.bars[d.bars.length-1].c;
+    let txt=`<b>지금</b> · 가격 ${fmtP(last)} · 눌림선 ${maName(pl)} ${fmtP(pl.values[k])} (가격이 선 ${last>=pl.values[k]?"위":"아래"} ${pct((last/pl.values[k]-1)*100)})`;
+    if(s.open)txt+=` · 모의 보유: <b>${s.open.dir==="long"?"롱":"숏"}</b> ${fmtP(s.open.entry)} → ${fmtP(s.open.price)} ${pct(s.open.ret_pct)}`+
+      (s.open.sl?` · 손절 ${fmtP(s.open.sl)}`:"")+(s.open.tp?` · 익절 ${fmtP(s.open.tp)}`:"");
+    else txt+=" · 모의 보유 없음";
+    txt+=s.pending?` · <b style="color:var(--accent)">${s.pending}</b>`:" · 조건 안 맞음 (대기 없음)";
+    if(s.pending){const key=d.symbol+tf+d.bars[d.bars.length-1].t+s.pending;
+      if(lastSignal&&lastSignal!==key&&document.getElementById("auto").checked)notify(`${d.symbol} ${s.pending}`);lastSignal=key;}
+    live.innerHTML=txt;
+  }
+  else{
+    const k=d.bars.length-2, fv=fl.values[k], sv=sl.values[k];
+    let txt=`<b>지금</b> · 마지막으로 끝난 봉 기준 ${maName(fl)} ${fv!=null?fmtP(fv):"-"} ${fv>sv?"&gt;":"&lt;"} ${maName(sl)} ${sv!=null?fmtP(sv):"-"} (${fv>sv?"골든크로스 쪽":"데드크로스 쪽"})`;
+    if(s.open)txt+=` · 모의 보유: <b>${s.open.dir==="long"?"롱":"숏"}</b> ${fmtP(s.open.entry)} → ${fmtP(s.open.price)} ${pct(s.open.ret_pct)}`;
+    else txt+=" · 모의 보유 없음";
+    if(s.pending){txt+=` · <b style="color:var(--accent)">새 신호: 다음 봉 시가에 ${s.pending}</b>`;
+      const key=d.symbol+tf+d.bars[d.bars.length-1].t+s.pending;
+      if(lastSignal&&lastSignal!==key&&document.getElementById("auto").checked)notify(`${d.symbol} ${s.pending}`);
+      lastSignal=key;}
+    live.innerHTML=txt;
+  }
+  // 요약
+  const st=s?s.stats:null,c=document.getElementById("cards");
+  c.innerHTML=st?[["거래 수",st.n+"번"],["승률",st.win_rate.toFixed(1)+"%"],["거래당 평균",pct(st.avg_pct)],[`누적 (복리·${st.leverage}배)`,pct(st.total_pct)],["최대 낙폭",pct(st.mdd_pct)],
+    ["기간",`${fmtT(d.bars[0].t).slice(0,8)} ~ ${fmtT(d.bars[d.bars.length-1].t).slice(0,8)}`]]
+    .map(([k,v])=>`<div class="card"><div class="k">${k}</div><div class="v">${v}</div></div>`).join(""):"";
+  // 거래 표 (최근 것이 위)
+  const tb=document.getElementById("trades");
+  tb.innerHTML="<tr><th>진입 시각</th><th>방향</th><th>진입가</th><th>청산 시각</th><th>청산가</th><th>사유</th><th>보유 봉</th><th>손익(배율 전)</th></tr>"+
+    (s?s.trades.slice().reverse().map(t=>`<tr><td>${fmtT(t.entry_time)}</td><td>${t.dir==="long"?"롱":"숏"}</td><td>${fmtP(t.entry)}</td><td>${fmtT(t.exit_time)}</td><td>${fmtP(t.exit)}</td><td>${REASON[t.reason]}</td><td>${t.bars}</td><td>${pct(t.ret_pct)}</td></tr>`).join(""):"");
+}
+
+function schedule(){
+  clearTimeout(timer);
+  if(!document.getElementById("auto").checked)return;
+  if("Notification"in window&&Notification.permission==="default")Notification.requestPermission();
+  const sec=TF_SEC[tf], now=Date.now()/1000;
+  // 봉이 끝난 직후(+3초)에 다시 계산, 최소 15초·최대 5분 간격
+  const wait=Math.min(300,Math.max(15,sec-(now%sec)+3));
+  timer=setTimeout(load,wait*1000);
+}
+function notify(msg){
+  document.title="● "+msg;
+  try{if("Notification"in window&&Notification.permission==="granted")new Notification("이평선 신호",{body:msg})}catch(e){}
+}
+</script>
+</body>
+</html>

@@ -6,22 +6,22 @@
 <title>이평선 매매</title>
 <script src="https://unpkg.com/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
 <style>
-:root{--bg:#0f1218;--panel:#171b23;--line:#262c38;--text:#e6e9ef;--mute:#8a93a6;--up:#26a69a;--down:#ef5350;--accent:#f0b90b}
+:root{--bg:#f4f6f9;--panel:#ffffff;--line:#e3e7ee;--text:#1f2430;--mute:#6b7280;--up:#089981;--down:#e5484d;--accent:#f0b90b;--accent-text:#a87500;--field:#f8fafc;--hover:#fff8e1;--soft:#fffbea}
 *{box-sizing:border-box}
 body{margin:0;background:var(--bg);color:var(--text);font:14px/1.45 -apple-system,"Malgun Gothic","Apple SD Gothic Neo",sans-serif}
-header{display:flex;align-items:center;gap:12px;padding:12px 16px;border-bottom:1px solid var(--line)}
-header h1{font-size:17px;margin:0;color:var(--accent)}
+header{display:flex;align-items:center;gap:12px;padding:12px 16px;border-bottom:1px solid var(--line);background:var(--panel)}
+header h1{font-size:17px;margin:0;color:var(--accent-text)}
 header .sub{color:var(--mute);font-size:12px}
 .wrap{display:grid;grid-template-columns:300px 1fr;gap:12px;padding:12px}
 .wrap>*{min-width:0}
 @media(max-width:900px){.wrap{grid-template-columns:1fr}header{flex-wrap:wrap}#status{margin-left:0}}
-.panel{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:12px}
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:12px;box-shadow:0 1px 3px rgba(16,24,40,.06)}
 .panel h2{font-size:13px;margin:0 0 8px;color:var(--mute);font-weight:600}
 label{display:block;font-size:12px;color:var(--mute);margin:8px 0 3px}
-select,input{width:100%;background:#0f1218;color:var(--text);border:1px solid var(--line);border-radius:6px;padding:6px 8px;font:inherit}
+select,input{width:100%;background:var(--field);color:var(--text);border:1px solid var(--line);border-radius:6px;padding:6px 8px;font:inherit}
 .row{display:flex;gap:6px}.row>*{flex:1}
 .tfs{display:flex;flex-wrap:wrap;gap:4px}
-.tfs button{flex:1 0 30%;background:#0f1218;color:var(--text);border:1px solid var(--line);border-radius:6px;padding:6px 0;cursor:pointer;font:inherit}
+.tfs button{flex:1 0 30%;background:var(--field);color:var(--text);border:1px solid var(--line);border-radius:6px;padding:6px 0;cursor:pointer;font:inherit}
 .tfs button.on{background:var(--accent);color:#111;border-color:var(--accent);font-weight:700}
 .ma{display:grid;grid-template-columns:14px 1fr 70px;gap:6px;align-items:center;margin-top:6px}
 .dot{width:12px;height:12px;border-radius:50%}
@@ -29,7 +29,7 @@ select,input{width:100%;background:#0f1218;color:var(--text);border:1px solid va
 .chk{display:flex;align-items:center;gap:6px;margin-top:10px;font-size:13px}.chk input{width:auto}
 #chart{height:520px}
 .cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:8px;margin-top:12px}
-.card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:10px}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:10px;box-shadow:0 1px 3px rgba(16,24,40,.06)}
 .card .k{color:var(--mute);font-size:12px}.card .v{font-size:18px;font-weight:700;margin-top:2px}
 .pos{color:var(--up)}.neg{color:var(--down)}
 table{width:100%;border-collapse:collapse;font-size:13px}
@@ -42,9 +42,10 @@ th{color:var(--mute);font-weight:600}
 .note{color:var(--mute);font-size:12px;margin-top:10px}
 .scanrow{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:0 10px}
 #sc_tfs button{flex:1 0 28%;padding:5px 0}
-#sc_table tr.hit{cursor:pointer}#sc_table tr.hit:hover{background:#1d2430}
-.in{color:var(--accent);font-weight:700}
-.live{background:#1d2430;border:1px solid var(--accent);border-radius:10px;padding:10px;margin-top:12px}
+#sc_table th.sort{cursor:pointer;color:var(--accent-text)}#sc_table th.sort:hover{text-decoration:underline}
+#sc_table tr.hit{cursor:pointer}#sc_table tr.hit:hover{background:var(--hover)}
+.in{color:var(--accent-text);font-weight:700}
+.live{background:var(--soft);border:1px solid var(--accent);border-radius:10px;padding:10px;margin-top:12px}
 </style>
 </head>
 <body>
@@ -67,13 +68,13 @@ th{color:var(--mute);font-weight:600}
     <div class="tfs" id="strats"><button data-k="pullback">눌림 매매</button><button data-k="cross">교차 매매</button></div>
     <div id="p-cross">
     <div class="row">
-      <div><label>빠른 선</label><select id="fast"><option value="1">선 1</option><option value="2">선 2</option><option value="3">선 3</option></select></div>
-      <div><label>느린 선</label><select id="slow"><option value="1">선 1</option><option value="2" selected>선 2</option><option value="3">선 3</option></select></div>
+      <div><label>빠른 선</label><select id="fast"><option value="1">선 1</option><option value="2">선 2</option><option value="3">선 3</option><option value="4">선 4</option></select></div>
+      <div><label>느린 선</label><select id="slow"><option value="1">선 1</option><option value="2" selected>선 2</option><option value="3">선 3</option><option value="4">선 4</option></select></div>
     </div>
     </div>
     <div id="p-pullback">
     <div class="row">
-      <div><label>눌림선 (여기서 삼)</label><select id="pb_line"><option value="1">선 1</option><option value="2">선 2</option><option value="3">선 3</option></select></div>
+      <div><label>눌림선 (여기서 삼)</label><select id="pb_line"><option value="1">선 1</option><option value="2">선 2</option><option value="3">선 3</option><option value="4">선 4</option></select></div>
       <div><label>그 전에 선 위 봉 수</label><input id="min_above" type="number" value="5" min="1" max="200"></div>
     </div>
     <div class="row">
@@ -82,7 +83,7 @@ th{color:var(--mute);font-weight:600}
         <option value="rising">눌림선이 오르는 중</option>
         <option value="above">눌림선이 추세선 위 (정배열)</option>
         <option value="both">둘 다</option></select></div>
-      <div><label>추세선</label><select id="trend_line"><option value="1">선 1</option><option value="2" selected>선 2</option><option value="3">선 3</option></select></div>
+      <div><label>추세선</label><select id="trend_line"><option value="1">선 1</option><option value="2" selected>선 2</option><option value="3">선 3</option><option value="4">선 4</option></select></div>
     </div>
     <label>사는 방법</label>
     <select id="entry">
@@ -92,8 +93,15 @@ th{color:var(--mute);font-weight:600}
     <div class="row">
       <div><label>손절 방법</label><select id="stop_mode">
         <option value="pct">매수가 -손절%</option>
-        <option value="line">종가가 손절선 -손절% 아래로 마감</option></select></div>
-      <div><label>손절선</label><select id="stop_line"><option value="1">선 1</option><option value="2" selected>선 2</option><option value="3">선 3</option></select></div>
+        <option value="line">종가가 손절선 -손절% 아래로 마감</option>
+        <option value="touch">가격이 손절선 -손절% 에 닿으면</option></select></div>
+      <div><label>손절선</label><select id="stop_line"><option value="1">선 1</option><option value="2" selected>선 2</option><option value="3">선 3</option><option value="4">선 4</option></select></div>
+    </div>
+    <div class="row">
+      <div><label>익절 방법</label><select id="tp_mode">
+        <option value="pct">매수가 +익절% 지정가</option>
+        <option value="touch">가격이 익절선에 닿으면</option></select></div>
+      <div><label>익절선</label><select id="tp_line"><option value="1">선 1</option><option value="2">선 2</option><option value="3" selected>선 3</option><option value="4">선 4</option></select></div>
     </div>
     <label>최대 보유 봉 수 (0=제한 없음)</label>
     <input id="max_hold" type="number" value="0" min="0">
@@ -129,6 +137,11 @@ th{color:var(--mute);font-weight:600}
         <div><label>조건</label><select id="sc_mode"><option value="all">고른 봉 모두 범위 안</option><option value="any">하나라도 범위 안</option></select></div>
         <div><label>가격 위치</label><select id="sc_side"><option value="both">선 위·아래 모두</option><option value="above">선 위만 (롱 눌림)</option><option value="below">선 아래만 (숏 되돌림)</option></select></div>
         <div><label>24시간 거래대금 ≥ (백만$)</label><input id="sc_qv" type="number" value="1" min="0" step="1"></div>
+        <div><label>평균 ATR 봉 · 개수</label><div class="row">
+          <select id="sc_atr_tf"><option value="1d">일봉</option><option value="4h">4시간</option><option value="1h">1시간</option><option value="15m">15분</option><option value="5m">5분</option></select>
+          <input id="sc_atr_n" type="number" value="14" min="1" max="500" style="max-width:60px"></div></div>
+        <div><label>평균 ATR ≥ 가격의 % (0 = 끔)</label><input id="sc_atr_min" type="number" value="0" min="0" step="0.5"></div>
+        <div><label>정렬</label><select id="sc_sort"><option value="dist">선과 가까운 순</option><option value="qv">거래대금 큰 순</option><option value="atr">평균 ATR 큰 순</option></select></div>
       </div>
       <div class="row" style="margin-top:10px;align-items:center">
         <button class="go" id="sc_go" style="margin:0;flex:0 0 140px">찾기</button>
@@ -146,10 +159,10 @@ th{color:var(--mute);font-weight:600}
 <script>
 const TF=[["1m","1분"],["5m","5분"],["15m","15분"],["1h","1시간"],["4h","4시간"],["1d","일봉"]];
 const TF_SEC={"1m":60,"5m":300,"15m":900,"1h":3600,"4h":14400,"1d":86400};
-const COLORS=["#f0b90b","#42a5f5","#ab47bc"];
+const COLORS=["#e0a100","#2f80ed","#9b51e0","#e05252"];
 const KST=9*3600;
 const REASON={cross:"교차",stop:"손절",take:"익절",line:"손절선",time:"시간"};
-const DEF=[["ema",20],["sma",50],["vwma",100]];
+const DEF=[["ema",20],["sma",50],["vwma",100],["sma",200]];
 let tf="1h", chart, candle, lineSeries=[], timer=null, lastSignal=null;
 
 const saved=(()=>{try{return JSON.parse(localStorage.getItem("maweb")||"{}")}catch(e){return {}}})();
@@ -158,7 +171,7 @@ const saved=(()=>{try{return JSON.parse(localStorage.getItem("maweb")||"{}")}cat
 const tfs=document.getElementById("tfs");
 TF.forEach(([k,n])=>{const b=document.createElement("button");b.textContent=n;b.dataset.k=k;b.onclick=()=>{tf=k;markTf();load()};tfs.appendChild(b)});
 function markTf(){[...tfs.children].forEach(b=>b.classList.toggle("on",b.dataset.k===tf))}
-// 이평선 3줄
+// 이평선 4줄
 const mas=document.getElementById("mas");
 DEF.forEach(([k,n],i)=>{
   const d=document.createElement("div");d.className="ma";
@@ -168,14 +181,14 @@ DEF.forEach(([k,n],i)=>{
   mas.appendChild(d);document.getElementById("kind"+(i+1)).value=k;
 });
 // 저장된 설정 되살리기
-const FIELDS=["bars","fast","slow","side","sl","tp","fee","lev","kind1","len1","kind2","len2","kind3","len3",
-  "pb_line","min_above","trend","trend_line","entry","stop_mode","stop_line","max_hold"];
+const FIELDS=["bars","fast","slow","side","sl","tp","fee","lev","kind1","len1","kind2","len2","kind3","len3","kind4","len4",
+  "pb_line","min_above","trend","trend_line","entry","stop_mode","stop_line","tp_mode","tp_line","max_hold"];
 FIELDS.forEach(f=>{if(saved[f]!==undefined)document.getElementById(f).value=saved[f]});
 if(saved.tf)tf=saved.tf;markTf();
 // 매매 방식 (눌림 / 교차)
 let strat=saved.strat||"pullback";
 const NOTES={
-  pullback:"롱: 직전 N봉의 종가가 모두 눌림선 위에 있다가 가격이 눌림선까지 내려오면 삼 (지정가 = 직전 봉까지 끝난 선 값). 숏은 반대. 산 봉에서는 손절만 확인하고 익절은 다음 봉부터 봐요. 시각은 한국 시간.",
+  pullback:"롱: 직전 N봉의 종가가 모두 눌림선 위에 있다가 가격이 눌림선까지 내려오면 삼 (지정가 = 직전 봉까지 끝난 선 값). 숏은 반대. 산 봉에서는 손절만 확인하고 익절은 다음 봉부터 봐요. 손절·익절을 '선에 닿으면'으로 하면 직전 봉까지 끝난 선 값에 닿을 때 그 가격으로 계산하고(시가가 이미 넘었으면 시가), 익절선은 진입가보다 이익 쪽(롱이면 위)에 있을 때만 써요. 같은 봉에서 둘 다 닿으면 손절. 시각은 한국 시간.",
   cross:"빠른 선이 느린 선을 위로 넘으면 롱, 아래로 넘으면 청산(또는 숏). 교차는 봉이 끝났을 때 확인하고 다음 봉 시가에 사고판 것으로 계산해요. 같은 봉에서 손절·익절이 둘 다 닿으면 손절. 시각은 한국 시간."};
 const strats=document.getElementById("strats");
 [...strats.children].forEach(b=>b.onclick=()=>{strat=b.dataset.k;markStrat();load()});
@@ -187,11 +200,11 @@ markStrat();
 
 // 차트
 chart=LightweightCharts.createChart(document.getElementById("chart"),{
-  layout:{background:{color:"#171b23"},textColor:"#c7cdd8"},
-  grid:{vertLines:{color:"#20252f"},horzLines:{color:"#20252f"}},
-  timeScale:{timeVisible:true,secondsVisible:false,borderColor:"#262c38"},
-  rightPriceScale:{borderColor:"#262c38"},crosshair:{mode:0}});
-candle=chart.addCandlestickSeries({upColor:"#26a69a",downColor:"#ef5350",borderVisible:false,wickUpColor:"#26a69a",wickDownColor:"#ef5350"});
+  layout:{background:{color:"#ffffff"},textColor:"#4b5563"},
+  grid:{vertLines:{color:"#f0f2f5"},horzLines:{color:"#f0f2f5"}},
+  timeScale:{timeVisible:true,secondsVisible:false,borderColor:"#e3e7ee"},
+  rightPriceScale:{borderColor:"#e3e7ee"},crosshair:{mode:0}});
+candle=chart.addCandlestickSeries({upColor:"#089981",downColor:"#e5484d",borderVisible:false,wickUpColor:"#089981",wickDownColor:"#e5484d"});
 COLORS.forEach(c=>lineSeries.push(chart.addLineSeries({color:c,lineWidth:2,priceLineVisible:false,lastValueVisible:false})));
 new ResizeObserver(()=>chart.applyOptions({width:document.getElementById("chart").clientWidth})).observe(document.getElementById("chart"));
 
@@ -219,7 +232,7 @@ async function load(){
   FIELDS.forEach(f=>q[f]=document.getElementById(f).value);
   try{const old=JSON.parse(localStorage.getItem("maweb")||"{}");localStorage.setItem("maweb",JSON.stringify({...old,...q,tf,strat}))}catch(e){}
   const p=new URLSearchParams({...q,interval:tf,strat});
-  [1,2,3].forEach(i=>p.set("ma"+i,q["kind"+i]==="off"?"off":`${q["kind"+i]}:${q["len"+i]}`));
+  [1,2,3,4].forEach(i=>p.set("ma"+i,q["kind"+i]==="off"?"off":`${q["kind"+i]}:${q["len"+i]}`));
   document.getElementById("status").textContent="불러오는 중…";
   document.getElementById("err").textContent="";
   try{
@@ -239,10 +252,10 @@ function draw(d){
   if(s){
     s.trades.forEach(t=>{
       const L=t.dir==="long";
-      markers.push({time:sh(t.entry_time),position:L?"belowBar":"aboveBar",color:L?"#26a69a":"#ef5350",shape:L?"arrowUp":"arrowDown",text:L?"롱":"숏"});
-      markers.push({time:sh(t.exit_time),position:L?"aboveBar":"belowBar",color:"#c7cdd8",shape:"circle",text:REASON[t.reason]});
+      markers.push({time:sh(t.entry_time),position:L?"belowBar":"aboveBar",color:L?"#089981":"#e5484d",shape:L?"arrowUp":"arrowDown",text:L?"롱":"숏"});
+      markers.push({time:sh(t.exit_time),position:L?"aboveBar":"belowBar",color:"#6b7280",shape:"circle",text:REASON[t.reason]});
     });
-    if(s.open){const L=s.open.dir==="long";markers.push({time:sh(s.open.entry_time),position:L?"belowBar":"aboveBar",color:L?"#26a69a":"#ef5350",shape:L?"arrowUp":"arrowDown",text:L?"롱(보유)":"숏(보유)"})}
+    if(s.open){const L=s.open.dir==="long";markers.push({time:sh(s.open.entry_time),position:L?"belowBar":"aboveBar",color:L?"#089981":"#e5484d",shape:L?"arrowUp":"arrowDown",text:L?"롱(보유)":"숏(보유)"})}
   }
   markers.sort((a,b)=>a.time-b.time);candle.setMarkers(markers);
 
@@ -256,7 +269,7 @@ function draw(d){
     if(s.open)txt+=` · 모의 보유: <b>${s.open.dir==="long"?"롱":"숏"}</b> ${fmtP(s.open.entry)} → ${fmtP(s.open.price)} ${pct(s.open.ret_pct)}`+
       (s.open.sl?` · 손절 ${fmtP(s.open.sl)}`:"")+(s.open.tp?` · 익절 ${fmtP(s.open.tp)}`:"");
     else txt+=" · 모의 보유 없음";
-    txt+=s.pending?` · <b style="color:var(--accent)">${s.pending}</b>`:" · 조건 안 맞음 (대기 없음)";
+    txt+=s.pending?` · <b style="color:var(--accent-text)">${s.pending}</b>`:" · 조건 안 맞음 (대기 없음)";
     if(s.pending){const key=d.symbol+tf+d.bars[d.bars.length-1].t+s.pending;
       if(lastSignal&&lastSignal!==key&&document.getElementById("auto").checked)notify(`${d.symbol} ${s.pending}`);lastSignal=key;}
     live.innerHTML=txt;
@@ -266,7 +279,7 @@ function draw(d){
     let txt=`<b>지금</b> · 마지막으로 끝난 봉 기준 ${maName(fl)} ${fv!=null?fmtP(fv):"-"} ${fv>sv?"&gt;":"&lt;"} ${maName(sl)} ${sv!=null?fmtP(sv):"-"} (${fv>sv?"골든크로스 쪽":"데드크로스 쪽"})`;
     if(s.open)txt+=` · 모의 보유: <b>${s.open.dir==="long"?"롱":"숏"}</b> ${fmtP(s.open.entry)} → ${fmtP(s.open.price)} ${pct(s.open.ret_pct)}`;
     else txt+=" · 모의 보유 없음";
-    if(s.pending){txt+=` · <b style="color:var(--accent)">새 신호: 다음 봉 시가에 ${s.pending}</b>`;
+    if(s.pending){txt+=` · <b style="color:var(--accent-text)">새 신호: 다음 봉 시가에 ${s.pending}</b>`;
       const key=d.symbol+tf+d.bars[d.bars.length-1].t+s.pending;
       if(lastSignal&&lastSignal!==key&&document.getElementById("auto").checked)notify(`${d.symbol} ${s.pending}`);
       lastSignal=key;}
@@ -299,7 +312,7 @@ TF.forEach(([k,n])=>{const b=document.createElement("button");b.textContent=n;b.
   b.onclick=()=>{scSel.has(k)?scSel.delete(k):scSel.add(k);markSc()};scTfs.appendChild(b)});
 function markSc(){[...scTfs.children].forEach(b=>b.classList.toggle("on",scSel.has(b.dataset.k)))}
 markSc();
-const SC_FIELDS=["sc_kind","sc_len","sc_pct","sc_mode","sc_side","sc_qv"];
+const SC_FIELDS=["sc_kind","sc_len","sc_pct","sc_mode","sc_side","sc_qv","sc_atr_tf","sc_atr_n","sc_atr_min"];
 SC_FIELDS.forEach(f=>{if(saved[f]!==undefined)document.getElementById(f).value=saved[f]});
 document.getElementById("sc_go").onclick=scan;
 document.getElementById("sc_auto").onchange=()=>{clearInterval(scTimer);if(document.getElementById("sc_auto").checked){scan();scTimer=setInterval(scan,60000)}};
@@ -310,24 +323,53 @@ async function scan(){
   if(!tfs.length){document.getElementById("sc_status").textContent="봉을 하나 이상 고르세요";return}
   const v=f=>document.getElementById(f).value;
   try{const s=JSON.parse(localStorage.getItem("maweb")||"{}");SC_FIELDS.forEach(f=>s[f]=v(f));s.sc_tfs=tfs;localStorage.setItem("maweb",JSON.stringify(s))}catch(e){}
-  const p=new URLSearchParams({ma:`${v("sc_kind")}:${v("sc_len")}`,tfs:tfs.join(","),pct:v("sc_pct"),mode:v("sc_mode"),side:v("sc_side"),min_qv:v("sc_qv")});
+  const p=new URLSearchParams({ma:`${v("sc_kind")}:${v("sc_len")}`,tfs:tfs.join(","),pct:v("sc_pct"),mode:v("sc_mode"),side:v("sc_side"),min_qv:v("sc_qv"),atr_tf:v("sc_atr_tf"),atr_n:v("sc_atr_n"),atr_min:v("sc_atr_min")});
   scBusy=true;document.getElementById("sc_status").textContent="찾는 중… (종목 수에 따라 10~30초)";
   try{
     const d=await (await fetch("/api/scan?"+p)).json();
     if(d.error)throw new Error(d.error);
-    const name=`${({sma:"MA",ema:"EMA",vwma:"VWMA"})[d.ma.kind]}${d.ma.n}`;
+    scLast=d;
     document.getElementById("sc_status").textContent=`${d.checked}종목 중 ${d.found.length}개 · ${fmtT(d.time)}`;
-    const head=`<tr><th>종목</th><th>가격</th>${d.tfs.map(t=>`<th>${TF.find(x=>x[0]===t)[1]} ${name} 거리</th>`).join("")}<th>24시간 거래대금</th></tr>`;
-    const rows=d.found.map(r=>`<tr class="hit" data-s="${r.symbol}"><td>${r.symbol.replace("USDT","")}</td><td>${fmtP(r.price)}</td>`+
-      d.tfs.map(t=>{const x=r.tf[t];return `<td class="${x&&x.in?"in":""}">${x?(x.dist_pct>=0?"+":"")+x.dist_pct.toFixed(2)+"%":"-"}</td>`}).join("")+
-      `<td>${fmtQ(r.qv)}</td></tr>`).join("");
-    const tb=document.getElementById("sc_table");
-    tb.innerHTML=head+(rows||`<tr><td colspan="9" style="text-align:left;color:var(--mute)">조건에 맞는 종목이 없어요</td></tr>`);
-    [...tb.querySelectorAll("tr.hit")].forEach(tr=>tr.onclick=()=>{
-      document.getElementById("symbol").value=tr.dataset.s; tf=d.tfs[0]; markTf(); load();
-      document.getElementById("chart").scrollIntoView({behavior:"smooth",block:"center"});});
+    renderScan();
   }catch(e){document.getElementById("sc_status").textContent="오류: "+e.message}
   scBusy=false;
+}
+// 정렬: dist = 고른 봉 중 가장 가까운 거리, qv = 거래대금 큰 순, tf:5m = 그 봉의 거리
+let scLast=null;
+const scSortEl=document.getElementById("sc_sort");
+function scKey(r,k){
+  if(k==="qv")return -r.qv;
+  if(k==="atr")return r.atr_pct==null?1e9:-r.atr_pct;
+  const ds=(k.startsWith("tf:")?[r.tf[k.slice(3)]]:Object.values(r.tf)).filter(Boolean).map(x=>Math.abs(x.dist_pct));
+  return ds.length?Math.min(...ds):1e9;
+}
+function setSort(k){
+  if(![...scSortEl.options].some(o=>o.value===k)){const o=document.createElement("option");o.value=k;
+    o.textContent=`${TF.find(x=>x[0]===k.slice(3))[1]}봉 거리 가까운 순`;scSortEl.appendChild(o)}
+  scSortEl.value=k;
+  try{const s=JSON.parse(localStorage.getItem("maweb")||"{}");s.sc_sort=k;localStorage.setItem("maweb",JSON.stringify(s))}catch(e){}
+  renderScan();
+}
+scSortEl.onchange=()=>setSort(scSortEl.value);
+if(saved.sc_sort&&saved.sc_sort.startsWith("tf:")&&TF.some(x=>x[0]===saved.sc_sort.slice(3)))setSort(saved.sc_sort);
+else if(saved.sc_sort)scSortEl.value=saved.sc_sort;
+function renderScan(){
+  const d=scLast; if(!d)return;
+  const k=scSortEl.value, name=`${({sma:"MA",ema:"EMA",vwma:"VWMA"})[d.ma.kind]}${d.ma.n}`;
+  const list=[...d.found].sort((a,b)=>scKey(a,k)-scKey(b,k));
+  const arrow=key=>key===k?" ▲":"";
+  const head=`<tr><th>종목</th><th>가격</th>${d.tfs.map(t=>`<th class="sort" data-k="tf:${t}" title="눌러서 이 봉 거리순 정렬">${TF.find(x=>x[0]===t)[1]} ${name} 거리${arrow("tf:"+t)}</th>`).join("")}`+
+    `<th class="sort" data-k="atr" title="눌러서 평균 ATR 큰 순 정렬">평균 ATR (${TF.find(x=>x[0]===d.atr.tf)[1]} ${d.atr.n}개)${k==="atr"?" ▼":""}</th>`+
+    `<th class="sort" data-k="qv" title="눌러서 거래대금순 정렬">24시간 거래대금${k==="qv"?" ▼":""}</th></tr>`;
+  const rows=list.map(r=>`<tr class="hit" data-s="${r.symbol}"><td>${r.symbol.replace("USDT","")}</td><td>${fmtP(r.price)}</td>`+
+    d.tfs.map(t=>{const x=r.tf[t];return `<td class="${x&&x.in?"in":""}">${x?(x.dist_pct>=0?"+":"")+x.dist_pct.toFixed(2)+"%":"-"}</td>`}).join("")+
+    `<td>${r.atr_pct==null?"-":r.atr_pct.toFixed(2)+"%"}</td><td>${fmtQ(r.qv)}</td></tr>`).join("");
+  const tb=document.getElementById("sc_table");
+  tb.innerHTML=head+(rows||`<tr><td colspan="9" style="text-align:left;color:var(--mute)">조건에 맞는 종목이 없어요</td></tr>`);
+  [...tb.querySelectorAll("th.sort")].forEach(th=>th.onclick=()=>setSort(th.dataset.k));
+  [...tb.querySelectorAll("tr.hit")].forEach(tr=>tr.onclick=()=>{
+    document.getElementById("symbol").value=tr.dataset.s; tf=d.tfs[0]; markTf(); load();
+    document.getElementById("chart").scrollIntoView({behavior:"smooth",block:"center"});});
 }
 function notify(msg){
   document.title="● "+msg;

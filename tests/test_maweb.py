@@ -1,6 +1,6 @@
 import unittest
 
-from binancebot.maweb import backtest, moving_average, near_line, parse_ma, pullback, run, scan
+from binancebot.maweb import atr_pct, backtest, moving_average, near_line, parse_ma, pullback, run, scan
 
 
 def bars_from(closes, vols=None):
@@ -147,6 +147,24 @@ class PullbackTest(unittest.TestCase):
         t = r["trades"][0]
         self.assertEqual((t["reason"], t["exit"], t["exit_time"]), ("line", 97, b[8]["t"]))
 
+    def test_line_touch_stop_and_take(self):
+        # 눌림선 100 에서 삼, 손절선 98 (닿으면), 익절선 104 (닿으면)
+        b = self.rows([(103, 104, 99.5, 101), (101, 103, 98.5, 102), (102, 104.5, 101, 104), (104, 104, 104, 104)])
+        line, low, high = [100.0] * len(b), [98.0] * len(b), [104.0] * len(b)
+        r = pullback(b, line, stop_line=low, tp_line=high, stop_mode="touch", stop_pct=0, tp_mode="touch", fee_pct=0)
+        t = r["trades"][0]
+        self.assertEqual((t["entry"], t["reason"], t["exit"]), (100.0, "take", 104.0))
+        b2 = self.rows([(103, 104, 99.5, 101), (101, 101, 97, 97.5), (97, 97, 97, 97)])
+        r2 = pullback(b2, [100.0] * len(b2), stop_line=[98.0] * len(b2), stop_mode="touch", stop_pct=0, fee_pct=0)
+        self.assertEqual((r2["trades"][0]["reason"], r2["trades"][0]["exit"]), ("line", 98.0))
+        # 손절선이 가격 위에 있으면 바로 손절하지 않음 (위로 올라갔다 내려와 닿아야 함)
+        r4 = pullback(b2, [100.0] * len(b2), stop_line=[102.0] * len(b2), stop_mode="touch", stop_pct=0, fee_pct=0)
+        self.assertEqual(r4["trades"], [])
+        # 익절선이 진입가 아래면 익절로 안 씀
+        r3 = pullback(b, line, tp_line=[95.0] * len(b), tp_mode="touch", stop_pct=0, fee_pct=0)
+        self.assertEqual(r3["trades"], [])
+        self.assertIsNotNone(r3["open"])
+
     def test_short_mirror_and_pending(self):
         down = [(96, 97, 94, 95)] * 6
         b = ohlc(down + [(96, 96, 96, 96)])  # 진행 중 봉, 아직 100 안 닿음
@@ -187,6 +205,15 @@ class ScanTest(unittest.TestCase):
         self.assertEqual(sorted(r["symbol"] for r in got), ["BTCUSDT", "ETHUSDT"])
         self.assertEqual(scan(ScanMarket(), {**q, "side": "below"})["found"], [])
         self.assertEqual(scan(ScanMarket(), {**q, "min_qv": "10"})["checked"], 0)
+
+    def test_atr(self):
+        b = ohlc([(100, 102, 98, 100)] * 5 + [(100, 100, 100, 100)])  # 끝난 봉마다 변동폭 4
+        self.assertAlmostEqual(atr_pct(b, 3), 4.0)
+        self.assertIsNone(atr_pct(b, 5))
+        q = {"ma": "vwma:100", "tfs": "5m", "pct": "1"}
+        found = scan(ScanMarket(), q)["found"]  # ScanMarket 봉은 변동이 없어 ATR 0
+        self.assertEqual([r["atr_pct"] for r in found], [0.0, 0.0])
+        self.assertEqual(scan(ScanMarket(), {**q, "atr_min": "1"})["found"], [])
 
 
 if __name__ == "__main__":

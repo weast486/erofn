@@ -12,7 +12,15 @@ class EngulfTest(unittest.TestCase):
         p = bar(0, 10, 9, 100)
         self.assertEqual(engulfing(p, bar(1, 8.9, 10.5, 150)), 1)
         self.assertEqual(engulfing(p, bar(1, 8.9, 10.5, 100)), 0)  # 같은 거래량은 아님
-        self.assertEqual(engulfing(p, bar(1, 9.2, 10.5, 150)), 0)  # 몸통을 못 감쌈
+        self.assertEqual(engulfing(p, bar(1, 9.2, 10.5, 150)), 0)  # 몸통을 못 감쌈 (0.05% 넘음)
+
+    def test_open_tolerance(self):
+        # SOXL 11-16 15:20 / 15:25: 시가 52.02 가 앞 봉 종가 52.01 보다 1센트 높음
+        p, b = bar(0, 52.16, 52.01, 104521), bar(1, 52.02, 52.52, 136768)
+        self.assertEqual(engulfing(p, b, 0), 0)
+        self.assertEqual(engulfing(p, b), 1)
+        self.assertEqual(engulfing(p, bar(1, 52.20, 52.52, 136768)), 0)  # 0.05% 넘게 높음
+        self.assertEqual(engulfing(p, bar(1, 52.20, 52.52, 136768), None), 1)
 
     def test_bear(self):
         self.assertEqual(engulfing(bar(0, 9, 10, 100), bar(1, 10.1, 8.5, 200)), -1)
@@ -27,7 +35,7 @@ class OrderBlockTest(unittest.TestCase):
         self.assertEqual(len(zs), 1)
         z = zs[0]
         self.assertEqual((z["dir"], z["top"], z["bottom"]), ("bull", 10, 9))
-        self.assertEqual(z["touches"], 1)  # 2번 봉이 자리 안으로 들어옴
+        self.assertEqual((z["touches"], z["touched_t"]), (2, 2))  # 2번 봉이 처음 닿고, 3번 봉(깨짐)도 닿음
         self.assertEqual(z["broken_t"], 3)  # 3번 봉 종가 8.5 < 9
         self.assertEqual(order_blocks(bars, "wick")[0]["bottom"], 8.8)
 
@@ -50,6 +58,12 @@ class OverlapTest(unittest.TestCase):
         self.assertEqual([(o["bottom"], o["top"], o["tfs"]) for o in mixed],
                          [(100, 105, ["1h", "5m"]), (105, 110, ["1h", "15m", "5m"]), (110, 120, ["15m", "5m"])])
         self.assertEqual([o["tfs"] for o in overlaps(zones, min_tfs=3, same_dir=False)], [["1h", "15m", "5m"]])
+
+    def test_fresh_drops_touched(self):
+        z1 = dict(self.z("bull", 100, 110), touched_t=7)
+        zones = {"1h": [z1], "15m": [self.z("bull", 105, 120)]}
+        self.assertEqual(len(overlaps(zones)), 1)
+        self.assertEqual(overlaps(zones, fresh=True), [])
 
     def test_same_tf_not_counted(self):
         self.assertEqual(overlaps({"1h": [self.z("bull", 1, 3), self.z("bull", 2, 4)]}), [])
@@ -100,3 +114,14 @@ class SimulateTest(unittest.TestCase):
         r = simulate(bars, "1h", ok, use_tfs=["1h"], tp_r=5, fee_pct=0)
         t = r["trades"][0]
         self.assertEqual((t["entry_time"], t["entry"], t["exit"], t["reason"]), (H, 10, 9, "stop"))
+
+
+class FreshSimTest(unittest.TestCase):
+    def test_touched_zone_not_traded(self):
+        from binancebot.obweb import simulate
+        H = 3600
+        bars = [bar(0, 11, 11, 1), bar(H, 11, 10.5, 1, l=9.5), bar(2 * H, 10.5, 12, 1), bar(3 * H, 12, 12, 1)]
+        # 5분 자리가 1시간 봉 시작 전에 이미 닿았음 → 빼기 켜면 매매 없음
+        z = {"5m": [{"dir": "bull", "bottom": 9, "top": 10, "t": 0, "t_engulf": 0, "broken_t": None, "touched_t": 600}]}
+        self.assertEqual(len(simulate(bars, "1h", z, use_tfs=["5m"], fee_pct=0)["trades"]), 1)
+        self.assertEqual(simulate(bars, "1h", z, use_tfs=["5m"], fee_pct=0, fresh=True)["trades"], [])

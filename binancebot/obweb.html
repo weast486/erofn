@@ -62,12 +62,20 @@ h3{font-size:14px;margin:16px 0 0}
     <div class="tfs" id="tfs"></div>
     <h2 style="margin-top:14px">3. 표시할 오더블록</h2>
     <div class="show" id="show"></div>
+    <label>장악형 시가 조건</label>
+    <select id="open_tol">
+      <option value="0.05">시가가 앞 봉 종가와 0.05% 차이까지 인정</option>
+      <option value="0.1">0.1% 차이까지 인정</option>
+      <option value="0">교과서대로 (완전히 감싸야 함)</option>
+      <option value="off">시가는 안 봄 (종가만)</option>
+    </select>
     <label>자리 크기</label>
     <select id="basis">
       <option value="body">장악당한 앞 봉의 몸통</option>
       <option value="wick">장악당한 앞 봉의 꼬리까지</option>
     </select>
-    <label class="chk"><input type="checkbox" id="broken"> 깨진 자리도 흐리게 보기</label>
+    <label class="chk"><input type="checkbox" id="fresh" checked> 이미 다시 닿은 자리는 빼기</label>
+    <label class="chk"><input type="checkbox" id="broken"> 뺀 자리(깨짐·닿음)도 흐리게 보기</label>
     <label>지금 가격에서 ±% 안의 자리만 (0=전부)</label>
     <input id="near" type="number" value="10" min="0" step="1">
     <h2 style="margin-top:14px">4. 겹치는 자리</h2>
@@ -106,7 +114,7 @@ h3{font-size:14px;margin:16px 0 0}
     <label class="chk"><input type="checkbox" id="auto" checked> 1분마다 자동 새로고침</label>
     <button class="go" id="go">다시 계산</button>
     <div id="err"></div>
-    <div class="note">상승 장악형: 앞 봉이 음봉이고 이번 양봉 몸통이 앞 봉 몸통을 감싸며 <b>거래량이 앞 봉보다 많을 때만</b>. 오더블록 자리는 장악당한 앞 봉이고, 그 뒤 끝난 봉의 종가가 자리 아래로 마감하면 깨진 자리(하락은 반대). 진행 중인 봉은 끝나야 셈. 시각은 한국 시간.<br><b>모의 매매</b>: 차트로 보는 봉으로 계산. 직전 봉 종가가 자리 위에 있다가 가격이 자리에 닿으면 지정가로 롱(숏은 반대). 자리는 장악 봉이 끝난 뒤부터 쓰고, 자기 봉에서 깨진 뒤에는 안 써요. 손절 = 자리 반대편, 익절 = 손절폭의 배수. 산 봉에서는 손절만 보고, 같은 봉에서 둘 다 닿으면 손절. 작은 봉(5분)의 자리는 불러온 500개 기간에만 있어서 큰 봉 차트에서는 마지막 며칠에만 쓰여요.</div>
+    <div class="note">상승 장악형: 앞 봉이 음봉이고 이번 양봉 몸통이 앞 봉 몸통을 감싸며(24시간 시장은 시가가 앞 봉 종가와 거의 같아서 기본으로 0.05% 차이까지 감싼 것으로 봄) <b>거래량이 앞 봉보다 많을 때만</b>. 오더블록 자리는 장악당한 앞 봉이고, 그 뒤 끝난 봉의 종가가 자리 아래로 마감하면 깨진 자리(하락은 반대). 그 뒤 끝난 봉이 자리에 한 번이라도 다시 들어오면 <b>닿은 자리</b>로 보고 빼요(겹치는 자리·모의 매매에서도). 진행 중인 봉은 끝나야 셈. 시각은 한국 시간.<br><b>모의 매매</b>: 차트로 보는 봉으로 계산. 직전 봉 종가가 자리 위에 있다가 가격이 자리에 닿으면 지정가로 롱(숏은 반대). 자리는 장악 봉이 끝난 뒤부터 쓰고, 자기 봉에서 깨진 뒤에는 안 써요. 손절 = 자리 반대편, 익절 = 손절폭의 배수. 산 봉에서는 손절만 보고, 같은 봉에서 둘 다 닿으면 손절. 작은 봉(5분)의 자리는 불러온 500개 기간에만 있어서 큰 봉 차트에서는 마지막 며칠에만 쓰여요.</div>
   </div>
   <div>
     <div class="panel">
@@ -123,7 +131,7 @@ h3{font-size:14px;margin:16px 0 0}
     <div class="panel" style="margin-top:12px">
       <h3 style="margin-top:0">겹치는 자리 <span class="note" style="font-weight:400">— 지금 가격에서 가까운 순, 노란 줄 = 지금 가격이 자리 안</span></h3>
       <div class="tbl"><table id="ovt"></table></div>
-      <h3>살아 있는 오더블록</h3>
+      <h3>살아 있는 오더블록 <span class="note" style="font-weight:400">— 깨지지 않았고, 빼기를 켜면 아직 한 번도 다시 닿지 않은 자리</span></h3>
       <div class="tbl"><table id="zt"></table></div>
     </div>
   </div>
@@ -144,8 +152,8 @@ const show=document.getElementById("show");
 TF.forEach(([k,n])=>{const l=document.createElement("label");l.className="chk";l.style.margin="2px 0";
   l.innerHTML=`<input type="checkbox" ${shown.has(k)?"checked":""}> <span class="sw" style="background:${TCOL[k]}"></span> ${n}`;
   l.querySelector("input").onchange=e=>{e.target.checked?shown.add(k):shown.delete(k);save();simOn()?load():render()};show.appendChild(l)});
-const FIELDS=["basis","near","min_tfs","same_dir","bars","src","side","entry","stop_mode","sl_buf","tp_r","max_hold","fee","lev"];
-const CHECKS=["broken","sim","first"];
+const FIELDS=["open_tol","basis","near","min_tfs","same_dir","bars","src","side","entry","stop_mode","sl_buf","tp_r","max_hold","fee","lev"];
+const CHECKS=["broken","sim","first","fresh"];
 FIELDS.forEach(f=>{if(saved[f]!==undefined)document.getElementById(f).value=saved[f]});
 if(saved.view)view=saved.view;CHECKS.forEach(f=>{if(saved[f]!==undefined)document.getElementById(f).checked=saved[f]});markTf();
 const simOn=()=>document.getElementById("sim").checked;
@@ -169,8 +177,9 @@ fetch("/api/symbols").then(r=>r.json()).then(list=>{
 }).catch(e=>{document.getElementById("err").textContent="종목 목록 오류: "+e.message;load()});
 document.getElementById("symbol").onchange=load;
 document.getElementById("go").onclick=load;
-["basis","min_tfs","same_dir","bars","src","side","entry","stop_mode","sl_buf","tp_r","max_hold","fee","lev"].forEach(f=>document.getElementById(f).onchange=load);
+["open_tol","basis","min_tfs","same_dir","bars","src","side","entry","stop_mode","sl_buf","tp_r","max_hold","fee","lev"].forEach(f=>document.getElementById(f).onchange=load);
 document.getElementById("first").onchange=load;
+document.getElementById("fresh").onchange=load;
 document.getElementById("sim").onchange=()=>{markSim();load()};
 document.getElementById("near").onchange=()=>{save();render()};
 document.getElementById("broken").onchange=()=>{save();render()};
@@ -198,13 +207,14 @@ function simLive(s){
   return "<br>모의 보유 없음 · 대기 중인 자리 없음";
 }
 const DIR={bull:"▲ 상승",bear:"▼ 하락",mixed:"◆ 섞임"};
+const endT=z=>{const f=document.getElementById("fresh").checked&&z.touched_t!=null?z.touched_t:null;return f!=null&&(z.broken_t==null||f<z.broken_t)?f:z.broken_t};
 const dist=(z,price)=>{const m=price>z.top?z.top:price<z.bottom?z.bottom:price;return (m/price-1)*100};
 
 async function load(){
   save();
   const p=new URLSearchParams({symbol:document.getElementById("symbol").value,interval:view});
   FIELDS.forEach(f=>p.set(f,document.getElementById(f).value));
-  p.set("sim",simOn()?"1":"0");p.set("first",document.getElementById("first").checked?"1":"0");p.set("tfs",[...shown].join(","));
+  p.set("sim",simOn()?"1":"0");p.set("fresh",document.getElementById("fresh").checked?"1":"0");p.set("first",document.getElementById("first").checked?"1":"0");p.set("tfs",[...shown].join(","));
   document.getElementById("status").textContent="불러오는 중…";document.getElementById("err").textContent="";
   try{const r=await fetch("/api/ob?"+p);const d=await r.json();if(d.error)throw new Error(d.error);
     const first=!data||data.symbol!==d.symbol||data.interval!==d.interval;data=d;markSim();
@@ -222,14 +232,14 @@ function visibleZones(){
   const near=+document.getElementById("near").value||0, br=document.getElementById("broken").checked;
   const out=[];
   TF.forEach(([tf])=>{if(!shown.has(tf))return;(data.zones[tf]||[]).forEach(z=>{
-    if(z.broken_t&&!br)return;if(near>0&&Math.abs(dist(z,data.price))>near)return;out.push({...z,tf})})});
+    const e=endT(z);if(e!=null&&!br)return;if(near>0&&Math.abs(dist(z,data.price))>near)return;out.push({...z,tf,end_t:e})})});
   return out;
 }
 function render(){
   if(!data)return;
   // 차트로 보는 봉의 장악형 표시
   const mk=[];(data.zones[view]||[]).forEach(z=>{const up=z.dir==="bull";
-    mk.push({time:z.t_engulf+KST,position:up?"belowBar":"aboveBar",color:up?"#089981":"#e5484d",shape:up?"arrowUp":"arrowDown",text:z.broken_t?"":"OB"})});
+    mk.push({time:z.t_engulf+KST,position:up?"belowBar":"aboveBar",color:up?"#089981":"#e5484d",shape:up?"arrowUp":"arrowDown",text:endT(z)!=null?"":"OB"})});
   const s=data.sim;
   if(s){s.trades.forEach(t=>{const L=t.dir==="long";
       mk.push({time:barT(t.entry_time),position:L?"belowBar":"aboveBar",color:L?"#089981":"#e5484d",shape:L?"arrowUp":"arrowDown",text:L?"롱":"숏"});
@@ -246,7 +256,7 @@ function render(){
   document.getElementById("ovt").innerHTML="<tr><th>방향</th><th>겹친 봉</th><th>아래</th><th>위</th><th>지금 가격에서</th><th>겹침 시작</th></tr>"+
     (ov.length?ov.map(o=>`<tr class="${o.inside?"in":""}"><td class="${o.dir}">${DIR[o.dir]}</td><td>${o.tfs.map(t=>TFN[t]).join(" · ")}</td><td>${fmtP(o.bottom)}</td><td>${fmtP(o.top)}</td><td>${o.inside?"안":(o.dist_pct>=0?"+":"")+o.dist_pct.toFixed(2)+"%"}</td><td>${fmtT(o.start)}</td></tr>`).join("")
     :`<tr><td colspan="6" style="text-align:left;color:var(--mute)">겹치는 자리가 없어요</td></tr>`);
-  const zs=visibleZones().filter(z=>!z.broken_t).sort((a,b)=>Math.abs(dist(a,price))-Math.abs(dist(b,price)));
+  const zs=visibleZones().filter(z=>z.end_t==null).sort((a,b)=>Math.abs(dist(a,price))-Math.abs(dist(b,price)));
   document.getElementById("zt").innerHTML="<tr><th>봉</th><th>방향</th><th>아래</th><th>위</th><th>지금 가격에서</th><th>다시 닿은 봉</th><th>거래량</th><th>장악 봉 시각</th></tr>"+
     zs.map(z=>{const d=dist(z,price);return `<tr class="${d===0?"in":""}"><td><span class="sw" style="background:${TCOL[z.tf]}"></span> ${TFN[z.tf]}</td><td class="${z.dir}">${DIR[z.dir]}</td><td>${fmtP(z.bottom)}</td><td>${fmtP(z.top)}</td><td>${d===0?"안":(d>=0?"+":"")+d.toFixed(2)+"%"}</td><td>${z.touches}</td><td>${z.vol_x?z.vol_x.toFixed(1)+"배":"-"}</td><td>${fmtT(z.t_engulf)}</td></tr>`}).join("");
 }
@@ -267,13 +277,13 @@ function frame(){
     const yOf=p=>candle.priceToCoordinate(p);
     ctx.font="11px sans-serif";
     visibleZones().forEach(z=>{
-      const x1=xOf(z.t,-0.5),x2=z.broken_t?xOf(z.broken_t,0.5):pw,y1=yOf(z.top),y2=yOf(z.bottom);
+      const dead=z.end_t!=null,x1=xOf(z.t,-0.5),x2=dead?xOf(z.end_t,0.5):pw,y1=yOf(z.top),y2=yOf(z.bottom);
       if(y1==null||y2==null||x2<0||x1>pw)return;
-      const c=TCOL[z.tf],a=z.broken_t?0.05:0.12;
+      const c=TCOL[z.tf],a=dead?0.05:0.12;
       ctx.fillStyle=rgba(c,a);ctx.fillRect(x1,y1,x2-x1,Math.max(1,y2-y1));
-      ctx.strokeStyle=rgba(c,z.broken_t?0.3:0.8);ctx.lineWidth=1;ctx.setLineDash(z.broken_t?[3,3]:[]);
+      ctx.strokeStyle=rgba(c,dead?0.3:0.8);ctx.lineWidth=1;ctx.setLineDash(dead?[3,3]:[]);
       ctx.strokeRect(x1,y1,x2-x1,Math.max(1,y2-y1));
-      if(!z.broken_t){ctx.fillStyle=c;ctx.fillText(`${z.dir==="bull"?"▲":"▼"}${TFN[z.tf]}`,Math.max(x1,0)+3,y1+11)}
+      if(!dead){ctx.fillStyle=c;ctx.fillText(`${z.dir==="bull"?"▲":"▼"}${TFN[z.tf]}`,Math.max(x1,0)+3,y1+11)}
     });
     ctx.setLineDash([]);
     data.overlaps.forEach(o=>{

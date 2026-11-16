@@ -1,0 +1,295 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>오더블록</title>
+<script src="https://unpkg.com/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
+<style>
+:root{--bg:#f4f6f9;--panel:#ffffff;--line:#e3e7ee;--text:#1f2430;--mute:#6b7280;--up:#089981;--down:#e5484d;--accent:#f0b90b;--accent-text:#a87500;--field:#f8fafc;--hover:#fff8e1;--soft:#fffbea}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font:14px/1.45 -apple-system,"Malgun Gothic","Apple SD Gothic Neo",sans-serif}
+header{display:flex;align-items:center;gap:12px;padding:12px 16px;border-bottom:1px solid var(--line);background:var(--panel)}
+header h1{font-size:17px;margin:0;color:var(--accent-text)}
+header .sub{color:var(--mute);font-size:12px}
+#status{color:var(--mute);font-size:12px;margin-left:auto}
+.wrap{display:grid;grid-template-columns:290px 1fr;gap:12px;padding:12px}
+.wrap>*{min-width:0}
+@media(max-width:900px){.wrap{grid-template-columns:1fr}header{flex-wrap:wrap}#status{margin-left:0}}
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:12px;box-shadow:0 1px 3px rgba(16,24,40,.06)}
+.panel h2{font-size:13px;margin:0 0 8px;color:var(--mute);font-weight:600}
+label{display:block;font-size:12px;color:var(--mute);margin:8px 0 3px}
+select,input{width:100%;background:var(--field);color:var(--text);border:1px solid var(--line);border-radius:6px;padding:6px 8px;font:inherit}
+.row{display:flex;gap:6px}.row>*{flex:1}
+.tfs{display:flex;flex-wrap:wrap;gap:4px}
+.tfs button{flex:1 0 18%;background:var(--field);color:var(--text);border:1px solid var(--line);border-radius:6px;padding:6px 0;cursor:pointer;font:inherit}
+.tfs button.on{background:var(--accent);color:#111;border-color:var(--accent);font-weight:700}
+.chk{display:flex;align-items:center;gap:6px;margin-top:8px;font-size:13px}.chk input{width:auto}
+.show{display:grid;grid-template-columns:1fr 1fr;gap:2px 8px}
+.sw{display:inline-block;width:12px;height:12px;border-radius:3px;vertical-align:-1px}
+.go{margin-top:12px;width:100%;background:var(--accent);color:#111;border:0;border-radius:8px;padding:9px;font:inherit;font-weight:700;cursor:pointer}
+.chartbox{position:relative;height:560px}
+#chart{position:absolute;inset:0}
+#ov{position:absolute;left:0;top:0;pointer-events:none;z-index:3}
+.live{background:var(--soft);border:1px solid var(--accent);border-radius:10px;padding:10px;margin-top:12px}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th,td{padding:6px 8px;border-bottom:1px solid var(--line);text-align:right;white-space:nowrap}
+th:first-child,td:first-child{text-align:left}
+th{color:var(--mute);font-weight:600}
+.tbl{max-height:320px;overflow:auto;margin-top:6px}
+.bull{color:var(--up);font-weight:700}.bear{color:var(--down);font-weight:700}.mixed{color:var(--accent-text);font-weight:700}
+tr.in td{background:var(--hover)}
+.note{color:var(--mute);font-size:12px;margin-top:10px}
+#err{color:var(--down);margin-top:8px;font-size:13px}
+h3{font-size:14px;margin:16px 0 0}
+.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:8px;margin-top:12px}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:10px;box-shadow:0 1px 3px rgba(16,24,40,.06)}
+.card .k{color:var(--mute);font-size:12px}.card .v{font-size:18px;font-weight:700;margin-top:2px}
+.pos{color:var(--up)}.neg{color:var(--down)}
+</style>
+</head>
+<body>
+<header>
+  <h1>오더블록</h1>
+  <span class="sub">장악형 캔들 (거래량 증가) · 바이낸스 선물 시세 · 주문 없음</span>
+  <span id="status"></span>
+</header>
+<div class="wrap">
+  <div class="panel">
+    <h2>1. 종목</h2>
+    <select id="symbol"><option>BTCUSDT</option><option>ETHUSDT</option></select>
+    <h2 style="margin-top:14px">2. 차트로 볼 봉</h2>
+    <div class="tfs" id="tfs"></div>
+    <h2 style="margin-top:14px">3. 표시할 오더블록</h2>
+    <div class="show" id="show"></div>
+    <label>자리 크기</label>
+    <select id="basis">
+      <option value="body">장악당한 앞 봉의 몸통</option>
+      <option value="wick">장악당한 앞 봉의 꼬리까지</option>
+    </select>
+    <label class="chk"><input type="checkbox" id="broken"> 깨진 자리도 흐리게 보기</label>
+    <label>지금 가격에서 ±% 안의 자리만 (0=전부)</label>
+    <input id="near" type="number" value="10" min="0" step="1">
+    <h2 style="margin-top:14px">4. 겹치는 자리</h2>
+    <div class="row">
+      <div><label>몇 개 봉 이상 겹침</label><select id="min_tfs"><option>2</option><option>3</option><option>4</option><option>5</option></select></div>
+      <div><label>방향</label><select id="same_dir"><option value="1">같은 방향끼리</option><option value="0">방향 무관</option></select></div>
+    </div>
+    <h2 style="margin-top:14px">5. 모의 매매</h2>
+    <label class="chk" style="margin-top:0"><input type="checkbox" id="sim"> 켜기 (차트로 보는 봉으로 계산)</label>
+    <div id="p-sim">
+    <label>쓸 자리</label>
+    <select id="src">
+      <option value="zones">위에서 체크한 봉의 오더블록 전부</option>
+      <option value="overlap">겹치는 자리만 (4번 설정)</option>
+    </select>
+    <div class="row">
+      <div><label>방향</label><select id="side"><option value="long">롱만</option><option value="short">숏만</option><option value="both">롱·숏</option></select></div>
+      <div><label>사는 곳</label><select id="entry"><option value="edge">자리 윗선(숏은 아랫선)</option><option value="mid">자리 가운데</option></select></div>
+    </div>
+    <label class="chk"><input type="checkbox" id="first" checked> 자리마다 처음 닿을 때만</label>
+    <div class="row">
+      <div><label>손절</label><select id="stop_mode"><option value="touch">자리 반대편에 닿으면</option><option value="close">종가가 자리 밖 마감</option></select></div>
+      <div><label>손절 여유 %</label><input id="sl_buf" type="number" value="0" min="0" step="0.1"></div>
+    </div>
+    <div class="row">
+      <div><label>익절 (손절폭의 몇 배, 0=없음)</label><input id="tp_r" type="number" value="2" min="0" step="0.5"></div>
+      <div><label>최대 보유 봉 (0=없음)</label><input id="max_hold" type="number" value="0" min="0"></div>
+    </div>
+    <div class="row">
+      <div><label>수수료 한쪽 %</label><input id="fee" type="number" value="0.05" min="0" step="0.01"></div>
+      <div><label>배율</label><input id="lev" type="number" value="1" min="1" max="20" step="1"></div>
+    </div>
+    </div>
+    <label>봉마다 불러올 개수</label>
+    <input id="bars" type="number" value="500" min="50" max="1500" step="50">
+    <label class="chk"><input type="checkbox" id="auto" checked> 1분마다 자동 새로고침</label>
+    <button class="go" id="go">다시 계산</button>
+    <div id="err"></div>
+    <div class="note">상승 장악형: 앞 봉이 음봉이고 이번 양봉 몸통이 앞 봉 몸통을 감싸며 <b>거래량이 앞 봉보다 많을 때만</b>. 오더블록 자리는 장악당한 앞 봉이고, 그 뒤 끝난 봉의 종가가 자리 아래로 마감하면 깨진 자리(하락은 반대). 진행 중인 봉은 끝나야 셈. 시각은 한국 시간.<br><b>모의 매매</b>: 차트로 보는 봉으로 계산. 직전 봉 종가가 자리 위에 있다가 가격이 자리에 닿으면 지정가로 롱(숏은 반대). 자리는 장악 봉이 끝난 뒤부터 쓰고, 자기 봉에서 깨진 뒤에는 안 써요. 손절 = 자리 반대편, 익절 = 손절폭의 배수. 산 봉에서는 손절만 보고, 같은 봉에서 둘 다 닿으면 손절. 작은 봉(5분)의 자리는 불러온 500개 기간에만 있어서 큰 봉 차트에서는 마지막 며칠에만 쓰여요.</div>
+  </div>
+  <div>
+    <div class="panel">
+      <div class="chartbox"><div id="chart"></div><canvas id="ov"></canvas></div>
+    </div>
+    <div class="live" id="live">불러오는 중…</div>
+    <div id="simbox" style="display:none">
+      <div class="cards" id="cards"></div>
+      <div class="panel" style="margin-top:12px">
+        <h3 style="margin-top:0">모의 매매 내역 <span class="note" style="font-weight:400">— 최근 것이 위</span></h3>
+        <div class="tbl"><table id="trades"></table></div>
+      </div>
+    </div>
+    <div class="panel" style="margin-top:12px">
+      <h3 style="margin-top:0">겹치는 자리 <span class="note" style="font-weight:400">— 지금 가격에서 가까운 순, 노란 줄 = 지금 가격이 자리 안</span></h3>
+      <div class="tbl"><table id="ovt"></table></div>
+      <h3>살아 있는 오더블록</h3>
+      <div class="tbl"><table id="zt"></table></div>
+    </div>
+  </div>
+</div>
+<script>
+const TF=[["1d","일봉"],["4h","4시간"],["1h","1시간"],["15m","15분"],["5m","5분"]];
+const TFN=Object.fromEntries(TF);
+const TCOL={"1d":"#7c3aed","4h":"#2563eb","1h":"#0891b2","15m":"#ea580c","5m":"#64748b"};
+const KST=9*3600;
+let view="1h",data=null,chart,candle,timer=null;
+const saved=(()=>{try{return JSON.parse(localStorage.getItem("obweb")||"{}")}catch(e){return {}}})();
+const shown=new Set(saved.shown||TF.map(x=>x[0]));
+
+const tfs=document.getElementById("tfs");
+TF.forEach(([k,n])=>{const b=document.createElement("button");b.textContent=n;b.dataset.k=k;b.onclick=()=>{view=k;markTf();load()};tfs.appendChild(b)});
+function markTf(){[...tfs.children].forEach(b=>b.classList.toggle("on",b.dataset.k===view))}
+const show=document.getElementById("show");
+TF.forEach(([k,n])=>{const l=document.createElement("label");l.className="chk";l.style.margin="2px 0";
+  l.innerHTML=`<input type="checkbox" ${shown.has(k)?"checked":""}> <span class="sw" style="background:${TCOL[k]}"></span> ${n}`;
+  l.querySelector("input").onchange=e=>{e.target.checked?shown.add(k):shown.delete(k);save();simOn()?load():render()};show.appendChild(l)});
+const FIELDS=["basis","near","min_tfs","same_dir","bars","src","side","entry","stop_mode","sl_buf","tp_r","max_hold","fee","lev"];
+const CHECKS=["broken","sim","first"];
+FIELDS.forEach(f=>{if(saved[f]!==undefined)document.getElementById(f).value=saved[f]});
+if(saved.view)view=saved.view;CHECKS.forEach(f=>{if(saved[f]!==undefined)document.getElementById(f).checked=saved[f]});markTf();
+const simOn=()=>document.getElementById("sim").checked;
+function markSim(){document.getElementById("p-sim").style.display=simOn()?"":"none";document.getElementById("simbox").style.display=simOn()?"":"none"}markSim();
+function save(){try{const o={view,shown:[...shown],symbol:document.getElementById("symbol").value};
+  FIELDS.forEach(f=>o[f]=document.getElementById(f).value);CHECKS.forEach(f=>o[f]=document.getElementById(f).checked);localStorage.setItem("obweb",JSON.stringify(o))}catch(e){}}
+
+chart=LightweightCharts.createChart(document.getElementById("chart"),{
+  layout:{background:{color:"#ffffff"},textColor:"#4b5563"},
+  grid:{vertLines:{color:"#f0f2f5"},horzLines:{color:"#f0f2f5"}},
+  timeScale:{timeVisible:true,secondsVisible:false,borderColor:"#e3e7ee",rightOffset:8},
+  rightPriceScale:{borderColor:"#e3e7ee"},crosshair:{mode:0},autoSize:true});
+candle=chart.addCandlestickSeries({upColor:"#089981",downColor:"#e5484d",borderVisible:false,wickUpColor:"#089981",wickDownColor:"#e5484d"});
+
+fetch("/api/symbols").then(r=>r.json()).then(list=>{
+  if(list.error)throw new Error(list.error);
+  const sel=document.getElementById("symbol");sel.innerHTML="";let g=null,og;
+  list.forEach(s=>{if(s.group!==g){g=s.group;og=document.createElement("optgroup");og.label=g==="미국 주식"?"미국 주식 토큰 (24시간 거래대금 순)":g;sel.appendChild(og)}
+    const o=document.createElement("option");o.value=s.symbol;o.textContent=s.symbol.replace("USDT","");og.appendChild(o)});
+  sel.value=saved.symbol||"BTCUSDT";if(!sel.value)sel.value="BTCUSDT";load();
+}).catch(e=>{document.getElementById("err").textContent="종목 목록 오류: "+e.message;load()});
+document.getElementById("symbol").onchange=load;
+document.getElementById("go").onclick=load;
+["basis","min_tfs","same_dir","bars","src","side","entry","stop_mode","sl_buf","tp_r","max_hold","fee","lev"].forEach(f=>document.getElementById(f).onchange=load);
+document.getElementById("first").onchange=load;
+document.getElementById("sim").onchange=()=>{markSim();load()};
+document.getElementById("near").onchange=()=>{save();render()};
+document.getElementById("broken").onchange=()=>{save();render()};
+document.getElementById("auto").onchange=schedule;
+
+const fmtT=t=>{const d=new Date((t+KST)*1000);const p=n=>String(n).padStart(2,"0");
+  return `${d.getUTCFullYear()%100}-${p(d.getUTCMonth()+1)}-${p(d.getUTCDate())} ${p(d.getUTCHours())}:${p(d.getUTCMinutes())}`};
+const fmtP=p=>p>=1000?p.toFixed(1):p>=10?p.toFixed(2):p.toFixed(4);
+const REASON={stop:"손절",take:"익절",time:"시간"};
+const barT=t=>t+KST;
+const pct=v=>`<span class="${v>=0?"pos":"neg"}">${v>=0?"+":""}${v.toFixed(2)}%</span>`;
+const zn=z=>z.map(t=>TFN[t]).join("·");
+function drawSim(s){
+  if(!s){document.getElementById("cards").innerHTML="";document.getElementById("trades").innerHTML="";return}
+  const st=s.stats,b=data.bars;
+  document.getElementById("cards").innerHTML=[["거래 수",st.n+"번"],["승률",st.win_rate.toFixed(1)+"%"],["거래당 평균",pct(st.avg_pct)],[`누적 (복리·${st.leverage}배)`,pct(st.total_pct)],["최대 낙폭",pct(st.mdd_pct)],
+    ["기간",`${fmtT(b[0].t).slice(0,8)} ~ ${fmtT(b[b.length-1].t).slice(0,8)}`]].map(([k,v])=>`<div class="card"><div class="k">${k}</div><div class="v">${v}</div></div>`).join("");
+  document.getElementById("trades").innerHTML="<tr><th>진입 시각</th><th>방향</th><th>자리</th><th>진입가</th><th>청산 시각</th><th>청산가</th><th>사유</th><th>보유 봉</th><th>손익(배율 전)</th></tr>"+
+    s.trades.slice().reverse().map(t=>`<tr><td>${fmtT(t.entry_time)}</td><td class="${t.dir==="long"?"bull":"bear"}">${t.dir==="long"?"롱":"숏"}</td><td>${zn(t.zone)}</td><td>${fmtP(t.entry)}</td><td>${fmtT(t.exit_time)}</td><td>${fmtP(t.exit)}</td><td>${REASON[t.reason]}</td><td>${t.bars}</td><td>${pct(t.ret_pct)}</td></tr>`).join("");
+}
+function simLive(s){
+  if(!s)return "";
+  if(s.open)return `<br>모의 보유: <b>${s.open.dir==="long"?"롱":"숏"}</b> (${zn(s.open.zone)} 자리) ${fmtP(s.open.entry)} → ${fmtP(s.open.price)} ${pct(s.open.ret_pct)} · 손절 ${fmtP(s.open.sl)}`+(s.open.tp?` · 익절 ${fmtP(s.open.tp)}`:"")+(s.pending?` · <b>${s.pending}</b>`:"");
+  if(s.waits.length)return `<br>모의 보유 없음 · 지정가 대기: `+s.waits.slice(0,3).map(w=>`<b>${w.dir==="long"?"롱":"숏"} ${fmtP(w.price)}</b> (${zn(w.zone)}, ${w.dist_pct>=0?"+":""}${w.dist_pct.toFixed(2)}%, 손절 ${fmtP(w.sl)})`).join(" / ");
+  return "<br>모의 보유 없음 · 대기 중인 자리 없음";
+}
+const DIR={bull:"▲ 상승",bear:"▼ 하락",mixed:"◆ 섞임"};
+const dist=(z,price)=>{const m=price>z.top?z.top:price<z.bottom?z.bottom:price;return (m/price-1)*100};
+
+async function load(){
+  save();
+  const p=new URLSearchParams({symbol:document.getElementById("symbol").value,interval:view});
+  FIELDS.forEach(f=>p.set(f,document.getElementById(f).value));
+  p.set("sim",simOn()?"1":"0");p.set("first",document.getElementById("first").checked?"1":"0");p.set("tfs",[...shown].join(","));
+  document.getElementById("status").textContent="불러오는 중…";document.getElementById("err").textContent="";
+  try{const r=await fetch("/api/ob?"+p);const d=await r.json();if(d.error)throw new Error(d.error);
+    const first=!data||data.symbol!==d.symbol||data.interval!==d.interval;data=d;markSim();
+    candle.setData(d.bars.map(b=>({time:b.t+KST,open:b.o,high:b.h,low:b.l,close:b.c})));
+    if(first)chart.timeScale().scrollToRealTime();
+    render();
+    document.getElementById("status").textContent=`${d.symbol} · ${TFN[view]} · ${fmtT(d.time)} 갱신`;
+  }catch(e){document.getElementById("err").textContent="오류: "+e.message;document.getElementById("status").textContent=""}
+  schedule();
+}
+function schedule(){clearTimeout(timer);if(document.getElementById("auto").checked)timer=setTimeout(load,60000)}
+
+function visibleZones(){
+  if(!data)return [];
+  const near=+document.getElementById("near").value||0, br=document.getElementById("broken").checked;
+  const out=[];
+  TF.forEach(([tf])=>{if(!shown.has(tf))return;(data.zones[tf]||[]).forEach(z=>{
+    if(z.broken_t&&!br)return;if(near>0&&Math.abs(dist(z,data.price))>near)return;out.push({...z,tf})})});
+  return out;
+}
+function render(){
+  if(!data)return;
+  // 차트로 보는 봉의 장악형 표시
+  const mk=[];(data.zones[view]||[]).forEach(z=>{const up=z.dir==="bull";
+    mk.push({time:z.t_engulf+KST,position:up?"belowBar":"aboveBar",color:up?"#089981":"#e5484d",shape:up?"arrowUp":"arrowDown",text:z.broken_t?"":"OB"})});
+  const s=data.sim;
+  if(s){s.trades.forEach(t=>{const L=t.dir==="long";
+      mk.push({time:barT(t.entry_time),position:L?"belowBar":"aboveBar",color:L?"#089981":"#e5484d",shape:L?"arrowUp":"arrowDown",text:L?"롱":"숏"});
+      mk.push({time:barT(t.exit_time),position:L?"aboveBar":"belowBar",color:"#6b7280",shape:"circle",text:REASON[t.reason]})});
+    if(s.open){const L=s.open.dir==="long";mk.push({time:barT(s.open.entry_time),position:L?"belowBar":"aboveBar",color:L?"#089981":"#e5484d",shape:L?"arrowUp":"arrowDown",text:L?"롱(보유)":"숏(보유)"})}}
+  mk.sort((a,b)=>a.time-b.time);candle.setMarkers(mk);
+  drawSim(s);
+  const price=data.price, ov=data.overlaps;
+  const inside=ov.filter(o=>o.inside);
+  let txt=`<b>지금 가격 ${fmtP(price)}</b> · `;
+  txt+=inside.length?`<b style="color:var(--accent-text)">겹치는 자리 안에 있음: ${inside.map(o=>`${DIR[o.dir]} ${o.tfs.map(t=>TFN[t]).join("·")} (${fmtP(o.bottom)}~${fmtP(o.top)})`).join(" / ")}</b>`
+    :ov.length?`가장 가까운 겹치는 자리: ${DIR[ov[0].dir]} ${ov[0].tfs.map(t=>TFN[t]).join("·")} ${fmtP(ov[0].bottom)}~${fmtP(ov[0].top)} (${ov[0].dist_pct>=0?"+":""}${ov[0].dist_pct.toFixed(2)}%)`:"겹치는 자리 없음";
+  document.getElementById("live").innerHTML=txt+simLive(data.sim);
+  document.getElementById("ovt").innerHTML="<tr><th>방향</th><th>겹친 봉</th><th>아래</th><th>위</th><th>지금 가격에서</th><th>겹침 시작</th></tr>"+
+    (ov.length?ov.map(o=>`<tr class="${o.inside?"in":""}"><td class="${o.dir}">${DIR[o.dir]}</td><td>${o.tfs.map(t=>TFN[t]).join(" · ")}</td><td>${fmtP(o.bottom)}</td><td>${fmtP(o.top)}</td><td>${o.inside?"안":(o.dist_pct>=0?"+":"")+o.dist_pct.toFixed(2)+"%"}</td><td>${fmtT(o.start)}</td></tr>`).join("")
+    :`<tr><td colspan="6" style="text-align:left;color:var(--mute)">겹치는 자리가 없어요</td></tr>`);
+  const zs=visibleZones().filter(z=>!z.broken_t).sort((a,b)=>Math.abs(dist(a,price))-Math.abs(dist(b,price)));
+  document.getElementById("zt").innerHTML="<tr><th>봉</th><th>방향</th><th>아래</th><th>위</th><th>지금 가격에서</th><th>다시 닿은 봉</th><th>거래량</th><th>장악 봉 시각</th></tr>"+
+    zs.map(z=>{const d=dist(z,price);return `<tr class="${d===0?"in":""}"><td><span class="sw" style="background:${TCOL[z.tf]}"></span> ${TFN[z.tf]}</td><td class="${z.dir}">${DIR[z.dir]}</td><td>${fmtP(z.bottom)}</td><td>${fmtP(z.top)}</td><td>${d===0?"안":(d>=0?"+":"")+d.toFixed(2)+"%"}</td><td>${z.touches}</td><td>${z.vol_x?z.vol_x.toFixed(1)+"배":"-"}</td><td>${fmtT(z.t_engulf)}</td></tr>`}).join("");
+}
+
+// 네모 그리기 (차트 위 투명 캔버스)
+const cv=document.getElementById("ov"),ctx=cv.getContext("2d");
+function idxOf(t){const b=data.bars;if(t<b[0].t)return -1;let lo=0,hi=b.length-1;while(lo<hi){const m=(lo+hi+1)>>1;if(b[m].t<=t)lo=m;else hi=m-1}return lo}
+function rgba(hex,a){const n=parseInt(hex.slice(1),16);return `rgba(${n>>16},${(n>>8)&255},${n&255},${a})`}
+function frame(){
+  const box=document.getElementById("chart"),dpr=window.devicePixelRatio||1;
+  const W=box.clientWidth,H=box.clientHeight;
+  if(cv.width!==W*dpr||cv.height!==H*dpr){cv.width=W*dpr;cv.height=H*dpr;cv.style.width=W+"px";cv.style.height=H+"px"}
+  ctx.setTransform(dpr,0,0,dpr,0,0);ctx.clearRect(0,0,W,H);
+  if(data&&data.bars.length){
+    const ts=chart.timeScale(),pw=W-chart.priceScale("right").width(),ph=H-ts.height();
+    ctx.save();ctx.beginPath();ctx.rect(0,0,pw,ph);ctx.clip();
+    const xOf=(t,edge)=>{const i=idxOf(t);if(i<0)return 0;const x=ts.logicalToCoordinate(i+edge);return x==null?0:x};
+    const yOf=p=>candle.priceToCoordinate(p);
+    ctx.font="11px sans-serif";
+    visibleZones().forEach(z=>{
+      const x1=xOf(z.t,-0.5),x2=z.broken_t?xOf(z.broken_t,0.5):pw,y1=yOf(z.top),y2=yOf(z.bottom);
+      if(y1==null||y2==null||x2<0||x1>pw)return;
+      const c=TCOL[z.tf],a=z.broken_t?0.05:0.12;
+      ctx.fillStyle=rgba(c,a);ctx.fillRect(x1,y1,x2-x1,Math.max(1,y2-y1));
+      ctx.strokeStyle=rgba(c,z.broken_t?0.3:0.8);ctx.lineWidth=1;ctx.setLineDash(z.broken_t?[3,3]:[]);
+      ctx.strokeRect(x1,y1,x2-x1,Math.max(1,y2-y1));
+      if(!z.broken_t){ctx.fillStyle=c;ctx.fillText(`${z.dir==="bull"?"▲":"▼"}${TFN[z.tf]}`,Math.max(x1,0)+3,y1+11)}
+    });
+    ctx.setLineDash([]);
+    data.overlaps.forEach(o=>{
+      const x1=xOf(o.start,-0.5),y1=yOf(o.top),y2=yOf(o.bottom);if(y1==null||y2==null)return;
+      const c=o.dir==="bull"?"#089981":o.dir==="bear"?"#e5484d":"#f0b90b";
+      ctx.fillStyle="rgba(240,185,11,0.28)";ctx.fillRect(x1,y1,pw-x1,Math.max(2,y2-y1));
+      ctx.strokeStyle=c;ctx.lineWidth=2;ctx.strokeRect(x1,y1,pw-x1,Math.max(2,y2-y1));
+      const lab=`겹침 ${o.tfs.length}개: ${o.tfs.map(t=>TFN[t]).join("·")}`;ctx.font="bold 11px sans-serif";
+      const w=ctx.measureText(lab).width;ctx.fillStyle="rgba(255,255,255,0.85)";ctx.fillRect(pw-w-10,y1-15,w+6,14);
+      ctx.fillStyle=c;ctx.fillText(lab,pw-w-7,y1-4);ctx.font="11px sans-serif";
+    });
+    ctx.restore();
+  }
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

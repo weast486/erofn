@@ -762,7 +762,7 @@ def accounts_table(accts: list[dict]) -> str:
 def build(toolbar: str = "", links: bool = False, sell: bool = False) -> str:
     """sell=True 면 토스 보유 종목에 '팔기' 버튼을 넣는다 (status_server 가 이 PC 에서 연 페이지에만 켬)."""
     now = datetime.now().astimezone()
-    parts = [toss_section(links, sell), toss_split_section(links), kiwoom_section(links), binance_section(links), split_section(links)]
+    parts = [toss_section(links, sell), toss_split_section(links), kiwoom_section(links)]  # 바이낸스 매매·스플릿은 2026-11-18 사용자 요청으로 뺌
     blocks = [accounts_table([p[2] for p in parts])] + [p[0] for p in parts]
     return (
         '<title>봇 매매현황</title>\n'

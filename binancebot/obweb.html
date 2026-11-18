@@ -100,8 +100,14 @@ h3{font-size:14px;margin:16px 0 0}
       <div><label>손절</label><select id="stop_mode"><option value="touch">자리 반대편에 닿으면</option><option value="close">종가가 자리 밖 마감</option></select></div>
       <div><label>손절 여유 %</label><input id="sl_buf" type="number" value="0" min="0" step="0.1"></div>
     </div>
+    <label>익절</label>
+    <select id="tp_mode">
+      <option value="near">반대편 오더블록 / 손절폭 x 배수 중 가까운 쪽</option>
+      <option value="opp">반대편 오더블록 (없으면 손절폭 x 배수)</option>
+      <option value="r">손절폭 x 배수</option>
+    </select>
     <div class="row">
-      <div><label>익절 (손절폭의 몇 배, 0=없음)</label><input id="tp_r" type="number" value="2" min="0" step="0.5"></div>
+      <div><label>손절폭의 몇 배 (0=없음)</label><input id="tp_r" type="number" value="5" min="0" step="0.5"></div>
       <div><label>최대 보유 봉 (0=없음)</label><input id="max_hold" type="number" value="0" min="0"></div>
     </div>
     <div class="row">
@@ -114,7 +120,7 @@ h3{font-size:14px;margin:16px 0 0}
     <label class="chk"><input type="checkbox" id="auto" checked> 1분마다 자동 새로고침</label>
     <button class="go" id="go">다시 계산</button>
     <div id="err"></div>
-    <div class="note">상승 장악형: 앞 봉이 음봉이고 이번 양봉 몸통이 앞 봉 몸통을 감싸며(24시간 시장은 시가가 앞 봉 종가와 거의 같아서 기본으로 0.05% 차이까지 감싼 것으로 봄) <b>거래량이 앞 봉보다 많을 때만</b>. 오더블록 자리는 장악당한 앞 봉이고, 그 뒤 끝난 봉의 종가가 자리 아래로 마감하면 깨진 자리(하락은 반대). 그 뒤 끝난 봉이 자리에 한 번이라도 다시 들어오면 <b>닿은 자리</b>로 보고 빼요(겹치는 자리·모의 매매에서도). 진행 중인 봉은 끝나야 셈. 시각은 한국 시간.<br><b>모의 매매</b>: 차트로 보는 봉으로 계산. 직전 봉 종가가 자리 위에 있다가 가격이 자리에 닿으면 지정가로 롱(숏은 반대). 자리는 장악 봉이 끝난 뒤부터 쓰고, 자기 봉에서 깨진 뒤에는 안 써요. 손절 = 자리 반대편, 익절 = 손절폭의 배수. 산 봉에서는 손절만 보고, 같은 봉에서 둘 다 닿으면 손절. 작은 봉(5분)의 자리는 불러온 500개 기간에만 있어서 큰 봉 차트에서는 마지막 며칠에만 쓰여요.</div>
+    <div class="note">상승 장악형: 앞 봉이 음봉이고 이번 양봉 몸통이 앞 봉 몸통을 감싸며(24시간 시장은 시가가 앞 봉 종가와 거의 같아서 기본으로 0.05% 차이까지 감싼 것으로 봄) <b>거래량이 앞 봉보다 많을 때만</b>. 오더블록 자리는 장악당한 앞 봉이고, 그 뒤 끝난 봉의 종가가 자리 아래로 마감하면 깨진 자리(하락은 반대). 그 뒤 끝난 봉이 자리에 한 번이라도 다시 들어오면 <b>닿은 자리</b>로 보고 빼요(겹치는 자리·모의 매매에서도). 진행 중인 봉은 끝나야 셈. 시각은 한국 시간.<br><b>모의 매매</b>: 차트로 보는 봉으로 계산. 직전 봉 종가가 자리 위에 있다가 가격이 자리에 닿으면 지정가로 롱(숏은 반대). 자리는 장악 봉이 끝난 뒤부터 쓰고, 자기 봉에서 깨진 뒤에는 안 써요. 손절 = 자리 반대편. 익절 = 이 자리가 생기기 전에 생긴 반대 방향 오더블록(롱이면 위쪽 하락 자리의 아랫선, 진입 때 안 깨진 것 중 가장 가까운 것) 또는 손절폭 x 배수(기본 5배) 중 고른 방식. 산 봉에서는 손절만 보고, 같은 봉에서 둘 다 닿으면 손절. 작은 봉(5분)의 자리는 불러온 500개 기간에만 있어서 큰 봉 차트에서는 마지막 며칠에만 쓰여요.</div>
   </div>
   <div>
     <div class="panel">
@@ -152,8 +158,9 @@ const show=document.getElementById("show");
 TF.forEach(([k,n])=>{const l=document.createElement("label");l.className="chk";l.style.margin="2px 0";
   l.innerHTML=`<input type="checkbox" ${shown.has(k)?"checked":""}> <span class="sw" style="background:${TCOL[k]}"></span> ${n}`;
   l.querySelector("input").onchange=e=>{e.target.checked?shown.add(k):shown.delete(k);save();simOn()?load():render()};show.appendChild(l)});
-const FIELDS=["open_tol","basis","near","min_tfs","same_dir","bars","src","side","entry","stop_mode","sl_buf","tp_r","max_hold","fee","lev"];
+const FIELDS=["open_tol","basis","near","min_tfs","same_dir","bars","src","side","entry","stop_mode","sl_buf","tp_mode","tp_r","max_hold","fee","lev"];
 const CHECKS=["broken","sim","first","fresh"];
+if(saved.tp_mode===undefined)delete saved.tp_r; // 익절 방식이 생기기 전 저장값(2배)은 새 기본(5배)으로
 FIELDS.forEach(f=>{if(saved[f]!==undefined)document.getElementById(f).value=saved[f]});
 if(saved.view)view=saved.view;CHECKS.forEach(f=>{if(saved[f]!==undefined)document.getElementById(f).checked=saved[f]});markTf();
 const simOn=()=>document.getElementById("sim").checked;
@@ -177,7 +184,7 @@ fetch("/api/symbols").then(r=>r.json()).then(list=>{
 }).catch(e=>{document.getElementById("err").textContent="종목 목록 오류: "+e.message;load()});
 document.getElementById("symbol").onchange=load;
 document.getElementById("go").onclick=load;
-["open_tol","basis","min_tfs","same_dir","bars","src","side","entry","stop_mode","sl_buf","tp_r","max_hold","fee","lev"].forEach(f=>document.getElementById(f).onchange=load);
+["open_tol","basis","min_tfs","same_dir","bars","src","side","entry","stop_mode","sl_buf","tp_mode","tp_r","max_hold","fee","lev"].forEach(f=>document.getElementById(f).onchange=load);
 document.getElementById("first").onchange=load;
 document.getElementById("fresh").onchange=load;
 document.getElementById("sim").onchange=()=>{markSim();load()};
@@ -191,19 +198,20 @@ const fmtP=p=>p>=1000?p.toFixed(1):p>=10?p.toFixed(2):p.toFixed(4);
 const REASON={stop:"손절",take:"익절",time:"시간"};
 const barT=t=>t+KST;
 const pct=v=>`<span class="${v>=0?"pos":"neg"}">${v>=0?"+":""}${v.toFixed(2)}%</span>`;
+const tpName=s=>s&&s.startsWith("반대 OB ")?"반대 OB "+TFN[s.slice(6)]:s||"";
 const zn=z=>z.map(t=>TFN[t]).join("·");
 function drawSim(s){
   if(!s){document.getElementById("cards").innerHTML="";document.getElementById("trades").innerHTML="";return}
   const st=s.stats,b=data.bars;
   document.getElementById("cards").innerHTML=[["거래 수",st.n+"번"],["승률",st.win_rate.toFixed(1)+"%"],["거래당 평균",pct(st.avg_pct)],[`누적 (복리·${st.leverage}배)`,pct(st.total_pct)],["최대 낙폭",pct(st.mdd_pct)],
     ["기간",`${fmtT(b[0].t).slice(0,8)} ~ ${fmtT(b[b.length-1].t).slice(0,8)}`]].map(([k,v])=>`<div class="card"><div class="k">${k}</div><div class="v">${v}</div></div>`).join("");
-  document.getElementById("trades").innerHTML="<tr><th>진입 시각</th><th>방향</th><th>자리</th><th>진입가</th><th>청산 시각</th><th>청산가</th><th>사유</th><th>보유 봉</th><th>손익(배율 전)</th></tr>"+
-    s.trades.slice().reverse().map(t=>`<tr><td>${fmtT(t.entry_time)}</td><td class="${t.dir==="long"?"bull":"bear"}">${t.dir==="long"?"롱":"숏"}</td><td>${zn(t.zone)}</td><td>${fmtP(t.entry)}</td><td>${fmtT(t.exit_time)}</td><td>${fmtP(t.exit)}</td><td>${REASON[t.reason]}</td><td>${t.bars}</td><td>${pct(t.ret_pct)}</td></tr>`).join("");
+  document.getElementById("trades").innerHTML="<tr><th>진입 시각</th><th>방향</th><th>자리</th><th>진입가</th><th>청산 시각</th><th>청산가</th><th>사유</th><th>익절 목표</th><th>보유 봉</th><th>손익(배율 전)</th></tr>"+
+    s.trades.slice().reverse().map(t=>`<tr><td>${fmtT(t.entry_time)}</td><td class="${t.dir==="long"?"bull":"bear"}">${t.dir==="long"?"롱":"숏"}</td><td>${zn(t.zone)}</td><td>${fmtP(t.entry)}</td><td>${fmtT(t.exit_time)}</td><td>${fmtP(t.exit)}</td><td>${REASON[t.reason]}</td><td>${t.tp?fmtP(t.tp)+" ("+tpName(t.tp_src)+")":"-"}</td><td>${t.bars}</td><td>${pct(t.ret_pct)}</td></tr>`).join("");
 }
 function simLive(s){
   if(!s)return "";
-  if(s.open)return `<br>모의 보유: <b>${s.open.dir==="long"?"롱":"숏"}</b> (${zn(s.open.zone)} 자리) ${fmtP(s.open.entry)} → ${fmtP(s.open.price)} ${pct(s.open.ret_pct)} · 손절 ${fmtP(s.open.sl)}`+(s.open.tp?` · 익절 ${fmtP(s.open.tp)}`:"")+(s.pending?` · <b>${s.pending}</b>`:"");
-  if(s.waits.length)return `<br>모의 보유 없음 · 지정가 대기: `+s.waits.slice(0,3).map(w=>`<b>${w.dir==="long"?"롱":"숏"} ${fmtP(w.price)}</b> (${zn(w.zone)}, ${w.dist_pct>=0?"+":""}${w.dist_pct.toFixed(2)}%, 손절 ${fmtP(w.sl)})`).join(" / ");
+  if(s.open)return `<br>모의 보유: <b>${s.open.dir==="long"?"롱":"숏"}</b> (${zn(s.open.zone)} 자리) ${fmtP(s.open.entry)} → ${fmtP(s.open.price)} ${pct(s.open.ret_pct)} · 손절 ${fmtP(s.open.sl)}`+(s.open.tp?` · 익절 ${fmtP(s.open.tp)} (${tpName(s.open.tp_src)})`:"")+(s.pending?` · <b>${s.pending}</b>`:"");
+  if(s.waits.length)return `<br>모의 보유 없음 · 지정가 대기: `+s.waits.slice(0,3).map(w=>`<b>${w.dir==="long"?"롱":"숏"} ${fmtP(w.price)}</b> (${zn(w.zone)}, ${w.dist_pct>=0?"+":""}${w.dist_pct.toFixed(2)}%, 손절 ${fmtP(w.sl)}${w.tp?`, 익절 ${fmtP(w.tp)} ${tpName(w.tp_src)}`:""})`).join(" / ");
   return "<br>모의 보유 없음 · 대기 중인 자리 없음";
 }
 const DIR={bull:"▲ 상승",bear:"▼ 하락",mixed:"◆ 섞임"};

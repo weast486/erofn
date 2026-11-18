@@ -529,8 +529,118 @@ def split_section(links: bool = False) -> tuple[str, str, dict]:
                      live, summary, body), ("실전" if live else "드라이런"), acct
 
 
+# ------------------------------------------------------------------ 토스 스플릿 (229200)
+TOSS_SPLIT_INIT_AVG = 14176  # 스플릿 시작 전 계좌 평균 단가 (8주) — 1~8차 차수 자리로 나눠 기록함
+
+
+def toss_split_section(links: bool = False) -> tuple[str, str, dict]:
+    env = ROOT / ".env"
+    sym = "229200"
+    st = read_json(ROOT / "state" / f"split_{sym}.json") or {}
+    snap = read_json(ROOT / "state" / "매매현황.json") or {}
+    live = env_flag(env, "DRY_RUN") is False and env_flag(env, "SPLIT_ENABLED") is not False
+    gap = int(st.get("gap") or 0)
+    lots = sorted(st.get("lots") or [], key=lambda x: x["level"])
+    held = [x for x in lots if int(x.get("qty") or 0) > 0]
+    hist = st.get("history") or []
+    realized = float(st.get("realized") or 0)
+
+    sp = snap.get("split_price") or {}
+    last = float(sp.get("last_price") or 0)
+    price_note = f'{short_dt(snap.get("generated_at"))} 조회' if last else "조회 안 됨 · 마지막 체결가"
+    if not last:
+        last = float(hist[-1]["price"]) if hist else 0.0
+
+    qty = sum(int(x["qty"]) for x in held)
+    cost = sum(float(x.get("cost") or x["price"]) * int(x["qty"]) for x in held)
+    value = last * qty
+    unreal = value - cost
+    avg = cost / qty if qty else 0.0
+    be = (cost - realized) / qty if qty else 0.0  # 지금 다 팔아도 본전인 가격 (확정 수익 반영, 수수료 전)
+    total = realized + unreal
+
+    def tp_price(x: dict) -> int:
+        return int(x["price"]) + int(x.get("gap") or gap)
+
+    bo, so = st.get("buy_order"), st.get("sell_order")
+    rows = []
+    for x in held:
+        lv, q = int(x["level"]), int(x["qty"])
+        c = float(x.get("cost") or x["price"])
+        ret = (last / c - 1) * 100 if c else 0.0
+        src = "기존 보유" if lv <= 8 else "수동 매수" if (lv <= 13 and abs(c - 11910) < 1) else "봇 매수"
+        mark = ' <span class="tag">익절 주문 중</span>' if so and int(so.get("level", 0)) == lv else ""
+        rows.append(
+            f'<tr><th scope="row">{lv}차</th><td><span class="tag">{src}</span></td>'
+            f'<td class="num">{won(x["price"])}</td><td class="num">{won(c)}</td><td class="num">{q}</td>'
+            f'<td class="num">{won(tp_price(x))}{mark}</td>'
+            f'<td class="num {tone(ret)}">{signed(ret, "%", 2)}</td>'
+            f'<td class="num {tone((last - c) * q)}">{signed((last - c) * q)}</td></tr>')
+
+    orders = []
+    if bo:
+        orders.append(f'{int(bo["level"])}차 매수 {won(bo["price"])}원')
+    if so:
+        orders.append(f'{int(so["level"])}차 익절 {won(so["price"])}원')
+    nxt = next((x for x in lots if not int(x.get("qty") or 0)), None)
+    low = held[-1] if held else None
+
+    days: dict[str, list] = {}
+    for h in hist:
+        d = days.setdefault(str(h["at"])[:10], [0, 0, 0.0])
+        if h["side"] == "BUY":
+            d[0] += int(h.get("qty") or 0)
+        else:
+            d[1] += int(h.get("qty") or 0)
+            d[2] += float(h.get("pnl") or 0)
+    day_rows = [f'<tr><th scope="row">{d[5:]}</th><td class="num">{v[0]}</td><td class="num">{v[1]}</td>'
+                f'<td class="num {tone(v[2])}">{signed(v[2])}</td></tr>' for d, v in sorted(days.items(), reverse=True)]
+    trade_rows = [
+        f'<tr><th scope="row">{short_dt(h["at"])}</th><td>{"매수" if h["side"] == "BUY" else "익절"}</td>'
+        f'<td class="num">{int(h["level"])}차</td><td class="num">{int(h.get("qty") or 0)}</td><td class="num">{won(h["price"])}</td>'
+        f'<td class="num {tone(float(h.get("pnl") or 0))}">{signed(float(h["pnl"])) if h.get("pnl") is not None else "-"}</td>'
+        f'<td><small>{esc(h.get("note", ""))}</small></td></tr>' for h in reversed(hist)]
+    n_sell = sum(1 for h in hist if h["side"] == "SELL")
+
+    if st.get("paused"):
+        now_txt, now_sub = "멈춤", st["paused"]
+    else:
+        now_txt, now_sub = f"{len(held)}차수 보유", " · ".join(orders) or "걸린 주문 없음"
+    summary = (
+        '<dl class="facts">'
+        f'<div><dt>지금</dt><dd>{esc(now_txt)}<small>{esc(now_sub)}</small></dd></div>'
+        f'<div><dt>현재가</dt><dd>{won(last)}<small>{esc(price_note)}</small></dd></div>'
+        f'<div><dt>손익분기가</dt><dd class="{tone(last - be)}">{won(be)}<small>현재가 대비 {signed((be / last - 1) * 100 if last else 0, "%", 2)} · 평균 단가 {won(avg)}</small></dd></div>'
+        f'<div><dt>보유</dt><dd>{qty}주<small>원가 {won(cost)} · 평가 {won(value)}</small></dd></div>'
+        f'<div><dt>평가손익</dt><dd class="{tone(unreal)}">{signed(unreal)}원<small>{signed(unreal / cost * 100 if cost else 0, "%", 2)}</small></dd></div>'
+        f'<div><dt>확정 수익</dt><dd class="{tone(realized)}">{signed(realized)}원<small>익절 {n_sell}번</small></dd></div>'
+        f'<div><dt>합계</dt><dd class="{tone(total)}">{signed(total)}원<small>확정 + 평가</small></dd></div>'
+        '</dl>')
+    where = (f'다음 매수 {nxt["level"]}차 {won(nxt["price"])}원' if nxt else "모든 차수 보유") + (
+        f' · 가장 아래 보유 {low["level"]}차 익절가 {won(tp_price(low))}원' if low else "")
+    body = (
+        f'<p class="note">{esc(where)}. 손익분기가 = (보유 원가 - 확정 수익) ÷ 보유 수량 — 가격이 이 위면 스플릿 전체(기존 8주 포함)가 이익입니다. 수수료 전.</p>'
+        f'<h3>차수별 보유</h3><p class="note">스플릿 전부터 갖고 있던 8주(실제 평균 {won(TOSS_SPLIT_INIT_AVG)}원)는 '
+        f'1~8차 자리(15,540 ~ 12,810원, 390원 간격)에 들어간 것으로 정리했습니다 — 8주 원가 합계 113,400원으로 실제(113,408원)와 같습니다. '
+        f'9~13차는 10-30 종가에 수동으로 산 11,910원이 실제 매수가입니다. 익절가 = 차수 자리 + 간격.</p>'
+        '<div class="scroll"><table><thead><tr><th>차수</th><th>구분</th><th class="num">차수 자리</th>'
+        '<th class="num">실제 매수가</th><th class="num">수량</th><th class="num">익절가</th>'
+        '<th class="num">수익률</th><th class="num">평가손익</th></tr></thead>'
+        f'<tbody>{"".join(rows) or empty_row(8, "보유 없음")}</tbody></table></div>'
+        + fold("tsplit-days", "날짜별 매매", f"{len(days)}일 · 확정 {signed(realized)}원",
+               '<div class="scroll"><table><thead><tr><th>날짜</th><th class="num">매수(주)</th><th class="num">익절(주)</th>'
+               f'<th class="num">확정 수익</th></tr></thead><tbody>{"".join(day_rows) or empty_row(4, "아직 없음")}</tbody></table></div>')
+        + fold("tsplit-trades", "체결 내역", f"{len(hist)}건",
+               '<div class="scroll"><table><thead><tr><th>시각</th><th>구분</th><th class="num">차수</th><th class="num">수량</th>'
+               f'<th class="num">가격</th><th class="num">손익</th><th>메모</th></tr></thead><tbody>{"".join(trade_rows) or empty_row(7, "아직 없음")}</tbody></table></div>'))
+    acct = {"name": "토스 스플릿 (229200)", "since": str(hist[0]["at"])[:10] if hist else "", "base": cost, "pnl": total,
+            "unit": "원", "n": n_sell, "note": f"확정 {signed(realized)} + 평가 {signed(unreal)} · 시작 금액 칸은 지금 보유 원가"}
+    return bot_block("toss_split", "토스 스플릿 봇", f"KODEX 코스닥150({sym}) · 차수마다 2만원어치 · 9차부터 {gap}원 간격 · 손절 없음",
+                     live, summary, body), ("실전" if live else "드라이런"), acct
+
+
 # ------------------------------------------------------------------ 페이지
-ICONS = {"toss": "toss_bot.ico", "kiwoom": "kiwoom_bot.ico", "binance": "binance_bot.ico", "split": "split_bot.ico"}
+ICONS = {"toss": "toss_bot.ico", "toss_split": "toss_bot.ico", "kiwoom": "kiwoom_bot.ico", "binance": "binance_bot.ico", "split": "split_bot.ico"}
 
 
 def bot_block(key: str, name: str, desc: str, live: bool, summary: str, body: str) -> str:
@@ -652,7 +762,7 @@ def accounts_table(accts: list[dict]) -> str:
 def build(toolbar: str = "", links: bool = False, sell: bool = False) -> str:
     """sell=True 면 토스 보유 종목에 '팔기' 버튼을 넣는다 (status_server 가 이 PC 에서 연 페이지에만 켬)."""
     now = datetime.now().astimezone()
-    parts = [toss_section(links, sell), kiwoom_section(links), binance_section(links), split_section(links)]
+    parts = [toss_section(links, sell), toss_split_section(links), kiwoom_section(links), binance_section(links), split_section(links)]
     blocks = [accounts_table([p[2] for p in parts])] + [p[0] for p in parts]
     return (
         '<title>봇 매매현황</title>\n'

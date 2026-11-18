@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from dataclasses import asdict
 from datetime import datetime
@@ -33,14 +34,16 @@ def main() -> None:
     state = StateStore(cfg.state_file).load()
     held = [p for p in state.positions.values() if p.quantity > 0]
 
+    split_sym = os.environ.get("SPLIT_SYMBOL", "229200") if os.environ.get("SPLIT_ENABLED", "").lower() in ("1", "true", "yes") else ""
+    symbols = list(dict.fromkeys([p.symbol for p in held] + ([split_sym] if split_sym else [])))
     prices: dict[str, float] = {}
     price_error = None
-    if held and not args.no_price:
+    if symbols and not args.no_price:
         try:
             from tossbot.client import TossClient
 
             client = TossClient(cfg.client_id, cfg.client_secret, cfg.base_url, cfg.account_seq)
-            prices = {r["symbol"]: float(r["lastPrice"]) for r in client.get_prices([p.symbol for p in held])}
+            prices = {r["symbol"]: float(r["lastPrice"]) for r in client.get_prices(symbols)}
         except Exception as exc:  # 조회 실패해도 내보내기는 계속 (매수가로 평가)
             price_error = str(exc)[:200]
 
@@ -57,6 +60,7 @@ def main() -> None:
         "positions": [{**{k: v for k, v in asdict(p).items() if k in keep}, "last_price": prices.get(p.symbol)}
                       for p in held],
         "history": state.history,
+        "split_price": {"symbol": split_sym, "last_price": prices.get(split_sym)} if split_sym else None,
         "price_error": price_error,
     }
     args.out.parent.mkdir(parents=True, exist_ok=True)

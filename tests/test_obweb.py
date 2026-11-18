@@ -125,3 +125,37 @@ class FreshSimTest(unittest.TestCase):
         z = {"5m": [{"dir": "bull", "bottom": 9, "top": 10, "t": 0, "t_engulf": 0, "broken_t": None, "touched_t": 600}]}
         self.assertEqual(len(simulate(bars, "1h", z, use_tfs=["5m"], fee_pct=0)["trades"]), 1)
         self.assertEqual(simulate(bars, "1h", z, use_tfs=["5m"], fee_pct=0, fresh=True)["trades"], [])
+
+
+class OppTargetTest(unittest.TestCase):
+    def test_take_profit_at_opposite_block(self):
+        from binancebot.obweb import simulate
+        H = 3600
+        bars = [bar(0, 11, 11, 1), bar(H, 11, 11.5, 1), bar(2 * H, 11.5, 10.5, 1, l=9.8), bar(3 * H, 10.5, 12, 1, h=12.2),
+                bar(4 * H, 12, 12.5, 1), bar(5 * H, 12.5, 12.5, 1)]
+        bull = {"dir": "bull", "bottom": 9, "top": 10, "t": 0, "t_engulf": 0, "broken_t": None, "touched_t": None}
+        # 상승 자리보다 먼저 생긴 하락 자리 12~13 → 아랫선 12 에서 익절 (5R = 15 보다 가까움)
+        older_bear = {"dir": "bear", "bottom": 12, "top": 13, "t": -2 * H, "t_engulf": -H, "broken_t": None, "touched_t": None}
+        z = {"1h": [bull, older_bear]}
+        t = simulate(bars, "1h", z, use_tfs=["1h"], tp_r=5, tp_mode="near", fee_pct=0)["trades"][0]
+        self.assertEqual((t["entry"], t["exit"], t["reason"], t["tp_src"]), (10, 12, "take", "반대 OB 1h"))
+        # 상승 자리보다 나중에 생긴 하락 자리는 목표로 안 씀 → 5R(15) 그대로, 끝까지 안 닿음
+        newer = dict(older_bear, t=H, t_engulf=H)
+        r = simulate(bars, "1h", {"1h": [bull, newer]}, use_tfs=["1h"], tp_r=5, tp_mode="near", fee_pct=0)
+        self.assertEqual((r["trades"], r["open"]["tp"], r["open"]["tp_src"]), ([], 15, "5R"))
+        # 손절폭 배수만
+        r = simulate(bars, "1h", z, use_tfs=["1h"], tp_r=5, tp_mode="r", fee_pct=0)
+        self.assertEqual(r["open"]["tp"], 15)
+
+
+class MaFilterTest(unittest.TestCase):
+    def test_only_near_ma(self):
+        from binancebot.obweb import simulate
+        H = 3600
+        bars = [bar(0, 11, 11, 1), bar(H, 11, 10.5, 1, l=9.5), bar(2 * H, 10.5, 12, 1), bar(3 * H, 12, 12, 1)]
+        z = {"1h": [{"dir": "bull", "bottom": 9, "top": 10, "t": 0, "t_engulf": 0, "broken_t": None, "touched_t": None}]}
+        near = [9.03] * 4   # 자리 저점 9 에서 0.33%
+        far = [9.5] * 4     # 5.6%
+        kw = dict(use_tfs=["1h"], tp_r=1, fee_pct=0)
+        self.assertEqual(len(simulate(bars, "1h", z, ma_line=near, ma_pct=0.5, **kw)["trades"]), 1)
+        self.assertEqual(simulate(bars, "1h", z, ma_line=far, ma_pct=0.5, **kw)["trades"], [])

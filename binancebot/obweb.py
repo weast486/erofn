@@ -120,7 +120,8 @@ def overlaps(zones: dict[str, list[dict]], min_tfs: int = 2, same_dir: bool = Tr
 def simulate(bars: list[dict], tf: str, zones: dict[str, list[dict]], use_tfs=TFS, source: str = "zones",
              min_tfs: int = 2, same_dir: bool = True, side: str = "long", entry: str = "edge",
              first_only: bool = True, stop_mode: str = "touch", stop_buf: float = 0.0, tp_r: float = 2.0,
-             max_hold: int = 0, fee_pct: float = 0.05, leverage: float = 1.0, fresh: bool = False) -> dict:
+             max_hold: int = 0, fee_pct: float = 0.05, leverage: float = 1.0, fresh: bool = False,
+             tp_mode: str = "r", ma_line: list | None = None, ma_pct: float = 0.0) -> dict:
     """오더블록 되돌림 모의 매매 (차트로 보는 봉 tf 의 봉으로 계산, 한 번에 한 포지션).
 
     쓸 자리: source=zones → use_tfs 봉의 살아 있는 자리 / overlap → 그 자리들이 min_tfs 개 봉 이상 겹친 구간.
@@ -130,11 +131,20 @@ def simulate(bars: list[dict], tf: str, zones: dict[str, list[dict]], use_tfs=TF
         시가가 이미 아래면 시가, 시가가 손절가 이하면 안 삼). 숏은 반대.
       first_only: 자리마다 처음 닿을 때만 (닿았는데 보유 중이라 못 산 경우도 한 번으로 셈).
     손절: stop_mode=touch → 자리 아랫선 -stop_buf% 에 닿으면 그 가격 / close → 종가가 그 아래로 마감하면 다음 봉 시가.
-    익절: 진입가 + (진입가 - 손절가) x tp_r (0 = 없음). max_hold 봉 지나면 그 봉 종가 (0 = 없음).
+    익절: tp_mode=r → 진입가 + (진입가 - 손절가) x tp_r (0 = 없음) /
+          opp → 이 자리가 생기기 전에 생긴 반대 방향 오더블록 중 진입가 위(숏은 아래)에서 가장 가까운 것의
+                가까운 선 (롱이면 하락 자리 아랫선, 진입 때 깨지지 않은 것, 쓸 봉 안에서; 없으면 R 배수) /
+          near → 둘 중 진입가에 가까운 쪽.
+    max_hold 봉 지나면 그 봉 종가 (0 = 없음).
+    이평선 지지: ma_line(이 봉들에 맞춘 이평선 값, 여러 개면 리스트의 리스트)을 주면, 직전 끝난 봉의
+      이평선 값 중 하나라도 자리 저점(숏은 고점) 또는 손절선에서 ma_pct% 안에 있을 때만 진입.
     산 봉에서는 손절만 확인, 같은 봉에서 손절·익절 둘 다 닿으면 손절.
     """
     from .maweb import stats
     sec = TF_SEC
+    ma_lines = None
+    if ma_line is not None:
+        ma_lines = ma_line if ma_line and isinstance(ma_line[0], (list, tuple)) else [ma_line]
     dirs = {"long": [1], "short": [-1]}.get(side, [1, -1])
     fee = fee_pct / 100
     n = len(bars)
@@ -145,23 +155,47 @@ def simulate(bars: list[dict], tf: str, zones: dict[str, list[dict]], use_tfs=TF
     pos = None
     pend_close = False
 
+    # 자리마다 쓸 수 있는 때(ready)와 못 쓰게 되는 때(dead)를 미리 계산해 시간 순으로 넣고 뺌 (긴 기간도 빠르게)
+    inf = float("inf")
+    events = []
+    for t, z in pool:
+        broken = inf if z["broken_t"] is None else z["broken_t"] + sec[t]
+        dead = broken
+        if fresh and z.get("touched_t") is not None:
+            dead = min(dead, z["touched_t"] + sec[t])
+        events.append((z["t_engulf"] + sec[t], dead, t, z, broken))
+    events.sort(key=lambda e: e[0])
+    active: dict = {}
+    unbroken: dict = {}  # 익절 목표(반대편 자리)용: 닿았어도 안 깨진 자리
+    state = {"next": 0, "ver": 0}
+
     def alive_at(t0: int) -> dict[str, list[dict]]:
+        k = state["next"]
+        while k < len(events) and events[k][0] <= t0:
+            _, dead, t, z, broken = events[k]
+            if broken > t0:
+                unbroken[(t, z["t"], z["dir"])] = (broken, t, z)
+            if dead > t0:
+                key = (t, z["t"], z["dir"])
+                active[key] = (dead, t, {**z, "broken_t": None, "touched_t": None, "_key": key})
+                state["ver"] += 1
+            k += 1
+        state["next"] = k
+        for key in [key for key, v in active.items() if v[0] <= t0]:
+            del active[key]
+            state["ver"] += 1
+        for key in [key for key, v in unbroken.items() if v[0] <= t0]:
+            del unbroken[key]
         out: dict[str, list[dict]] = {}
-        for t, z in pool:
-            if z["t_engulf"] + sec[t] > t0:
-                continue
-            if z["broken_t"] is not None and z["broken_t"] + sec[t] <= t0:
-                continue
-            if fresh and z.get("touched_t") is not None and z["touched_t"] + sec[t] <= t0:
-                continue
-            out.setdefault(t, []).append({**z, "broken_t": None, "touched_t": None, "_key": (t, z["t"], z["dir"])})
+        for _, t, z in active.values():
+            out.setdefault(t, []).append(z)
         return out
 
     cache = {"sig": None, "zs": []}
 
     def candidates(t0: int) -> list[dict]:
         al = alive_at(t0)
-        sig = tuple(sorted(z["_key"] for zs in al.values() for z in zs))
+        sig = state["ver"]
         if sig != cache["sig"]:
             if source == "overlap":
                 zs = [{**o, "_key": ("ov", o["dir"], o["bottom"], o["top"])}
@@ -177,11 +211,41 @@ def simulate(bars: list[dict], tf: str, zones: dict[str, list[dict]], use_tfs=TF
         sl = z["bottom"] * (1 - stop_buf / 100) if d > 0 else z["top"] * (1 + stop_buf / 100)
         return px, sl
 
+    def opp_target(z: dict, d: int, fill: float, t0: int) -> tuple[float, str] | None:
+        """이 자리보다 먼저 생긴 반대 방향 오더블록 중 진입가에서 가장 가까운 것의 가까운 선."""
+        born = z.get("t_engulf", z.get("start"))
+        want = "bear" if d > 0 else "bull"
+        best = None
+        alive_at(t0)
+        for _, t, o in unbroken.values():
+            if o["dir"] != want or o["t_engulf"] >= born:
+                continue
+            px = o["bottom"] if d > 0 else o["top"]
+            if (px <= fill) if d > 0 else (px >= fill):
+                continue
+            if best is None or abs(px - fill) < abs(best[0] - fill):
+                best = (px, t)
+        return best
+
+    def target(z: dict, d: int, fill: float, sl: float, t0: int) -> tuple[float | None, str]:
+        r_px = fill + d * abs(fill - sl) * tp_r if tp_r > 0 else None
+        r_lab = f"{tp_r:g}R"
+        if tp_mode == "r":
+            return r_px, r_lab
+        o = opp_target(z, d, fill, t0)
+        if o is None:
+            return r_px, r_lab
+        o_lab = f"반대 OB {o[1]}"
+        if tp_mode == "opp" or r_px is None or abs(o[0] - fill) <= abs(r_px - fill):
+            return o[0], o_lab
+        return r_px, r_lab
+
     def close_pos(i: int, price: float, reason: str) -> None:
         nonlocal pos
         d = pos["dir"]
         trades.append({"dir": "long" if d > 0 else "short", "entry_time": pos["t"], "entry": pos["entry"],
                        "exit_time": bars[i]["t"], "exit": price, "reason": reason, "zone": pos["zone"],
+                       "sl": pos["sl"], "tp": pos["tp"], "tp_src": pos["tp_src"],
                        "ret_pct": (d * (price / pos["entry"] - 1) - 2 * fee) * 100, "bars": i - pos["i"]})
         pos = None
 
@@ -217,14 +281,18 @@ def simulate(bars: list[dict], tf: str, zones: dict[str, list[dict]], use_tfs=TF
                 fill = min(b["o"], px) if d > 0 else max(b["o"], px)
                 if (fill <= sl) if d > 0 else (fill >= sl):
                     continue
+                if ma_lines is not None:
+                    edge = z["bottom"] if d > 0 else z["top"]
+                    if not any(m and min(abs(edge - m), abs(sl - m)) / m * 100 <= ma_pct
+                               for m in (ln[i - 1] for ln in ma_lines)):
+                        continue
                 hits.append((-d * fill, d, fill, sl, z))  # 롱은 높은 자리부터 닿음
             if hits:
                 hits.sort(key=lambda h: h[0])
                 _, d, fill, sl, z = hits[0]
-                risk = abs(fill - sl)
-                tp = fill + d * risk * tp_r if tp_r > 0 else None
+                tp, tp_src = target(z, d, fill, sl, b["t"])
                 zone = z.get("tfs") or [z["_key"][0]]
-                pos = {"dir": d, "entry": fill, "t": b["t"], "i": i, "sl": sl, "tp": tp, "zone": zone}
+                pos = {"dir": d, "entry": fill, "t": b["t"], "i": i, "sl": sl, "tp": tp, "tp_src": tp_src, "zone": zone}
                 if stop_mode == "touch" and (b["l"] <= sl if d > 0 else b["h"] >= sl):
                     close_pos(i, sl, "stop")
         else:
@@ -244,7 +312,7 @@ def simulate(bars: list[dict], tf: str, zones: dict[str, list[dict]], use_tfs=TF
         last = bars[-1]["c"]
         d = pos["dir"]
         open_info = {"dir": "long" if d > 0 else "short", "entry_time": pos["t"], "entry": pos["entry"],
-                     "price": last, "sl": pos["sl"], "tp": pos["tp"], "zone": pos["zone"],
+                     "price": last, "sl": pos["sl"], "tp": pos["tp"], "tp_src": pos["tp_src"], "zone": pos["zone"],
                      "ret_pct": (d * (last / pos["entry"] - 1) - fee) * 100}
     waits = []
     if pos is None and n:
@@ -255,7 +323,8 @@ def simulate(bars: list[dict], tf: str, zones: dict[str, list[dict]], use_tfs=TF
                 continue
             if (last["c"] > z["top"]) if d > 0 else (last["c"] < z["bottom"]):
                 px, sl = levels(z, d)
-                waits.append({"dir": "long" if d > 0 else "short", "price": px, "sl": sl,
+                tp, tp_src = target(z, d, px, sl, last["t"] + 1)
+                waits.append({"dir": "long" if d > 0 else "short", "price": px, "sl": sl, "tp": tp, "tp_src": tp_src,
                               "zone": z.get("tfs") or [z["_key"][0]], "dist_pct": (px / last["c"] - 1) * 100})
         waits.sort(key=lambda w: abs(w["dist_pct"]))
     return {"trades": trades, "open": open_info, "waits": waits[:6], "pending": "다음 봉 시가에 손절" if pend_close else None,
@@ -291,7 +360,7 @@ def run(market: Market, q: dict) -> dict:
         sim = simulate(bars[view], view, zones, use_tfs=use, source=q.get("src", "zones"), min_tfs=min_tfs,
                        same_dir=same_dir, side=q.get("side", "long"), entry=q.get("entry", "edge"),
                        first_only=q.get("first", "1") != "0", stop_mode=q.get("stop_mode", "touch"),
-                       stop_buf=num("sl_buf", 0), tp_r=num("tp_r", 2), max_hold=int(num("max_hold", 0)),
+                       stop_buf=num("sl_buf", 0), tp_r=num("tp_r", 5), tp_mode=q.get("tp_mode", "near"), max_hold=int(num("max_hold", 0)),
                        fee_pct=num("fee", 0.05), leverage=num("lev", 1) or 1, fresh=fresh)
     return {"symbol": symbol, "interval": view, "price": price, "bars": bars[view], "zones": zones,
             "overlaps": ov, "sim": sim, "time": int(time.time())}

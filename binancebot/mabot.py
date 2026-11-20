@@ -580,7 +580,7 @@ class MaBot:
         if c:
             q = c["q"]
             out["rule"] = {k: q.get(k) for k in ("pb_ma", "stop_mode", "stop_ma", "sl", "tp_mode", "tp_ma", "tp",
-                                                 "exit_ma", "entry", "entry_pct", "side", "max_hold")}
+                                                 "exit_ma", "entry", "entry_pct", "side", "max_hold", "win_reset", "dir_filter", "dfast_ma", "dslow_ma")}
         if pos and self.last_price:
             d = pos["dir"]
             out["pos"] = {"dir": "long" if d > 0 else "short", "qty": pos["qty"], "entry": pos["entry"],

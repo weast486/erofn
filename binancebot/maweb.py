@@ -186,7 +186,8 @@ def pullback(bars: list[dict], line: list, trend_line: list | None = None, stop_
              entry: str = "touch", confirm_bars: int = 5, stop_mode: str = "pct", stop_pct: float = 2.0,
              tp_pct: float = 0.0, max_hold: int = 0, fee_pct: float = 0.05, leverage: float = 1.0,
              stop_ends: list | None = None, exit_line: list | None = None, exit_pct: float = 0.0,
-             exit_ends: list | None = None, entry_pct: float = 0.0) -> dict:
+             exit_ends: list | None = None, entry_pct: float = 0.0,
+             dir_fast: list | None = None, dir_slow: list | None = None, win_reset: int = 0) -> dict:
     """이평선 눌림 매매.
 
     롱: 직전 min_above 봉의 종가가 모두 눌림선 위 + 추세 조건 → 가격이 눌림선까지 내려오면 매수.
@@ -201,6 +202,9 @@ def pullback(bars: list[dict], line: list, trend_line: list | None = None, stop_
     max_hold 봉 지나면 그 봉 종가에 정리 (0 = 없음). 숏은 모두 반대.
     추가 청산 exit_line: 진입 뒤 종가가 그 선 (1-exit_pct%) 위에 한 번 있었다가 아래로 마감하면 다음 봉 시가 (손절·익절과 함께).
     entry_pct: touch 진입을 선보다 이만큼(%) 먼저 — 롱은 선 x (1 + entry_pct%) 에 지정가, 숏은 선 x (1 - entry_pct%).
+    dir_fast·dir_slow: 방향 필터 — 빠른 선 > 느린 선(정배열)이면 롱만, 빠른 선 < 느린 선(역배열)이면 숏만 대기.
+    win_reset: 이익으로 끝난 거래 다음, 같은 방향 진입은 그 거래 진입 봉부터 가격이 진입 전 win_reset 봉의
+      최고가(롱)를 넘거나 최저가(숏) 아래로 내려간 적이 있어야 (새 고점·저점 → 다시 선까지 되돌아올 때). 0 = 끔.
     stop_ends·exit_ends: 선이 차트보다 큰 봉이면 그 큰 봉이 끝나는 차트 봉에서만 종가 판단 (None = 차트 봉마다).
     진입한 봉에서는 손절만 확인 (익절은 다음 봉부터, 봉 안 순서를 모르므로 보수적으로).
     """
@@ -215,6 +219,17 @@ def pullback(bars: list[dict], line: list, trend_line: list | None = None, stop_
     pend_reason = "line"
     pend_open = None   # confirm 진입: 다음 봉 시가에 열 방향
     armed: dict[int, int] = {}  # confirm: 방향 → 닿은 봉 번호
+    gate: dict[int, dict] = {}   # win_reset: 방향 → {기준 가격, 확인 시작 봉, 지금까지 본 봉, 그동안 최고·최저}
+
+    def gate_ok(k: int, d: int) -> bool:
+        g = gate.get(d)
+        if not g:
+            return True
+        while g["upto"] < k:   # 진입 봉부터 k 봉까지의 최고가(롱)·최저가(숏)를 이어서 갱신
+            g["upto"] += 1
+            b = bars[g["upto"]]
+            g["ext"] = max(g["ext"], b["h"]) if d > 0 else min(g["ext"], b["l"])
+        return d * (g["ext"] - g["ref"]) > 0
 
     def ok_setup(k: int, d: int) -> bool:
         """k 번째 봉이 끝난 시점에서 d 방향 눌림 대기 조건."""
@@ -226,6 +241,11 @@ def pullback(bars: list[dict], line: list, trend_line: list | None = None, stop_
         if trend in ("above", "both"):
             if trend_line is None or trend_line[k] is None or d * (line[k] - trend_line[k]) <= 0:
                 return False
+        if win_reset > 0 and not gate_ok(k, d):
+            return False
+        if dir_fast is not None and dir_slow is not None:
+            if dir_fast[k] is None or dir_slow[k] is None or d * (dir_fast[k] - dir_slow[k]) <= 0:
+                return False
         if trend in ("rising", "both"):
             if k - slope_bars < 0 or line[k - slope_bars] is None or d * (line[k] - line[k - slope_bars]) <= 0:
                 return False
@@ -234,14 +254,23 @@ def pullback(bars: list[dict], line: list, trend_line: list | None = None, stop_
     def close_pos(i: int, price: float, reason: str) -> None:
         nonlocal pos
         d = pos["dir"]
+        ret = (d * (price / pos["entry"] - 1) - 2 * fee) * 100
         trades.append({"dir": "long" if d > 0 else "short", "entry_time": pos["t"], "entry": pos["entry"],
                        "exit_time": bars[i]["t"], "exit": price, "reason": reason,
-                       "ret_pct": (d * (price / pos["entry"] - 1) - 2 * fee) * 100, "bars": i - pos["i"] + 1})
+                       "ret_pct": ret, "bars": i - pos["i"] + 1})
+        if win_reset > 0 and ret > 0:   # 이익 거래 → 다음 같은 방향은 새 고점(롱)·저점(숏)을 본 뒤에만
+            e = pos["i"]
+            before = bars[max(0, e - win_reset):e] or [bars[e]]
+            ref = max(b["h"] for b in before) if d > 0 else min(b["l"] for b in before)
+            gate[d] = {"ref": ref, "upto": e - 1, "ext": float("-inf") if d > 0 else float("inf")}
+        elif win_reset > 0:
+            gate.pop(d, None)
         pos = None
 
     def open_pos(i: int, d: int, price: float) -> None:
         nonlocal pos
         pos = {"dir": d, "entry": price, "t": bars[i]["t"], "i": i}
+        gate.pop(d, None)
         if stop_mode == "pct" and stop_pct > 0:
             pos["sl"] = price * (1 - d * stop_pct / 100)
         if tp_mode == "pct" and tp_pct > 0:
@@ -534,7 +563,7 @@ def run(market: Market, q: dict) -> dict:
     # 손절·익절·추가 청산 선은 따로 고를 수 있음 (stop_ma=vwma:100 + stop_tf=15m). 없으면 선 1~4 번호(stop_line 등)
     rule_defs = {}
     if q.get("strat") == "pullback":
-        for name in ("pb", "trend", "stop", "tp", "exit"):
+        for name in ("pb", "trend", "stop", "tp", "exit", "dfast", "dslow"):
             if q.get(f"{name}_ma"):
                 rule_defs[name] = (parse_ma(q[f"{name}_ma"]), q.get(f"{name}_tf", "") or interval)
     for t in line_tfs + [t for _, t in rule_defs.values()]:
@@ -561,7 +590,7 @@ def run(market: Market, q: dict) -> dict:
     lines = [make(m, t) for m, t in zip(mas, line_tfs)]
     rule_lines = {name: (make(m, t), t, m) for name, (m, t) in rule_defs.items()}
     small = [f"선 {i + 1}" for i, (m, t) in enumerate(zip(mas, line_tfs)) if m and INTERVALS[t] < chart_sec]
-    small += [{"pb": "진입선", "trend": "추세선", "stop": "손절선", "tp": "익절선", "exit": "청산선"}[k] for k, (v, t, m) in rule_lines.items()
+    small += [{"pb": "진입선", "trend": "추세선", "dfast": "방향 빠른 선", "dslow": "방향 느린 선", "stop": "손절선", "tp": "익절선", "exit": "청산선"}[k] for k, (v, t, m) in rule_lines.items()
               if m and INTERVALS[t] < chart_sec]
     fast_i, slow_i = int(q.get("fast", 1)) - 1, int(q.get("slow", 2)) - 1
     result = {"symbol": symbol, "interval": interval, "bars": bars, "strat": q.get("strat", "cross"),
@@ -600,6 +629,11 @@ def run(market: Market, q: dict) -> dict:
             raise ValueError("청산선이 꺼져 있어요")
         line, _, _ = rule("pb", "pb_line", 1)
         trend_v, _, _ = rule("trend", "trend_line", 2)
+        dir_on = q.get("dir_filter") == "align"
+        dfast_v = rule_lines.get("dfast", (None,))[0] if dir_on else None
+        dslow_v = rule_lines.get("dslow", (None,))[0] if dir_on else None
+        if dir_on and (dfast_v is None or dslow_v is None):
+            raise ValueError("방향 필터의 두 선을 골라 주세요")
         trend = q.get("trend", "none")
         if line is None:
             raise ValueError("눌림선으로 고른 이평선이 꺼져 있어요")
@@ -609,7 +643,7 @@ def run(market: Market, q: dict) -> dict:
             raise ValueError("익절선이 꺼져 있어요")
         if trend in ("above", "both") and trend_v is None:
             raise ValueError("추세선으로 고른 이평선이 꺼져 있어요")
-        shown = {"pb": True, "trend": trend in ("above", "both"), "stop": q.get("stop_mode") in ("line", "touch"), "tp": q.get("tp_mode") == "touch", "exit": exit_on}
+        shown = {"pb": True, "dfast": dir_on, "dslow": dir_on, "trend": trend in ("above", "both"), "stop": q.get("stop_mode") in ("line", "touch"), "tp": q.get("tp_mode") == "touch", "exit": exit_on}
         result["rule_lines"] = {k: {"kind": m[0], "n": m[1], "tf": t, "values": v}
                                 for k, (v, t, m) in rule_lines.items() if m and shown[k]}
         if q.get("_live"):
@@ -618,10 +652,10 @@ def run(market: Market, q: dict) -> dict:
                               "exit": exit_v if exit_on else None, "exit_ends": exit_e if exit_on else None,
                               "chart_sec": chart_sec}
         result["sim"] = pullback(
-            bars, line, trend_line=trend_v, stop_line=stop_v,
+            bars, line, trend_line=trend_v, stop_line=stop_v, dir_fast=dfast_v, dir_slow=dslow_v,
             tp_line=tp_v, tp_mode=q.get("tp_mode", "pct"), stop_ends=stop_e,
             exit_line=exit_v if exit_on else None, exit_pct=num("exit_pct", 0),
-            exit_ends=exit_e if exit_on else None, entry_pct=entry_pct,
+            exit_ends=exit_e if exit_on else None, entry_pct=entry_pct, win_reset=int(num("win_reset", 0)),
             side=q.get("side", "long"), min_above=int(num("min_above", 5)), trend=trend,
             slope_bars=int(num("slope_bars", 5)) or 1, entry=q.get("entry", "touch"),
             confirm_bars=int(num("confirm_bars", 5)) or 1, stop_mode=q.get("stop_mode", "pct"),

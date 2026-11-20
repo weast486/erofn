@@ -91,6 +91,15 @@ details{margin-top:10px;border-top:1px solid var(--line);padding-top:6px}summary
           <option value="confirm">닿은 뒤 종가가 선 위로 마감하면 다음 봉 시가</option>
         </select>
         <div class="opt" id="o_entry_pct"><span>선보다 미리 %</span><input id="entry_pct" type="number" value="0" min="0" max="1" step="0.1" title="0 = 선 가격, 0.1~1"></div>
+        <div class="opt"><span title="이익으로 끝난 거래 다음 같은 방향 진입은, 그 거래 진입 뒤 가격이 진입 전 N봉 최고가(롱)를 넘거나 최저가(숏) 아래로 간 적이 있어야 함 (새 고점·저점 → 다시 선까지 되돌아올 때)">이익 뒤엔 새 고점·저점 먼저 (진입 전 N봉, 0 = 끔)</span><input id="win_reset" type="number" value="0" min="0" max="500" step="1"></div>
+      </div>
+      <div class="sec"><b>방향 필터</b>
+        <select id="dir_filter">
+          <option value="none">없음 (아래 '방향' 대로)</option>
+          <option value="align">두 선 배열대로: 정배열이면 롱만, 역배열이면 숏만</option></select>
+        <div class="rl" id="rl_dfast"><span>빠른 선</span></div>
+        <div class="rl" id="rl_dslow"><span>느린 선</span></div>
+        <div class="hint" id="o_dir_hint" style="color:var(--mute)">빠른 선이 느린 선 위 = 정배열(롱), 아래 = 역배열(숏). 아래 '방향'을 롱·숏으로 두세요.</div>
       </div>
       <div class="sec"><b>손절</b>
         <select id="stop_sel">
@@ -114,6 +123,7 @@ details{margin-top:10px;border-top:1px solid var(--line);padding-top:6px}summary
           <option value="none">없음</option>
           <option value="line">종가가 선 아래로 마감하면 (다음 봉 시가)</option></select>
         <div class="rl" id="rl_exit"><span>청산선</span></div>
+        <div class="opt"><span title="산 봉 포함. 이 봉 수가 지나면 그 봉 종가에 정리">최대 보유 봉 수 (0 = 없음)</span><input id="max_hold" type="number" value="0" min="0"></div>
       </div>
     </div>
     <div id="p-cross">
@@ -136,7 +146,7 @@ details{margin-top:10px;border-top:1px solid var(--line);padding-top:6px}summary
       <div class="p-pb-only">
         <div class="row">
           <div><label>진입 전 선 위 봉 수</label><input id="min_above" type="number" value="5" min="1" max="200"></div>
-          <div><label>최대 보유 봉 (0=없음)</label><input id="max_hold" type="number" value="0" min="0"></div>
+          <div></div>
         </div>
         <label>추세 조건</label>
         <select id="trend">
@@ -224,7 +234,7 @@ let tf="1h", chart, candle, lineSeries=[], timer=null, lastSignal=null;
 // 봉별 VWMA100 (작은 봉일수록 옅고 가늘게)
 const MTF=[["1m","1분","#b0b7c3",1],["5m","5분","#e0a100",1],["15m","15분","#2f80ed",2],["1h","1시간","#9b51e0",2],["4h","4시간","#e05252",3],["1d","일봉","#111827",3]];
 let mtfSeries={}, ruleSeries={};
-const RULE_STYLE={pb:["#f0b90b","진입",0],trend:["#2f80ed","추세",2],stop:["#e5484d","손절",2],tp:["#089981","익절",2],exit:["#6b7280","청산",2]};
+const RULE_STYLE={pb:["#f0b90b","진입",0],dfast:["#e05252","방향 빠른",0],dslow:["#9b51e0","방향 느린",0],trend:["#2f80ed","추세",2],stop:["#e5484d","손절",2],tp:["#089981","익절",2],exit:["#6b7280","청산",2]};
 
 const saved=(()=>{try{return JSON.parse(localStorage.getItem("maweb")||"{}")}catch(e){return {}}})();
 
@@ -245,7 +255,7 @@ DEF.forEach(([k,n],i)=>{
 // 손절·익절·청산선: 선 종류 · 기간 · 봉을 따로
 const KOPT=`<option value="sma">MA</option><option value="ema">EMA</option><option value="vwma">VWMA</option>`;
 const TFOPT=`<option value="">차트 봉</option>${TF.map(([k,nm])=>`<option value="${k}">${nm}봉</option>`).join("")}`;
-[["pb","vwma",100,""],["trend","sma",50,""],["stop","vwma",100,"15m"],["tp","vwma",100,"1h"],["exit","sma",20,""]].forEach(([nm,k,n,t])=>{
+[["pb","vwma",100,""],["trend","sma",50,""],["dfast","sma",50,""],["dslow","vwma",100,""],["stop","vwma",100,"15m"],["tp","vwma",100,"1h"],["exit","sma",20,""]].forEach(([nm,k,n,t])=>{
   const box=document.getElementById("rl_"+nm);
   box.insertAdjacentHTML("beforeend",`<select id="${nm}_kind">${KOPT}</select>
   <input id="${nm}_len" type="number" min="1" max="1000" value="${n}">
@@ -254,7 +264,7 @@ const TFOPT=`<option value="">차트 봉</option>${TF.map(([k,nm])=>`<option val
 });
 // 저장된 설정 되살리기
 const FIELDS=["bars","fast","slow","side","sl","tp","fee","lev","kind1","len1","kind2","len2","kind3","len3","kind4","len4","tf1","tf2","tf3","tf4",
-  "pb_kind","pb_len","pb_tf","min_above","trend","trend_kind","trend_len","trend_tf","entry","entry_pct",
+  "pb_kind","pb_len","pb_tf","win_reset","dir_filter","dfast_kind","dfast_len","dfast_tf","dslow_kind","dslow_len","dslow_tf","min_above","trend","trend_kind","trend_len","trend_tf","entry","entry_pct",
   "stop_sel","stop_kind","stop_len","stop_tf","pb_sl","tp_sel","tp_kind","tp_len","tp_tf","pb_tp","exit_sel","exit_kind","exit_len","exit_tf","exit_pct","max_hold"];
 // 빠른 설정 (차트 봉 + 눌림 매매 칸). 내 설정은 이 브라우저에 저장
 const PRESETS={
@@ -295,9 +305,11 @@ function refreshForm(){
   document.getElementById("pb_sl_name").textContent=st==="pct"?"손절 %":"선에서 여유 % (0 = 선 그대로)";
   show("rl_tp",tp==="touch");show("o_pb_tp",tp==="pct");
   show("rl_exit",document.getElementById("exit_sel").value==="line");
+  const df=document.getElementById("dir_filter").value==="align";
+  show("rl_dfast",df);show("rl_dslow",df);show("o_dir_hint",df);
   show("rl_trend",["above","both"].includes(document.getElementById("trend").value));
 }
-["stop_sel","tp_sel","exit_sel","entry","trend"].forEach(id=>document.getElementById(id).addEventListener("change",refreshForm));
+["stop_sel","tp_sel","exit_sel","entry","trend","dir_filter"].forEach(id=>document.getElementById(id).addEventListener("change",refreshForm));
 // 손절 방법을 바꾸면 % 칸을 그 방법의 보통 값으로 (매수가 -% = 2, 선 = 여유 0)
 document.getElementById("stop_sel").addEventListener("change",e=>{document.getElementById("pb_sl").value=e.target.value==="pct"?2:0;refreshForm()});
 FIELDS.forEach(f=>{if(saved[f]!==undefined)document.getElementById(f).value=saved[f]});
@@ -358,7 +370,7 @@ function buildParams(){
   const p=new URLSearchParams({...q,interval:tf,strat,mtf:mtfOn?"1":"0"});
   [1,2,3,4].forEach(i=>p.set("ma"+i,q["kind"+i]==="off"?"off":`${q["kind"+i]}:${q["len"+i]}`));
   if(strat==="pullback"){
-    ["pb","trend","stop","tp","exit"].forEach(nm=>p.set(nm+"_ma",`${q[nm+"_kind"]}:${q[nm+"_len"]}`));
+    ["pb","trend","stop","tp","exit","dfast","dslow"].forEach(nm=>p.set(nm+"_ma",`${q[nm+"_kind"]}:${q[nm+"_len"]}`));
     const st=q.stop_sel, tq=q.tp_sel;
     p.set("stop_mode",st==="none"?"pct":st);p.set("sl",st==="none"?0:q.pb_sl);
     p.set("tp_mode",tq==="touch"?"touch":"pct");p.set("tp",tq==="pct"?q.pb_tp:0);
@@ -531,7 +543,9 @@ function ruleText(){
   return `진입 ${line("pb")} ${g("entry").value==="touch"?"닿으면 지정가":"종가 확인"}`+
     ` · 손절 ${st==="none"?"없음":st==="pct"?"-"+g("pb_sl").value+"%":line("stop")+(st==="line"?" 마감 이탈":" 닿음")}`+
     ` · 익절 ${tp==="none"?"없음":tp==="pct"?"+"+g("pb_tp").value+"%":line("tp")+" 닿음"}`+
-    `${g("exit_sel").value==="line"?" · 청산 "+line("exit")+" 이탈":""} · ${opt("side")}`;
+    `${g("exit_sel").value==="line"?" · 청산 "+line("exit")+" 이탈":""}`+
+    `${+g("win_reset").value?" · 이익 뒤 진입 전 "+g("win_reset").value+"봉 고점(롱)·저점(숏) 돌파 먼저":""}`+
+    `${g("dir_filter").value==="align"?" · 방향 "+line("dfast")+" > "+line("dslow")+" 롱만, 반대면 숏만":""} · ${opt("side")}`;
 }
 async function sendLive(cmd,needPin){
   const usdt=+LV("lv_usdt").value, lev=+LV("lv_lev").value;

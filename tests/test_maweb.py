@@ -178,6 +178,29 @@ class PullbackTest(unittest.TestCase):
         r2 = pullback(b, [100.0] * len(b), stop_pct=0, exit_line=ex, exit_ends=ends, fee_pct=0)
         self.assertEqual(r2["trades"], [])
 
+    def test_direction_filter(self):
+        # 가격이 선 100 위 → 롱 대기 조건. 빠른 선 < 느린 선(역배열)이면 롱 대기 없음
+        b = self.rows([(105, 106, 104, 105)])
+        n = len(b)
+        r = pullback(b, [100.0] * n, side="both", dir_fast=[50.0] * n, dir_slow=[60.0] * n)
+        self.assertEqual(r["wait_orders"], [])
+        r2 = pullback(b, [100.0] * n, side="both", dir_fast=[60.0] * n, dir_slow=[50.0] * n)
+        self.assertEqual([w["dir"] for w in r2["wait_orders"]], [1])
+
+    def test_win_reset_needs_new_high(self):
+        touch, win = (101, 102, 99.5, 101), (101, 104, 100.5, 103.5)   # 선 100 닿아 롱 → +3% 익절
+        mid = [(103, 105, 102, 104)] * 6                                # 진입 전 고점 106 을 못 넘음
+        b = self.rows([touch, win] + mid + [touch, (101, 101, 101, 101)])
+        line = [100.0] * len(b)
+        kw = dict(stop_pct=0, tp_pct=3, fee_pct=0)
+        self.assertIsNotNone(pullback(b, line, **kw)["open"])            # 조건 없으면 두 번째 진입
+        r = pullback(b, line, win_reset=20, **kw)
+        self.assertEqual(len(r["trades"]), 1)
+        self.assertIsNone(r["open"])                                     # 새 고점 없이 되돌림 → 안 삼
+        mid2 = mid[:3] + [(104, 107, 103, 106)] + mid[3:5]               # 106 위로 새 고점 → 되돌림에 다시 삼
+        b2 = self.rows([touch, win] + mid2 + [touch, (101, 101, 101, 101)])
+        self.assertIsNotNone(pullback(b2, line, win_reset=20, **kw)["open"])
+
     def test_entry_pct_before_line(self):
         # 저가 100.3 은 선 100 에 못 닿지만 0.5% 앞 100.5 에는 닿음
         b = self.rows([(103, 104, 100.3, 101), (101, 101, 101, 101)])

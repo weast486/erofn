@@ -410,7 +410,40 @@ class Market:
             if len(chunk) < params["limit"]:
                 break
         return [{"t": r[0] // 1000, "o": float(r[1]), "h": float(r[2]), "l": float(r[3]),
-                 "c": float(r[4]), "v": float(r[5])} for r in rows[-count:]]
+                 "c": float(r[4]), "v": float(r[5]), "q": float(r[7])} for r in rows[-count:]]
+
+
+def mtf_line(chart_bars: list[dict], chart_sec: int, tf_bars: list[dict], tf_sec: int,
+             kind: str = "vwma", n: int = 100) -> list:
+    """다른 봉(tf)으로 계산한 이평선을 차트 봉 시각에 맞춰 옮김.
+    차트 봉마다 '그 봉이 끝날 때까지 시작한 tf 봉 중 마지막' 의 값 (큰 봉은 지금 진행 중인 봉 값, 작은 봉은
+    차트 봉 안 마지막 봉 값). tf 봉이 모자라 앞쪽은 None."""
+    vals = moving_average(kind, n, [b["c"] for b in tf_bars], [b["v"] for b in tf_bars])
+    out, j = [], -1
+    shift = max(chart_sec - tf_sec, 0)
+    for b in chart_bars:
+        lim = b["t"] + shift
+        while j + 1 < len(tf_bars) and tf_bars[j + 1]["t"] <= lim:
+            j += 1
+        out.append(vals[j] if j >= 0 else None)
+    return out
+
+
+def mtf_lines(market: Market, symbol: str, bars: list[dict], interval: str, n: int = 100) -> dict:
+    """1분~일봉 각각의 VWMA n 선을 지금 차트 봉에 맞춰 (봉 하나당 최대 MAX_BARS 개라 작은 봉은 최근 구간만)."""
+    from concurrent.futures import ThreadPoolExecutor
+    chart_sec = INTERVALS[interval]
+    span = len(bars) * chart_sec
+
+    def one(tf):
+        if tf == interval:
+            tb = bars
+        else:
+            tb = market.bars(symbol, tf, span // INTERVALS[tf] + n + 2)
+        return tf, mtf_line(bars, chart_sec, tb, INTERVALS[tf], "vwma", n)
+
+    with ThreadPoolExecutor(max_workers=6) as ex:
+        return dict(ex.map(one, list(INTERVALS)))
 
 
 def run(market: Market, q: dict) -> dict:
@@ -453,6 +486,11 @@ def run(market: Market, q: dict) -> dict:
                                  fee_pct=float(q.get("fee", 0.05) or 0), leverage=float(q.get("lev", 1) or 1))
     else:
         result["sim"] = None
+    if q.get("mtf", "0") == "1":
+        try:
+            result["mtf"] = {"n": 100, "lines": mtf_lines(market, symbol, bars, interval, 100)}
+        except Exception as exc:  # noqa: BLE001 보조선 오류로 화면 전체가 멈추지 않게
+            result["mtf"] = {"n": 100, "lines": {}, "error": str(exc)}
     return result
 
 

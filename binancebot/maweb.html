@@ -63,7 +63,10 @@ th{color:var(--mute);font-weight:600}
     <label>불러올 봉 개수</label>
     <input id="bars" type="number" value="1000" min="100" max="5000" step="100">
     <h2 style="margin-top:14px">3. 이평선</h2>
+    <label class="chk"><input type="checkbox" id="mtf" checked> 봉별 VWMA100 만 보기 (1분~일봉 6줄)</label>
+    <div id="mtf_legend" style="display:flex;flex-wrap:wrap;gap:4px 10px;font-size:12px;color:var(--mute);margin-top:4px"></div>
     <div id="mas"></div>
+    <div id="mas_note" style="font-size:12px;color:var(--mute);margin-top:4px">위 선 1~4 는 매매 계산에 그대로 쓰이고, '봉별 VWMA100 만 보기'를 켜면 차트에서만 숨겨요.</div>
     <h2 style="margin-top:14px">4. 매매 규칙</h2>
     <div class="tfs" id="strats"><button data-k="pullback">눌림 매매</button><button data-k="cross">교차 매매</button></div>
     <div id="p-cross">
@@ -164,6 +167,9 @@ const KST=9*3600;
 const REASON={cross:"교차",stop:"손절",take:"익절",line:"손절선",time:"시간"};
 const DEF=[["ema",20],["sma",50],["vwma",100],["sma",200]];
 let tf="1h", chart, candle, lineSeries=[], timer=null, lastSignal=null;
+// 봉별 VWMA100 (작은 봉일수록 옅고 가늘게)
+const MTF=[["1m","1분","#b0b7c3",1],["5m","5분","#e0a100",1],["15m","15분","#2f80ed",2],["1h","1시간","#9b51e0",2],["4h","4시간","#e05252",3],["1d","일봉","#111827",3]];
+let mtfSeries={};
 
 const saved=(()=>{try{return JSON.parse(localStorage.getItem("maweb")||"{}")}catch(e){return {}}})();
 
@@ -184,6 +190,9 @@ DEF.forEach(([k,n],i)=>{
 const FIELDS=["bars","fast","slow","side","sl","tp","fee","lev","kind1","len1","kind2","len2","kind3","len3","kind4","len4",
   "pb_line","min_above","trend","trend_line","entry","stop_mode","stop_line","tp_mode","tp_line","max_hold"];
 FIELDS.forEach(f=>{if(saved[f]!==undefined)document.getElementById(f).value=saved[f]});
+if(saved.mtf!==undefined)document.getElementById("mtf").checked=saved.mtf;
+document.getElementById("mtf_legend").innerHTML=MTF.map(([k,n,c])=>`<span><span style="display:inline-block;width:14px;height:3px;background:${c};vertical-align:middle;margin-right:3px"></span>${n}</span>`).join("");
+document.getElementById("mtf").onchange=()=>load();
 if(saved.tf)tf=saved.tf;markTf();
 // 매매 방식 (눌림 / 교차)
 let strat=saved.strat||"pullback";
@@ -206,6 +215,7 @@ chart=LightweightCharts.createChart(document.getElementById("chart"),{
   rightPriceScale:{borderColor:"#e3e7ee"},crosshair:{mode:0}});
 candle=chart.addCandlestickSeries({upColor:"#089981",downColor:"#e5484d",borderVisible:false,wickUpColor:"#089981",wickDownColor:"#e5484d"});
 COLORS.forEach(c=>lineSeries.push(chart.addLineSeries({color:c,lineWidth:2,priceLineVisible:false,lastValueVisible:false})));
+MTF.forEach(([k,n,c,w])=>mtfSeries[k]=chart.addLineSeries({color:c,lineWidth:w,priceLineVisible:false,lastValueVisible:false,crosshairMarkerVisible:false,title:n,autoscaleInfoProvider:()=>null}));
 new ResizeObserver(()=>chart.applyOptions({width:document.getElementById("chart").clientWidth})).observe(document.getElementById("chart"));
 
 // 종목 목록
@@ -231,7 +241,9 @@ async function load(){
   const q={symbol:document.getElementById("symbol").value,interval:tf};
   FIELDS.forEach(f=>q[f]=document.getElementById(f).value);
   try{const old=JSON.parse(localStorage.getItem("maweb")||"{}");localStorage.setItem("maweb",JSON.stringify({...old,...q,tf,strat}))}catch(e){}
-  const p=new URLSearchParams({...q,interval:tf,strat});
+  const mtfOn=document.getElementById("mtf").checked;
+  try{const old=JSON.parse(localStorage.getItem("maweb")||"{}");old.mtf=mtfOn;localStorage.setItem("maweb",JSON.stringify(old))}catch(e){}
+  const p=new URLSearchParams({...q,interval:tf,strat,mtf:mtfOn?"1":"0"});
   [1,2,3,4].forEach(i=>p.set("ma"+i,q["kind"+i]==="off"?"off":`${q["kind"+i]}:${q["len"+i]}`));
   document.getElementById("status").textContent="불러오는 중…";
   document.getElementById("err").textContent="";
@@ -247,7 +259,11 @@ async function load(){
 function draw(d){
   const sh=t=>t+KST;
   candle.setData(d.bars.map(b=>({time:sh(b.t),open:b.o,high:b.h,low:b.l,close:b.c})));
-  d.lines.forEach((l,i)=>lineSeries[i].setData(l?l.values.map((v,j)=>v==null?null:{time:sh(d.bars[j].t),value:v}).filter(Boolean):[]));
+  const toPts=vals=>vals.map((v,j)=>v==null?null:{time:sh(d.bars[j].t),value:v}).filter(Boolean);
+  const mt=d.mtf&&d.mtf.lines;
+  d.lines.forEach((l,i)=>lineSeries[i].setData(!mt&&l?toPts(l.values):[]));
+  MTF.forEach(([k])=>mtfSeries[k].setData(mt&&mt[k]?toPts(mt[k]):[]));
+  if(d.mtf&&d.mtf.error)document.getElementById("err").textContent="봉별 VWMA 일부 못 받음: "+d.mtf.error;
   const s=d.sim, markers=[];
   if(s){
     s.trades.forEach(t=>{

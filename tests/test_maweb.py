@@ -1,6 +1,6 @@
 import unittest
 
-from binancebot.maweb import atr_pct, backtest, moving_average, near_line, parse_ma, pullback, run, scan
+from binancebot.maweb import atr_pct, backtest, mtf_line, moving_average, near_line, parse_ma, pullback, run, scan
 
 
 def bars_from(closes, vols=None):
@@ -179,6 +179,19 @@ class PullbackTest(unittest.TestCase):
         d = run(FakeMarket(), {"strat": "pullback", "ma1": "sma:2", "ma2": "sma:4", "trend": "both"})
         self.assertEqual(d["strat"], "pullback")
         self.assertIn("stats", d["sim"])
+
+
+class MtfTest(unittest.TestCase):
+    def test_bigger_tf_steps(self):
+        chart = [{"t": i * 300, "c": 1, "v": 1} for i in range(6)]       # 5분봉 6개
+        big = [{"t": 0, "c": 10, "v": 1}, {"t": 900, "c": 20, "v": 1}]  # 15분봉 2개
+        self.assertEqual(mtf_line(chart, 300, big, 900, "sma", 1), [10, 10, 10, 20, 20, 20])
+
+    def test_smaller_tf_last_inside(self):
+        chart = [{"t": 0, "c": 1, "v": 1}, {"t": 300, "c": 1, "v": 1}]
+        small = [{"t": i * 60, "c": i, "v": 1} for i in range(10)]     # 1분봉 10개
+        self.assertEqual(mtf_line(chart, 300, small, 60, "sma", 1), [4, 9])
+        self.assertEqual(mtf_line(chart, 300, small[6:], 60, "sma", 1), [None, 9])
 
 
 class ScanMarket:

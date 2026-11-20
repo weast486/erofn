@@ -1,6 +1,6 @@
 import unittest
 
-from binancebot.maweb import atr_pct, backtest, mtf_line, moving_average, near_line, parse_ma, pullback, run, scan
+from binancebot.maweb import atr_pct, backtest, mtf_line, tf_line, moving_average, near_line, parse_ma, pullback, run, scan
 
 
 def bars_from(closes, vols=None):
@@ -165,6 +165,19 @@ class PullbackTest(unittest.TestCase):
         self.assertEqual(r3["trades"], [])
         self.assertIsNotNone(r3["open"])
 
+    def test_exit_line_break(self):
+        # 100 에서 삼 → 종가가 청산선 101 위(102) 에 한 번 있다가 아래(100.5)로 마감 → 다음 봉 시가 청산
+        b = self.rows([(103, 104, 99.5, 100.5), (101, 103, 100.5, 102), (102, 102, 100, 100.5),
+                       (100.4, 100.4, 100.2, 100.3), (100, 100, 100, 100)])
+        ex = [101.0] * len(b)
+        r = pullback(b, [100.0] * len(b), stop_pct=0, exit_line=ex, fee_pct=0)
+        t = r["trades"][0]
+        self.assertEqual((t["reason"], t["exit"], t["exit_time"]), ("exit", 100.4, b[9]["t"]))
+        # 큰 봉이 끝나는 봉에서만 판단하면 (8번째 봉은 아님) 청산 안 됨
+        ends = [False] * len(b)
+        r2 = pullback(b, [100.0] * len(b), stop_pct=0, exit_line=ex, exit_ends=ends, fee_pct=0)
+        self.assertEqual(r2["trades"], [])
+
     def test_short_mirror_and_pending(self):
         down = [(96, 97, 94, 95)] * 6
         b = ohlc(down + [(96, 96, 96, 96)])  # 진행 중 봉, 아직 100 안 닿음
@@ -192,6 +205,22 @@ class MtfTest(unittest.TestCase):
         small = [{"t": i * 60, "c": i, "v": 1} for i in range(10)]     # 1분봉 10개
         self.assertEqual(mtf_line(chart, 300, small, 60, "sma", 1), [4, 9])
         self.assertEqual(mtf_line(chart, 300, small[6:], 60, "sma", 1), [None, 9])
+
+
+class TfLineTest(unittest.TestCase):
+    def test_no_lookahead_partial_bar(self):
+        # 15분봉 2개(끝난 것 1 + 진행 중) 를 5분봉 차트에: 진행 중인 15분봉 종가 대신 그때까지의 5분봉 종가를 씀
+        big = [{"t": 0, "c": 10, "v": 1}, {"t": 900, "c": 99, "v": 3}]
+        chart = [{"t": 900 + i * 300, "c": c, "v": 1} for i, c in enumerate([20, 30, 40])]
+        got = tf_line(chart, 300, big, 900, "sma", 2)
+        self.assertEqual(got, [15, 20, 25])  # (10+20)/2, (10+30)/2, (10+40)/2 — 99 는 안 씀
+        vw = tf_line(chart, 300, big, 900, "vwma", 2)
+        self.assertAlmostEqual(vw[1], (10 * 1 + 30 * 2) / 3)  # 진행 중 봉 거래량 = 지금까지 쌓인 2
+
+    def test_run_with_line_tf(self):
+        d = run(FakeMarket(), {"symbol": "x", "interval": "5m", "ma1": "sma:2", "tf1": "15m", "ma2": "sma:2", "tf2": "1m"})
+        self.assertEqual(d["lines"][0]["tf"], "15m")
+        self.assertIn("선 2", d["warn"])
 
 
 class ScanMarket:

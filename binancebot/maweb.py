@@ -184,7 +184,9 @@ def pullback(bars: list[dict], line: list, trend_line: list | None = None, stop_
              tp_line: list | None = None, tp_mode: str = "pct",
              side: str = "long", min_above: int = 5, trend: str = "none", slope_bars: int = 5,
              entry: str = "touch", confirm_bars: int = 5, stop_mode: str = "pct", stop_pct: float = 2.0,
-             tp_pct: float = 0.0, max_hold: int = 0, fee_pct: float = 0.05, leverage: float = 1.0) -> dict:
+             tp_pct: float = 0.0, max_hold: int = 0, fee_pct: float = 0.05, leverage: float = 1.0,
+             stop_ends: list | None = None, exit_line: list | None = None, exit_pct: float = 0.0,
+             exit_ends: list | None = None) -> dict:
     """이평선 눌림 매매.
 
     롱: 직전 min_above 봉의 종가가 모두 눌림선 위 + 추세 조건 → 가격이 눌림선까지 내려오면 매수.
@@ -196,7 +198,9 @@ def pullback(bars: list[dict], line: list, trend_line: list | None = None, stop_
           touch → 직전 봉 종가가 손절선 x (1-stop_pct%) 위에 있다가 가격이 닿으면 그 가격
                   (선 값은 직전 끝난 봉 값, 시가가 이미 아래면 시가)
     익절: tp_mode=pct → tp_pct% 지정가 / touch → 가격이 익절선에 닿으면 그 가격 (선이 진입가보다 이익 쪽에 있을 때만),
-    max_hold 봉 지나면 그 봉 종가에 정리 (0 = 없음). 숏은 모두 반대. max_hold 봉 지나면 그 봉 종가에 정리 (0 = 없음). 숏은 모두 반대.
+    max_hold 봉 지나면 그 봉 종가에 정리 (0 = 없음). 숏은 모두 반대.
+    추가 청산 exit_line: 진입 뒤 종가가 그 선 (1-exit_pct%) 위에 한 번 있었다가 아래로 마감하면 다음 봉 시가 (손절·익절과 함께).
+    stop_ends·exit_ends: 선이 차트보다 큰 봉이면 그 큰 봉이 끝나는 차트 봉에서만 종가 판단 (None = 차트 봉마다).
     진입한 봉에서는 손절만 확인 (익절은 다음 봉부터, 봉 안 순서를 모르므로 보수적으로).
     """
     n = len(bars)
@@ -207,6 +211,7 @@ def pullback(bars: list[dict], line: list, trend_line: list | None = None, stop_
     trades: list[dict] = []
     pos = None
     pend_close = False
+    pend_reason = "line"
     pend_open = None   # confirm 진입: 다음 봉 시가에 열 방향
     armed: dict[int, int] = {}  # confirm: 방향 → 닿은 봉 번호
 
@@ -276,7 +281,7 @@ def pullback(bars: list[dict], line: list, trend_line: list | None = None, stop_
         exited = False
         # 1) 앞 봉에서 정한 것을 시가에 체결
         if pend_close and pos:
-            close_pos(i, b["o"], "line")
+            close_pos(i, b["o"], pend_reason)
             exited = True
         pend_close = False
         if pend_open is not None and pos is None:
@@ -308,17 +313,23 @@ def pullback(bars: list[dict], line: list, trend_line: list | None = None, stop_
                     entered_now = True
                     px = pct_stop_hit(b, i, entry_bar=True)
                     if px is not None:
-                        close_pos(i, px, "stop")
+                        close_pos(i, px, "line" if stop_mode == "touch" else "stop")
                     break
         if i > last_closed:
             continue
         # 4) 봉이 끝난 뒤 판단: 손절선 이탈·보유 기간·confirm 진입
         if pos:
             d = pos["dir"]
-            if stop_mode == "line" and stop_line[i] is not None:
+            if stop_mode == "line" and stop_line[i] is not None and (stop_ends is None or stop_ends[i]):
                 lim = stop_line[i] * (1 - d * stop_pct / 100)
                 if d * (b["c"] - lim) < 0:
-                    pend_close = True
+                    pend_close, pend_reason = True, "line"
+            if not pend_close and exit_line is not None and exit_line[i] is not None                     and (exit_ends is None or exit_ends[i]):
+                lim = exit_line[i] * (1 - d * exit_pct / 100)
+                if d * (b["c"] - lim) >= 0:
+                    pos["exit_armed"] = True   # 선 위(숏은 아래)에 한 번 있어야 '이탈'
+                elif pos.get("exit_armed"):
+                    pend_close, pend_reason = True, "exit"
             if not pend_close and max_hold > 0 and i - pos["i"] + 1 >= max_hold:
                 close_pos(i, b["c"], "time")
             continue
@@ -344,7 +355,7 @@ def pullback(bars: list[dict], line: list, trend_line: list | None = None, stop_
                      "sl": stop_level(n) if stop_mode != "line" else None, "tp": tp_level(n)}
     pending = None
     if pend_close:
-        pending = "다음 봉 시가에 청산 (손절선 이탈)"
+        pending = "다음 봉 시가에 청산 (" + ("청산선 이탈" if pend_reason == "exit" else "손절선 이탈") + ")"
     elif pend_open is not None:
         pending = f"다음 봉 시가에 {'롱' if pend_open > 0 else '숏'} 진입 (눌림 확인)"
     elif pos is None and n >= 2:
@@ -429,6 +440,56 @@ def mtf_line(chart_bars: list[dict], chart_sec: int, tf_bars: list[dict], tf_sec
     return out
 
 
+def tf_line(chart_bars: list[dict], chart_sec: int, tf_bars: list[dict], tf_sec: int,
+            kind: str, n: int) -> list:
+    """다른 봉으로 계산한 이평선을 차트 봉마다 '그 차트 봉이 끝난 순간 실제로 보였을 값' 으로 (미래 정보 없음).
+    큰 봉: 끝난 큰 봉 n-1 개 + 진행 중인 큰 봉(종가 = 지금 차트 봉 종가, 거래량 = 큰 봉 시작부터 쌓인 양).
+    작은 봉: 차트 봉 안 마지막 작은 봉까지의 값."""
+    if tf_sec <= chart_sec:
+        return mtf_line(chart_bars, chart_sec, tf_bars, tf_sec, kind, n)
+    c = [b["c"] for b in tf_bars]
+    v = [b["v"] for b in tf_bars]
+    ema = moving_average("ema", n, c) if kind == "ema" else None
+    pc, pcv, pv = [0.0], [0.0], [0.0]
+    for x, y in zip(c, v):
+        pc.append(pc[-1] + x)
+        pcv.append(pcv[-1] + x * y)
+        pv.append(pv[-1] + y)
+    out: list = []
+    j, cur, vp = -1, None, 0.0
+    for b in chart_bars:
+        t = b["t"]
+        while j + 1 < len(tf_bars) and tf_bars[j + 1]["t"] <= t:
+            j += 1
+        if j < 0 or t >= tf_bars[j]["t"] + tf_sec:
+            out.append(None)
+            continue
+        if cur != tf_bars[j]["t"]:
+            cur, vp = tf_bars[j]["t"], 0.0
+        vp += b["v"]
+        ck = b["c"]
+        if j < n - 1:
+            out.append(None)
+            continue
+        lo = j - (n - 1)
+        if kind == "sma":
+            val = (pc[j] - pc[lo] + ck) / n
+        elif kind == "vwma":
+            vv = pv[j] - pv[lo] + vp
+            val = (pcv[j] - pcv[lo] + ck * vp) / vv if vv > 1e-12 else ck
+        elif n == 1:
+            val = ck
+        else:
+            prev = ema[j - 1]
+            if prev is None:
+                out.append(None)
+                continue
+            k = 2 / (n + 1)
+            val = ck * k + prev * (1 - k)
+        out.append(val)
+    return out
+
+
 def mtf_lines(market: Market, symbol: str, bars: list[dict], interval: str, n: int = 100) -> dict:
     """1분~일봉 각각의 VWMA n 선을 지금 차트 봉에 맞춰 (봉 하나당 최대 MAX_BARS 개라 작은 봉은 최근 구간만)."""
     from concurrent.futures import ThreadPoolExecutor
@@ -458,12 +519,44 @@ def run(market: Market, q: dict) -> dict:
     close = [b["c"] for b in bars]
     vol = [b["v"] for b in bars]
     lines = [moving_average(m[0], m[1], close, vol) if m else None for m in mas]
+    # 선마다 다른 봉 (예: 5분 VWMA100 눌림 진입 + 15분 VWMA100 손절·익절). 비워 두면 차트 봉
+    line_tfs = [(q.get(f"tf{k}", "") or interval) for k in (1, 2, 3, 4)]
+    for t in line_tfs:
+        if t not in INTERVALS:
+            raise ValueError(f"선 봉은 {', '.join(INTERVALS)} 중 하나")
+    chart_sec = INTERVALS[interval]
+    other = sorted({t for m, t in zip(mas, line_tfs) if m and t != interval})
+    if other:
+        from concurrent.futures import ThreadPoolExecutor
+        longest = max((m[1] for m in mas if m), default=1)
+        with ThreadPoolExecutor(max_workers=4) as ex:
+            got = dict(zip(other, ex.map(lambda t: market.bars(
+                symbol, t, len(bars) * chart_sec // INTERVALS[t] + longest + 2), other)))
+        for i, (m, t) in enumerate(zip(mas, line_tfs)):
+            if m and t != interval:
+                lines[i] = tf_line(bars, chart_sec, got[t], INTERVALS[t], m[0], m[1])
+    small = [i + 1 for i, (m, t) in enumerate(zip(mas, line_tfs)) if m and INTERVALS[t] < chart_sec]
     fast_i, slow_i = int(q.get("fast", 1)) - 1, int(q.get("slow", 2)) - 1
     result = {"symbol": symbol, "interval": interval, "bars": bars, "strat": q.get("strat", "cross"),
-              "lines": [{"kind": m[0], "n": m[1], "values": v} if m else None for m, v in zip(mas, lines)]}
+              "lines": [{"kind": m[0], "n": m[1], "tf": t, "values": v} if m else None
+                        for m, v, t in zip(mas, lines, line_tfs)]}
+    if small:
+        result["warn"] = (f"선 {', '.join(map(str, small))} 은 차트보다 작은 봉이에요. 차트 봉 안에서 언제 닿았는지 몰라 "
+                          "모의 매매가 부정확해요 → 차트를 가장 작은 봉으로 두세요.")
     num = lambda k, dflt: float(q.get(k, dflt) or 0)  # noqa: E731
     if result["strat"] == "pullback":
         pick = lambda k, dflt: lines[int(q.get(k, dflt)) - 1]  # noqa: E731
+
+        def ends(idx):
+            """그 선이 차트보다 큰 봉이면 큰 봉이 끝나는 차트 봉만 True."""
+            t = line_tfs[int(idx) - 1]
+            if INTERVALS[t] <= chart_sec:
+                return None
+            return [(b["t"] + chart_sec) % INTERVALS[t] == 0 for b in bars]
+
+        exit_on = str(q.get("exit_line", "0")) not in ("", "0")
+        if exit_on and pick("exit_line", 2) is None:
+            raise ValueError("청산선으로 고른 이평선이 꺼져 있어요")
         line = pick("pb_line", 1)
         trend = q.get("trend", "none")
         if line is None:
@@ -475,6 +568,9 @@ def run(market: Market, q: dict) -> dict:
         result["sim"] = pullback(
             bars, line, trend_line=pick("trend_line", 2), stop_line=pick("stop_line", q.get("pb_line", 1)),
             tp_line=pick("tp_line", 3), tp_mode=q.get("tp_mode", "pct"),
+            stop_ends=ends(q.get("stop_line", q.get("pb_line", 1))),
+            exit_line=pick("exit_line", 2) if exit_on else None, exit_pct=num("exit_pct", 0),
+            exit_ends=ends(q.get("exit_line", 2)) if exit_on else None,
             side=q.get("side", "long"), min_above=int(num("min_above", 5)), trend=trend,
             slope_bars=int(num("slope_bars", 5)) or 1, entry=q.get("entry", "touch"),
             confirm_bars=int(num("confirm_bars", 5)) or 1, stop_mode=q.get("stop_mode", "pct"),

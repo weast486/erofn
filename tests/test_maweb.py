@@ -178,6 +178,17 @@ class PullbackTest(unittest.TestCase):
         r2 = pullback(b, [100.0] * len(b), stop_pct=0, exit_line=ex, exit_ends=ends, fee_pct=0)
         self.assertEqual(r2["trades"], [])
 
+    def test_entry_pct_before_line(self):
+        # 저가 100.3 은 선 100 에 못 닿지만 0.5% 앞 100.5 에는 닿음
+        b = self.rows([(103, 104, 100.3, 101), (101, 101, 101, 101)])
+        r = pullback(b, [100.0] * len(b), stop_pct=0, fee_pct=0)
+        self.assertIsNone(r["open"])
+        r2 = pullback(b, [100.0] * len(b), stop_pct=0, fee_pct=0, entry_pct=0.5)
+        self.assertAlmostEqual(r2["open"]["entry"], 100.5)
+        down = ohlc([(96, 97, 94, 95)] * 6 + [(97, 99.6, 96, 99)])
+        r3 = pullback(down, [100.0] * len(down), side="short", stop_pct=0, fee_pct=0, entry_pct=0.5)
+        self.assertAlmostEqual(r3["open"]["entry"], 99.5)
+
     def test_short_mirror_and_pending(self):
         down = [(96, 97, 94, 95)] * 6
         b = ohlc(down + [(96, 96, 96, 96)])  # 진행 중 봉, 아직 100 안 닿음
@@ -221,6 +232,20 @@ class TfLineTest(unittest.TestCase):
         d = run(FakeMarket(), {"symbol": "x", "interval": "5m", "ma1": "sma:2", "tf1": "15m", "ma2": "sma:2", "tf2": "1m"})
         self.assertEqual(d["lines"][0]["tf"], "15m")
         self.assertIn("선 2", d["warn"])
+
+    def test_rule_lines_own_kind_and_tf(self):
+        q = {"symbol": "x", "interval": "5m", "strat": "pullback", "ma1": "sma:2",
+             "stop_mode": "touch", "stop_ma": "vwma:3", "stop_tf": "15m",
+             "tp_mode": "pct", "tp_ma": "vwma:2", "exit_ma": "sma:2", "exit_tf": "5m", "entry_pct": "0.5"}
+        d = run(FakeMarket(), q)
+        self.assertEqual(d["rule_lines"]["stop"]["tf"], "15m")
+        self.assertEqual(d["rule_lines"]["stop"]["kind"], "vwma")
+        self.assertIn("exit", d["rule_lines"])
+        self.assertNotIn("tp", d["rule_lines"])          # 익절이 % 면 선 안 그림
+        d2 = run(FakeMarket(), {**q, "exit_ma": "off"})
+        self.assertNotIn("exit", d2["rule_lines"])
+        with self.assertRaises(ValueError):
+            run(FakeMarket(), {**q, "entry_pct": "2"})  # 0.1~1 밖
 
 
 class ScanMarket:

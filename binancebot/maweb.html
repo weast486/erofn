@@ -46,6 +46,8 @@ th{color:var(--mute);font-weight:600}
 #sc_table tr.hit{cursor:pointer}#sc_table tr.hit:hover{background:var(--hover)}
 .in{color:var(--accent-text);font-weight:700}
 .live{background:var(--soft);border:1px solid var(--accent);border-radius:10px;padding:10px;margin-top:12px}
+.rl{display:grid;grid-template-columns:44px 1fr 60px 84px;gap:4px;align-items:center;margin-top:4px;font-size:12px;color:var(--mute)}
+.rl select,.rl input{margin:0}
 </style>
 </head>
 <body>
@@ -93,22 +95,24 @@ th{color:var(--mute);font-weight:600}
       <option value="touch">선에 닿으면 바로 (지정가)</option>
       <option value="confirm">닿은 뒤 종가가 선 위로 마감하면 다음 봉 시가</option>
     </select>
+    <label>선 닿기 몇 % 전에 미리 살지 (바로 사기만, 0 = 선 가격, 0.1~1)</label>
+    <input id="entry_pct" type="number" value="0" min="0" max="1" step="0.1">
+    <label>손절 방법</label>
+    <select id="stop_mode">
+      <option value="pct">매수가 -손절%</option>
+      <option value="line">종가가 손절선 -손절% 아래로 마감</option>
+      <option value="touch">가격이 손절선 -손절% 에 닿으면</option></select>
+    <div class="rl" id="rl_stop"><span>손절선</span></div>
+    <label>익절 방법</label>
+    <select id="tp_mode">
+      <option value="pct">매수가 +익절% 지정가</option>
+      <option value="touch">가격이 익절선에 닿으면</option></select>
+    <div class="rl" id="rl_tp"><span>익절선</span></div>
+    <label>추가 청산 · 선 이탈 (그 봉이 끝날 때 종가가 선 아래(숏은 위)로 마감하면 다음 봉 시가)</label>
+    <div class="rl" id="rl_exit"><span>청산선</span></div>
     <div class="row">
-      <div><label>손절 방법</label><select id="stop_mode">
-        <option value="pct">매수가 -손절%</option>
-        <option value="line">종가가 손절선 -손절% 아래로 마감</option>
-        <option value="touch">가격이 손절선 -손절% 에 닿으면</option></select></div>
-      <div><label>손절선</label><select id="stop_line"><option value="1">선 1</option><option value="2" selected>선 2</option><option value="3">선 3</option><option value="4">선 4</option></select></div>
-    </div>
-    <div class="row">
-      <div><label>익절 방법</label><select id="tp_mode">
-        <option value="pct">매수가 +익절% 지정가</option>
-        <option value="touch">가격이 익절선에 닿으면</option></select></div>
-      <div><label>익절선</label><select id="tp_line"><option value="1">선 1</option><option value="2">선 2</option><option value="3" selected>선 3</option><option value="4">선 4</option></select></div>
-    </div>
-    <div class="row">
-      <div><label>추가 청산 · 선 이탈</label><select id="exit_line" title="그 선의 봉이 끝날 때 종가가 선 아래(숏은 위)로 마감하면 다음 봉 시가에 청산"><option value="0">없음</option><option value="1">선 1</option><option value="2">선 2</option><option value="3">선 3</option><option value="4">선 4</option></select></div>
       <div><label>이탈 여유 %</label><input id="exit_pct" type="number" value="0" min="0" step="0.1"></div>
+      <div></div>
     </div>
     <label>최대 보유 봉 수 (0=제한 없음)</label>
     <input id="max_hold" type="number" value="0" min="0">
@@ -173,7 +177,8 @@ const DEF=[["ema",20],["sma",50],["vwma",100],["sma",200]];
 let tf="1h", chart, candle, lineSeries=[], timer=null, lastSignal=null;
 // 봉별 VWMA100 (작은 봉일수록 옅고 가늘게)
 const MTF=[["1m","1분","#b0b7c3",1],["5m","5분","#e0a100",1],["15m","15분","#2f80ed",2],["1h","1시간","#9b51e0",2],["4h","4시간","#e05252",3],["1d","일봉","#111827",3]];
-let mtfSeries={};
+let mtfSeries={}, ruleSeries={};
+const RULE_STYLE={stop:["#e5484d","손절"],tp:["#089981","익절"],exit:["#6b7280","청산"]};
 
 const saved=(()=>{try{return JSON.parse(localStorage.getItem("maweb")||"{}")}catch(e){return {}}})();
 
@@ -191,9 +196,19 @@ DEF.forEach(([k,n],i)=>{
   <select id="tf${i+1}" title="이 선을 계산할 봉"><option value="">차트 봉</option>${TF.map(([k,nm])=>`<option value="${k}">${nm}봉</option>`).join("")}</select>`;
   mas.appendChild(d);document.getElementById("kind"+(i+1)).value=k;
 });
+// 손절·익절·청산선: 선 종류 · 기간 · 봉을 따로
+const KOPT=`<option value="sma">MA</option><option value="ema">EMA</option><option value="vwma">VWMA</option>`;
+const TFOPT=`<option value="">차트 봉</option>${TF.map(([k,nm])=>`<option value="${k}">${nm}봉</option>`).join("")}`;
+[["stop","sma",50,""],["tp","vwma",100,""],["exit","off",20,""]].forEach(([nm,k,n,t])=>{
+  const box=document.getElementById("rl_"+nm);
+  box.insertAdjacentHTML("beforeend",`<select id="${nm}_kind">${nm==="exit"?'<option value="off">없음</option>':""}${KOPT}</select>
+  <input id="${nm}_len" type="number" min="1" max="1000" value="${n}">
+  <select id="${nm}_tf" title="이 선을 계산할 봉">${TFOPT}</select>`);
+  document.getElementById(nm+"_kind").value=k;document.getElementById(nm+"_tf").value=t;
+});
 // 저장된 설정 되살리기
 const FIELDS=["bars","fast","slow","side","sl","tp","fee","lev","kind1","len1","kind2","len2","kind3","len3","kind4","len4","tf1","tf2","tf3","tf4",
-  "pb_line","min_above","trend","trend_line","entry","stop_mode","stop_line","tp_mode","tp_line","exit_line","exit_pct","max_hold"];
+  "pb_line","min_above","trend","trend_line","entry","stop_mode","stop_kind","stop_len","stop_tf","tp_mode","tp_kind","tp_len","tp_tf","exit_kind","exit_len","exit_tf","exit_pct","entry_pct","max_hold"];
 FIELDS.forEach(f=>{if(saved[f]!==undefined)document.getElementById(f).value=saved[f]});
 if(saved.mtf!==undefined)document.getElementById("mtf").checked=saved.mtf;
 document.getElementById("mtf_legend").innerHTML=MTF.map(([k,n,c])=>`<span><span style="display:inline-block;width:14px;height:3px;background:${c};vertical-align:middle;margin-right:3px"></span>${n}</span>`).join("");
@@ -202,7 +217,7 @@ if(saved.tf)tf=saved.tf;markTf();
 // 매매 방식 (눌림 / 교차)
 let strat=saved.strat||"pullback";
 const NOTES={
-  pullback:"롱: 직전 N봉의 종가가 모두 눌림선 위에 있다가 가격이 눌림선까지 내려오면 삼 (지정가 = 직전 봉까지 끝난 선 값). 숏은 반대. 산 봉에서는 손절만 확인하고 익절은 다음 봉부터 봐요. 손절·익절을 '선에 닿으면'으로 하면 직전 봉까지 끝난 선 값에 닿을 때 그 가격으로 계산하고(시가가 이미 넘었으면 시가), 익절선은 진입가보다 이익 쪽(롱이면 위)에 있을 때만 써요. 같은 봉에서 둘 다 닿으면 손절. '추가 청산 · 선 이탈'은 손절·익절과 함께 걸려요: 산 뒤 종가가 그 선 위에 한 번 있었다가 아래로 마감하면 다음 봉 시가에 팔아요(예: 선 2 = 5분봉 MA20 → 5분봉 20선 이탈 청산). 그 선이 차트보다 큰 봉이면 그 큰 봉이 끝날 때의 종가로만 판단해요. 시각은 한국 시간.",
+  pullback:"롱: 직전 N봉의 종가가 모두 눌림선 위에 있다가 가격이 눌림선까지 내려오면 삼 (지정가 = 직전 봉까지 끝난 선 값). 숏은 반대. 산 봉에서는 손절만 확인하고 익절은 다음 봉부터 봐요. 손절·익절을 '선에 닿으면'으로 하면 직전 봉까지 끝난 선 값에 닿을 때 그 가격으로 계산하고(시가가 이미 넘었으면 시가), 익절선은 진입가보다 이익 쪽(롱이면 위)에 있을 때만 써요. 같은 봉에서 둘 다 닿으면 손절. '추가 청산 · 선 이탈'은 손절·익절과 함께 걸려요: 산 뒤 종가가 그 선 위에 한 번 있었다가 아래로 마감하면 다음 봉 시가에 팔아요(예: 청산선 = MA 20 · 5분봉 → 5분봉 20선 이탈 청산). 손절선·익절선·청산선은 선 1~4 와 따로 종류·기간·봉을 골라요 (예: 손절선 = VWMA 100 · 15분봉). 차트에 점선(빨강 손절·초록 익절·회색 청산)으로 보여요. 그 선이 차트보다 큰 봉이면 그 큰 봉이 끝날 때의 종가로만 판단해요. 시각은 한국 시간.",
   cross:"빠른 선이 느린 선을 위로 넘으면 롱, 아래로 넘으면 청산(또는 숏). 교차는 봉이 끝났을 때 확인하고 다음 봉 시가에 사고판 것으로 계산해요. 같은 봉에서 손절·익절이 둘 다 닿으면 손절. 시각은 한국 시간."};
 const strats=document.getElementById("strats");
 [...strats.children].forEach(b=>b.onclick=()=>{strat=b.dataset.k;markStrat();load()});
@@ -221,6 +236,7 @@ chart=LightweightCharts.createChart(document.getElementById("chart"),{
 candle=chart.addCandlestickSeries({upColor:"#089981",downColor:"#e5484d",borderVisible:false,wickUpColor:"#089981",wickDownColor:"#e5484d"});
 COLORS.forEach(c=>lineSeries.push(chart.addLineSeries({color:c,lineWidth:2,priceLineVisible:false,lastValueVisible:false})));
 MTF.forEach(([k,n,c,w])=>mtfSeries[k]=chart.addLineSeries({color:c,lineWidth:w,priceLineVisible:false,lastValueVisible:false,crosshairMarkerVisible:false,title:n,autoscaleInfoProvider:()=>null}));
+Object.entries(RULE_STYLE).forEach(([k,[c]])=>ruleSeries[k]=chart.addLineSeries({color:c,lineWidth:2,lineStyle:2,priceLineVisible:false,lastValueVisible:false,crosshairMarkerVisible:false}));
 new ResizeObserver(()=>chart.applyOptions({width:document.getElementById("chart").clientWidth})).observe(document.getElementById("chart"));
 
 // 종목 목록
@@ -250,6 +266,7 @@ async function load(){
   try{const old=JSON.parse(localStorage.getItem("maweb")||"{}");old.mtf=mtfOn;localStorage.setItem("maweb",JSON.stringify(old))}catch(e){}
   const p=new URLSearchParams({...q,interval:tf,strat,mtf:mtfOn?"1":"0"});
   [1,2,3,4].forEach(i=>p.set("ma"+i,q["kind"+i]==="off"?"off":`${q["kind"+i]}:${q["len"+i]}`));
+  ["stop","tp","exit"].forEach(nm=>p.set(nm+"_ma",q[nm+"_kind"]==="off"?"off":`${q[nm+"_kind"]}:${q[nm+"_len"]}`));
   document.getElementById("status").textContent="불러오는 중…";
   document.getElementById("err").textContent="";
   try{
@@ -269,6 +286,8 @@ function draw(d){
   const mt=d.mtf&&d.mtf.lines;
   d.lines.forEach((l,i)=>lineSeries[i].setData(!mt&&l?toPts(l.values):[]));
   MTF.forEach(([k])=>mtfSeries[k].setData(mt&&mt[k]?toPts(mt[k]):[]));
+  const rl=d.rule_lines||{};
+  Object.keys(RULE_STYLE).forEach(k=>{const l=rl[k];ruleSeries[k].applyOptions({title:l?`${RULE_STYLE[k][1]} ${maName(l)}`:""});ruleSeries[k].setData(l?toPts(l.values):[])});
   if(d.mtf&&d.mtf.error)document.getElementById("err").textContent="봉별 VWMA 일부 못 받음: "+d.mtf.error;
   const s=d.sim, markers=[];
   if(s){

@@ -354,6 +354,12 @@ def pullback(bars: list[dict], line: list, trend_line: list | None = None, stop_
         open_info = {"dir": "long" if d > 0 else "short", "entry_time": pos["t"], "entry": pos["entry"],
                      "price": last, "ret_pct": (d * (last / pos["entry"] - 1) - fee) * 100,
                      "sl": stop_level(n) if stop_mode != "line" else None, "tp": tp_level(n)}
+    # 실거래 봇용: 지금 걸어 둘 진입 지정가 (진행 중인 봉 기준)
+    wait_orders = []
+    if pos is None and entry == "touch" and n >= 2:
+        for d in dirs:
+            if ok_setup(n - 2, d):
+                wait_orders.append({"dir": d, "price": line[n - 2] * (1 + d * entry_pct / 100)})
     pending = None
     if pend_close:
         pending = "다음 봉 시가에 청산 (" + ("청산선 이탈" if pend_reason == "exit" else "손절선 이탈") + ")"
@@ -367,7 +373,8 @@ def pullback(bars: list[dict], line: list, trend_line: list | None = None, stop_
             elif entry == "confirm" and d in armed:
                 waits.append(f"{'롱' if d > 0 else '숏'}: 눌림선 닿음, 종가가 선 {'위' if d > 0 else '아래'}로 마감하면 진입")
         pending = " / ".join(waits) or None
-    return {"trades": trades, "open": open_info, "pending": pending, "stats": stats(trades, leverage)}
+    return {"trades": trades, "open": open_info, "pending": pending, "stats": stats(trades, leverage),
+            "wait_orders": wait_orders}
 
 
 # ------------------------------------------------------------ 바이낸스 시세
@@ -605,6 +612,11 @@ def run(market: Market, q: dict) -> dict:
         shown = {"pb": True, "trend": trend in ("above", "both"), "stop": q.get("stop_mode") in ("line", "touch"), "tp": q.get("tp_mode") == "touch", "exit": exit_on}
         result["rule_lines"] = {k: {"kind": m[0], "n": m[1], "tf": t, "values": v}
                                 for k, (v, t, m) in rule_lines.items() if m and shown[k]}
+        if q.get("_live"):
+            # 실거래 봇이 보유 중 손절·익절·청산을 직접 계산하는 데 쓰는 선 값
+            result["live"] = {"stop": stop_v, "stop_ends": stop_e, "tp": tp_v,
+                              "exit": exit_v if exit_on else None, "exit_ends": exit_e if exit_on else None,
+                              "chart_sec": chart_sec}
         result["sim"] = pullback(
             bars, line, trend_line=trend_v, stop_line=stop_v,
             tp_line=tp_v, tp_mode=q.get("tp_mode", "pct"), stop_ends=stop_e,
@@ -709,6 +721,9 @@ def scan(market: Market, q: dict) -> dict:
 
 
 # ------------------------------------------------------------ 웹 서버
+LIVE_DIR = os.environ.get("MA_STATE_DIR", "state_ma")   # 실거래 봇(mabot)과 주고받는 폴더
+
+
 class Handler(BaseHTTPRequestHandler):
     market: Market
 
@@ -736,11 +751,44 @@ class Handler(BaseHTTPRequestHandler):
                 data = run(self.market, q)
             elif u.path == "/api/scan":
                 data = scan(self.market, q)
+            elif u.path == "/api/live/status":
+                from .mabot import read_status
+                data = read_status(LIVE_DIR)
+                data["local"] = self._local_only()
             else:
                 self._send(404, b"not found", "text/plain")
                 return
             self._send(200, json.dumps(data, ensure_ascii=False).encode(), "application/json; charset=utf-8")
         except Exception as exc:  # noqa: BLE001 화면에 오류 표시
+            self._send(400, json.dumps({"error": str(exc)}, ensure_ascii=False).encode(),
+                       "application/json; charset=utf-8")
+
+
+    def _local_only(self) -> bool:
+        """실거래 요청은 이 PC 에서 연 화면만 (폰·다른 기기·다른 사이트에서 온 요청은 막음)."""
+        host = self.client_address[0]
+        origin = self.headers.get("Origin", "")
+        ok_origin = not origin or origin.startswith(("http://localhost:", "http://127.0.0.1:"))
+        return host in ("127.0.0.1", "::1") and ok_origin
+
+    def do_POST(self):  # noqa: N802
+        from .mabot import write_request
+        u = urlparse(self.path)
+        try:
+            if u.path != "/api/live":
+                self._send(404, b"not found", "text/plain")
+                return
+            if not self._local_only():
+                raise PermissionError("실거래 버튼은 이 PC 에서 연 화면(localhost)에서만 돼요")
+            if "application/json" not in self.headers.get("Content-Type", ""):
+                raise ValueError("잘못된 요청")
+            n = int(self.headers.get("Content-Length", 0) or 0)
+            req = json.loads(self.rfile.read(min(n, 200_000)) or b"{}")
+            if req.get("cmd") not in ("start", "stop", "long", "short", "close"):
+                raise ValueError("모르는 요청")
+            write_request(LIVE_DIR, {k: req.get(k) for k in ("cmd", "q", "usdt", "lev", "pin", "symbol")})
+            self._send(200, json.dumps({"ok": True}).encode(), "application/json; charset=utf-8")
+        except Exception as exc:  # noqa: BLE001
             self._send(400, json.dumps({"error": str(exc)}, ensure_ascii=False).encode(),
                        "application/json; charset=utf-8")
 
@@ -764,10 +812,10 @@ class _Server(ThreadingHTTPServer):
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description="이평선 매매 웹 (바이낸스 시세, 주문 없음)")
+    ap = argparse.ArgumentParser(description="이평선 매매 웹 (바이낸스 시세·모의 매매, 실거래는 mabot 봇을 통해)")
     ap.add_argument("--port", type=int, default=8790)
     ap.add_argument("--no-open", action="store_true", help="브라우저 자동으로 안 열기")
-    ap.add_argument("--lan", action="store_true", help="같은 와이파이의 폰·태블릿에서도 열 수 있게 (주문 기능은 없음)")
+    ap.add_argument("--lan", action="store_true", help="같은 와이파이의 폰·태블릿에서도 열 수 있게 (실거래 버튼은 이 PC 화면에서만)")
     a = ap.parse_args()
     Handler.market = Market()
     url = f"http://localhost:{a.port}"

@@ -54,6 +54,14 @@ th{color:var(--mute);font-weight:600}
 .mini{flex:0 0 46px!important;background:var(--field);border:1px solid var(--line);border-radius:6px;cursor:pointer;font:inherit;font-size:12px}
 details{margin-top:10px;border-top:1px solid var(--line);padding-top:6px}summary{cursor:pointer;font-size:13px;color:var(--accent-text);font-weight:600}
 .hint{font-weight:400;font-size:11px}
+.badge{display:inline-block;font-size:11px;font-weight:700;padding:1px 7px;border-radius:9px;background:var(--field);border:1px solid var(--line);color:var(--mute);margin-left:4px}
+.badge.dry{background:#eef4ff;color:#2f5fb3;border-color:#c8d8f5}.badge.real{background:#fdecec;color:#c0262d;border-color:#f3c2c4}
+.lvrow{display:grid;grid-template-columns:1fr 80px 1fr;gap:8px}
+.lvbtns{display:flex;flex-wrap:wrap;gap:6px;margin-top:10px}.lvbtns button{flex:1 0 110px;padding:8px 0;border-radius:8px;border:1px solid var(--line);background:var(--field);cursor:pointer;font:inherit;font-weight:600}
+.lvbtns .b-go{background:var(--accent);border-color:var(--accent)}.lvbtns .b-long{color:#fff;background:var(--up);border-color:var(--up)}
+.lvbtns .b-short{color:#fff;background:var(--down);border-color:var(--down)}.lvbtns .b-close{border-color:var(--down);color:var(--down)}
+.lvbtns button:disabled{opacity:.45;cursor:not-allowed}
+.lvinfo{margin-top:10px;font-size:13px}.lvmsgs{margin-top:6px;font-size:12px;color:var(--mute);max-height:110px;overflow:auto}
 </style>
 </head>
 <body>
@@ -182,6 +190,23 @@ details{margin-top:10px;border-top:1px solid var(--line);padding-top:6px}summary
       </div>
       <div class="tbl" style="margin-top:8px;max-height:260px"><table id="sc_table"></table></div>
     </div>
+    <div class="panel" id="livebox" style="margin-top:12px">
+      <h2>실거래 <span id="lv_mode" class="badge">봇 꺼짐</span> <span id="lv_alive" class="hint"></span></h2>
+      <div class="lvrow">
+        <div><label>투입금 (USDT, 증거금)</label><input id="lv_usdt" type="number" value="20" min="1" step="1"></div>
+        <div><label>배율</label><input id="lv_lev" type="number" value="1" min="1" max="20" step="1"></div>
+        <div><label>PIN</label><input id="lv_pin" type="password" autocomplete="off" placeholder=".env.ma 의 MA_PIN"></div>
+      </div>
+      <div class="lvbtns">
+        <button id="lv_start" class="b-go">자동 매매 시작</button>
+        <button id="lv_stop">자동 멈춤</button>
+        <button id="lv_long" class="b-long">롱 시장가</button>
+        <button id="lv_short" class="b-short">숏 시장가</button>
+        <button id="lv_close" class="b-close">전부 청산</button>
+      </div>
+      <div id="lv_info" class="lvinfo"></div>
+      <div id="lv_msgs" class="lvmsgs"></div>
+    </div>
     <div class="panel" style="margin-top:12px"><div id="chart"></div></div>
     <div class="live" id="live"></div>
     <div class="cards" id="cards"></div>
@@ -193,7 +218,7 @@ const TF=[["1m","1분"],["5m","5분"],["15m","15분"],["1h","1시간"],["4h","4�
 const TF_SEC={"1m":60,"5m":300,"15m":900,"1h":3600,"4h":14400,"1d":86400};
 const COLORS=["#e0a100","#2f80ed","#9b51e0","#e05252"];
 const KST=9*3600;
-const REASON={cross:"교차",stop:"손절",take:"익절",line:"손절선",exit:"이탈",time:"시간"};
+const REASON={cross:"교차",stop:"손절",take:"익절",line:"손절선",exit:"이탈",time:"시간",manual:"수동",safety:"비상손절"};
 const DEF=[["ema",20],["sma",50],["vwma",100],["sma",200]];
 let tf="1h", chart, candle, lineSeries=[], timer=null, lastSignal=null;
 // 봉별 VWMA100 (작은 봉일수록 옅고 가늘게)
@@ -326,12 +351,10 @@ const fmtP=p=>p>=1000?p.toFixed(1):p>=10?p.toFixed(2):p.toFixed(4);
 const pct=v=>`<span class="${v>=0?"pos":"neg"}">${v>=0?"+":""}${v.toFixed(2)}%</span>`;
 const maName=l=>l?`${l.tf&&l.tf!==tf?TF.find(x=>x[0]===l.tf)[1]+" ":""}${({sma:"MA",ema:"EMA",vwma:"VWMA"})[l.kind]}${l.n}`:"-";
 
-async function load(){
+function buildParams(){
   const q={symbol:document.getElementById("symbol").value,interval:tf};
   FIELDS.forEach(f=>q[f]=document.getElementById(f).value);
-  try{const old=JSON.parse(localStorage.getItem("maweb")||"{}");localStorage.setItem("maweb",JSON.stringify({...old,...q,tf,strat}))}catch(e){}
   const mtfOn=document.getElementById("mtf").checked;
-  try{const old=JSON.parse(localStorage.getItem("maweb")||"{}");old.mtf=mtfOn;localStorage.setItem("maweb",JSON.stringify(old))}catch(e){}
   const p=new URLSearchParams({...q,interval:tf,strat,mtf:mtfOn?"1":"0"});
   [1,2,3,4].forEach(i=>p.set("ma"+i,q["kind"+i]==="off"?"off":`${q["kind"+i]}:${q["len"+i]}`));
   if(strat==="pullback"){
@@ -341,6 +364,11 @@ async function load(){
     p.set("tp_mode",tq==="touch"?"touch":"pct");p.set("tp",tq==="pct"?q.pb_tp:0);
     if(q.exit_sel!=="line")p.set("exit_ma","off");
   }
+  return {q,p,mtfOn};
+}
+async function load(){
+  const {q,p,mtfOn}=buildParams();
+  try{const old=JSON.parse(localStorage.getItem("maweb")||"{}");localStorage.setItem("maweb",JSON.stringify({...old,...q,tf,strat,mtf:mtfOn}))}catch(e){}
   document.getElementById("status").textContent="불러오는 중…";
   document.getElementById("err").textContent="";
   try{
@@ -491,6 +519,70 @@ function notify(msg){
   document.title="● "+msg;
   try{if("Notification"in window&&Notification.permission==="granted")new Notification("이평선 신호",{body:msg})}catch(e){}
 }
+
+// ---------------- 실거래 (주문은 mabot 봇이 냄. 이 화면은 요청만 보내고 키를 갖지 않음)
+const LV=id=>document.getElementById(id);
+try{const o=JSON.parse(localStorage.getItem("maweb_live")||"{}");if(o.usdt)LV("lv_usdt").value=o.usdt;if(o.lev)LV("lv_lev").value=o.lev}catch(e){}
+let liveSt={}, liveSent=0;
+function ruleText(){
+  const g=id=>document.getElementById(id), opt=id=>g(id).options[g(id).selectedIndex].text;
+  const line=nm=>`${opt(nm+"_kind")}${g(nm+"_len").value}${g(nm+"_tf").value?" "+opt(nm+"_tf"):""}`;
+  const st=g("stop_sel").value, tp=g("tp_sel").value;
+  return `진입 ${line("pb")} ${g("entry").value==="touch"?"닿으면 지정가":"종가 확인"}`+
+    ` · 손절 ${st==="none"?"없음":st==="pct"?"-"+g("pb_sl").value+"%":line("stop")+(st==="line"?" 마감 이탈":" 닿음")}`+
+    ` · 익절 ${tp==="none"?"없음":tp==="pct"?"+"+g("pb_tp").value+"%":line("tp")+" 닿음"}`+
+    `${g("exit_sel").value==="line"?" · 청산 "+line("exit")+" 이탈":""} · ${opt("side")}`;
+}
+async function sendLive(cmd,needPin){
+  const usdt=+LV("lv_usdt").value, lev=+LV("lv_lev").value;
+  try{localStorage.setItem("maweb_live",JSON.stringify({usdt,lev}))}catch(e){}
+  if(["start","long","short"].includes(cmd)&&strat!=="pullback"){alert("실거래는 '눌림 매매'만 돼요");return}
+  const {p}=buildParams();
+  const sym=document.getElementById("symbol").value, tfn=TF.find(x=>x[0]===tf)[1];
+  const real=!liveSt.dry, tag=real?"[실제 주문]":"[드라이런 · 가상 계좌]";
+  const what={start:`자동 매매를 시작할까요?\n${sym} · ${tfn}봉 · 투입 ${usdt} USDT x ${lev}배 (주문 금액 약 ${usdt*lev} USDT)\n${ruleText()}`,
+    stop:"자동 매매를 멈출까요? (새 진입만 멈추고, 들고 있는 포지션의 손절·익절은 계속 관리해요)",
+    long:`${sym} 롱 시장가로 살까요?\n투입 ${usdt} USDT x ${lev}배 (약 ${usdt*lev} USDT)\n손절·익절은 지금 화면 규칙으로 봇이 걸어요:\n${ruleText()}`,
+    short:`${sym} 숏 시장가로 팔까요?\n투입 ${usdt} USDT x ${lev}배 (약 ${usdt*lev} USDT)\n손절·익절은 지금 화면 규칙으로 봇이 걸어요:\n${ruleText()}`,
+    close:"포지션을 시장가로 전부 정리하고 걸린 주문을 모두 취소할까요?"}[cmd];
+  if(!confirm(`${tag}\n${what}`))return;
+  const pin=LV("lv_pin").value;
+  if(needPin&&real&&!pin){alert("실제 주문은 PIN 을 넣어 주세요 (.env.ma 의 MA_PIN)");return}
+  try{
+    const r=await fetch("/api/live",{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({cmd,q:Object.fromEntries(p),usdt,lev,pin,symbol:(liveSt.cfg||{}).symbol})});
+    const d=await r.json();if(d.error)throw new Error(d.error);
+    liveSent=Date.now();LV("lv_info").innerHTML="<b>요청 보냄</b> — 봇이 몇 초 안에 처리해요 (아래 기록 확인)";setTimeout(pollLive,1500);
+  }catch(e){alert("요청 실패: "+e.message)}
+}
+LV("lv_start").onclick=()=>sendLive("start",true);
+LV("lv_stop").onclick=()=>sendLive("stop",false);
+LV("lv_long").onclick=()=>sendLive("long",true);
+LV("lv_short").onclick=()=>sendLive("short",true);
+LV("lv_close").onclick=()=>sendLive("close",false);
+async function pollLive(){
+  let s;try{s=await (await fetch("/api/live/status")).json()}catch(e){return}
+  liveSt=s;
+  const badge=LV("lv_mode");
+  if(!s.alive){badge.className="badge";badge.textContent="봇 꺼짐";
+    LV("lv_alive").textContent="windows\\run_ma_bot.bat 로 봇을 켜야 주문돼요";}
+  else{badge.className="badge "+(s.dry?"dry":"real");badge.textContent=s.dry?"드라이런 (가상 계좌)":"실제 주문";
+    LV("lv_alive").textContent=`봇 켜짐 · 투입 상한 ${s.max_usdt} USDT · 배율 상한 ${s.max_lev} · 비상 손절 ${s.safety_stop?"-"+s.safety_stop+"%":"끔"}`+(s.equity!=null?` · 평가금액 ${s.equity.toFixed(2)} USDT`:"");}
+  const off=!s.alive||!s.local;
+  ["lv_start","lv_stop","lv_long","lv_short","lv_close"].forEach(id=>LV(id).disabled=off);
+  if(s.alive&&!s.local)LV("lv_alive").textContent+=" · 실거래 버튼은 이 PC 에서 연 화면에서만";
+  let h="";
+  if(s.cfg)h+=`<b>${s.enabled?"자동 매매 켜짐":"자동 매매 꺼짐"}</b> · ${s.cfg.symbol.replace("USDT","")} ${s.cfg.interval} · 투입 ${s.cfg.usdt} USDT x ${s.cfg.lev}배`;
+  if(s.pos)h+=`<br>보유 <b class="${s.pos.dir==="long"?"pos":"neg"}">${s.pos.dir==="long"?"롱":"숏"}</b> ${s.pos.qty} @ ${fmtP(s.pos.entry)} → ${fmtP(s.price)} ${pct(s.pos.ret_pct)} (${s.pos.pnl_usdt>=0?"+":""}${s.pos.pnl_usdt.toFixed(3)} USDT)`+
+    ` · 손절 ${s.exit&&s.exit.stop?fmtP(s.exit.stop)+(s.exit.safety?" (비상)":""):"-"} · 익절 ${s.exit&&s.exit.tp?fmtP(s.exit.tp):"-"}`;
+  else if(s.entry_orders&&s.entry_orders.length)h+="<br>진입 대기: "+s.entry_orders.map(o=>`${o.cid.includes("_L_")?"롱":"숏"} 지정가 ${fmtP(o.price)} (${o.qty}개)`).join(" · ");
+  else if(s.cfg)h+="<br>포지션 없음"+(s.pending?` · ${s.pending}`:"");
+  if(s.trades&&s.trades.length){const t=s.trades.slice(-3).reverse();
+    h+="<br>최근 정리: "+t.map(x=>`${x.time.slice(5,16)} ${x.dir==="long"?"롱":"숏"} ${REASON[x.reason]||x.reason} ${x.ret_pct>=0?"+":""}${x.ret_pct}%`).join(" · ");}
+  if(Date.now()-liveSent>4000)LV("lv_info").innerHTML=h;
+  LV("lv_msgs").innerHTML=(s.msgs||[]).slice().reverse().map(m=>`${fmtT(m.t).slice(3)} ${m.text}`).join("<br>");
+}
+pollLive();setInterval(pollLive,3000);
 </script>
 </body>
 </html>

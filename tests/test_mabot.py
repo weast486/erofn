@@ -1,0 +1,124 @@
+import json
+import tempfile
+import time
+import unittest
+from pathlib import Path
+
+from binancebot.mabot import MaBot, PaperExchange, Settings, read_status, write_request
+
+
+def mk_bars(closes, sec=300):
+    t0 = 1_700_000_000 - 1_700_000_000 % sec
+    return [{"t": t0 + i * sec, "o": c, "h": c + 0.2, "l": c - 0.2, "c": c, "v": 10.0, "q": 10.0 * c}
+            for i, c in enumerate(closes)]
+
+
+class FakeMarket:
+    def __init__(self, closes):
+        self.closes = closes
+
+    def bars(self, symbol, interval, count):
+        return mk_bars(self.closes)[-count:]
+
+
+FILTERS = {"tick": 0.01, "step": 0.001, "min_notional": 5.0}
+Q = {"strat": "pullback", "symbol": "TESTUSDT", "interval": "5m", "bars": "100", "pb_ma": "sma:3",
+     "trend_ma": "sma:3", "stop_ma": "sma:3", "tp_ma": "sma:3", "exit_ma": "off", "min_above": "3",
+     "entry": "touch", "entry_pct": "0", "stop_mode": "pct", "sl": "2", "tp_mode": "pct", "tp": "0",
+     "side": "long", "trend": "none", "max_hold": "0", "fee": "0.05", "lev": "1"}
+
+
+class MaBotTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.dir = self.tmp.name
+        self.price = 20.0
+        closes = [10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 20]  # 오르는 중 → 3선 위
+        self.market = FakeMarket(closes)
+        self.settings = Settings(dry_run=True, pin="", max_usdt=100, max_lev=5, state_dir=self.dir)
+
+        def make(symbol):
+            return PaperExchange(symbol, lambda: self.price, FILTERS, Path(self.dir) / "paper.json", 1000.0)
+        self.bot = MaBot(self.settings, market=self.market, make_exchange=make)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def start(self, **kw):
+        write_request(self.dir, {"cmd": "start", "q": Q, "usdt": 50, "lev": 2, "pin": "", **kw})
+
+    def test_limit_entry_stop_and_record(self):
+        self.start()
+        self.bot.step()
+        orders = self.bot.st["entry_orders"]
+        self.assertIn("1", orders)                       # 롱 진입 지정가 = 직전 끝난 봉의 3선 (18+19+20)/3 = 19
+        self.assertAlmostEqual(orders["1"]["price"], 19.0)
+        self.assertAlmostEqual(orders["1"]["qty"], round(100 / 19.0, 3), places=3)  # 50 USDT x 2배
+        self.price = 18.9                                  # 선에 닿음 → 체결
+        self.bot.step()
+        self.assertIsNotNone(self.bot.st["pos"])
+        self.assertAlmostEqual(self.bot.st["exit"]["stop"], round(18.9 * 0.98, 2))  # 지정가 19 보다 싼 18.9 에 체결
+        self.price = 18.0                                  # -2% 손절가 아래
+        self.bot.step()
+        self.assertIsNone(self.bot.st["pos"])
+        self.assertEqual(self.bot.st["trades"][-1]["reason"], "stop")
+        self.assertTrue((Path(self.dir) / "trades.csv").exists())
+        st = read_status(self.dir)
+        self.assertTrue(st["alive"])
+        self.assertEqual(st["cfg"]["symbol"], "TESTUSDT")
+
+    def test_limits_and_pin(self):
+        self.start(usdt=500)                              # 상한 100 넘음
+        self.bot.step()
+        self.assertIsNone(self.bot.st["cfg"])
+        self.assertIn("상한", self.bot.st["msgs"][-1]["text"])
+        self.bot.cfg.pin = "1234"
+        self.start(pin="0000")
+        self.bot.step()
+        self.assertIsNone(self.bot.st["cfg"])
+        self.assertIn("PIN", self.bot.st["msgs"][-1]["text"])
+        self.start(pin="1234")
+        self.bot.step()
+        self.assertTrue(self.bot.st["enabled"])
+
+    def test_manual_long_then_close(self):
+        write_request(self.dir, {"cmd": "long", "q": Q, "usdt": 50, "lev": 1, "pin": ""})
+        self.bot.step()
+        self.bot.step()                                   # 다음 확인에서 보유로 인식, 손절 걸림
+        self.assertEqual(self.bot.st["pos"]["dir"], 1)
+        self.assertIsNotNone(self.bot.st["exit"]["stop"])
+        self.assertFalse(self.bot.st["enabled"])         # 수동 주문은 자동 매매를 켜지 않음
+        write_request(self.dir, {"cmd": "close"})
+        self.bot.step()
+        self.bot.step()
+        self.assertIsNone(self.bot.st["pos"])
+        self.assertEqual(self.bot.st["trades"][-1]["reason"], "manual")
+
+    def test_safety_stop_when_rule_has_none(self):
+        q = {**Q, "stop_mode": "pct", "sl": "0"}          # 규칙 손절 없음 → 비상 손절 -10%
+        write_request(self.dir, {"cmd": "long", "q": q, "usdt": 50, "lev": 1, "pin": ""})
+        self.bot.step()
+        self.bot.step()
+        ex = self.bot.st["exit"]
+        self.assertTrue(ex["safety"])
+        entry = self.bot.st["pos"]["entry"]
+        self.assertAlmostEqual(ex["stop"], round(entry * 0.9, 2))
+        self.price = entry * 0.85
+        self.bot.step()
+        self.assertEqual(self.bot.st["trades"][-1]["reason"], "safety")
+
+    def test_old_request_ignored(self):
+        d = Path(self.dir) / "req"
+        (d / "0_old.json").write_text(json.dumps({"cmd": "long", "q": Q, "usdt": 50, "lev": 1,
+                                                  "time": time.time() - 3600}), encoding="utf-8")
+        self.bot.step()
+        self.assertIsNone(self.bot.st["cfg"])
+
+    def test_cross_not_allowed(self):
+        self.start(q={**Q, "strat": "cross"})
+        self.bot.step()
+        self.assertIsNone(self.bot.st["cfg"])
+
+
+if __name__ == "__main__":
+    unittest.main()

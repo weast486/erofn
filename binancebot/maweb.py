@@ -98,7 +98,7 @@ def backtest(bars: list[dict], fast: list, slow: list, side: str = "long", stop_
         ret = d * (price / pos["entry"] - 1) - 2 * fee
         trades.append({"dir": "long" if d > 0 else "short", "entry_time": pos["t"], "entry": pos["entry"],
                        "exit_time": bars[i]["t"], "exit": price, "reason": reason,
-                       "ret_pct": ret * 100, "bars": i - pos["i"]})
+                       "ret_pct": ret * 100, "bars": i - pos["i"] + 1})
         pos = None
 
     def open_pos(i: int, d: int) -> None:
@@ -236,7 +236,7 @@ def pullback(bars: list[dict], line: list, trend_line: list | None = None, stop_
         d = pos["dir"]
         trades.append({"dir": "long" if d > 0 else "short", "entry_time": pos["t"], "entry": pos["entry"],
                        "exit_time": bars[i]["t"], "exit": price, "reason": reason,
-                       "ret_pct": (d * (price / pos["entry"] - 1) - 2 * fee) * 100, "bars": i - pos["i"]})
+                       "ret_pct": (d * (price / pos["entry"] - 1) - 2 * fee) * 100, "bars": i - pos["i"] + 1})
         pos = None
 
     def open_pos(i: int, d: int, price: float) -> None:
@@ -527,7 +527,7 @@ def run(market: Market, q: dict) -> dict:
     # 손절·익절·추가 청산 선은 따로 고를 수 있음 (stop_ma=vwma:100 + stop_tf=15m). 없으면 선 1~4 번호(stop_line 등)
     rule_defs = {}
     if q.get("strat") == "pullback":
-        for name in ("stop", "tp", "exit"):
+        for name in ("pb", "trend", "stop", "tp", "exit"):
             if q.get(f"{name}_ma"):
                 rule_defs[name] = (parse_ma(q[f"{name}_ma"]), q.get(f"{name}_tf", "") or interval)
     for t in line_tfs + [t for _, t in rule_defs.values()]:
@@ -554,7 +554,7 @@ def run(market: Market, q: dict) -> dict:
     lines = [make(m, t) for m, t in zip(mas, line_tfs)]
     rule_lines = {name: (make(m, t), t, m) for name, (m, t) in rule_defs.items()}
     small = [f"선 {i + 1}" for i, (m, t) in enumerate(zip(mas, line_tfs)) if m and INTERVALS[t] < chart_sec]
-    small += [{"stop": "손절선", "tp": "익절선", "exit": "청산선"}[k] for k, (v, t, m) in rule_lines.items()
+    small += [{"pb": "진입선", "trend": "추세선", "stop": "손절선", "tp": "익절선", "exit": "청산선"}[k] for k, (v, t, m) in rule_lines.items()
               if m and INTERVALS[t] < chart_sec]
     fast_i, slow_i = int(q.get("fast", 1)) - 1, int(q.get("slow", 2)) - 1
     result = {"symbol": symbol, "interval": interval, "bars": bars, "strat": q.get("strat", "cross"),
@@ -565,8 +565,6 @@ def run(market: Market, q: dict) -> dict:
                           "모의 매매가 부정확해요 → 차트를 가장 작은 봉으로 두세요.")
     num = lambda k, dflt: float(q.get(k, dflt) or 0)  # noqa: E731
     if result["strat"] == "pullback":
-        pick = lambda k, dflt: lines[int(q.get(k, dflt)) - 1]  # noqa: E731
-
         def ends_tf(t):
             """그 선이 차트보다 큰 봉이면 큰 봉이 끝나는 차트 봉만 True."""
             if INTERVALS[t] <= chart_sec:
@@ -584,6 +582,8 @@ def run(market: Market, q: dict) -> dict:
             return lines[int(idx) - 1], ends_tf(line_tfs[int(idx) - 1]), True
 
         stop_v, stop_e, _ = rule("stop", "stop_line", q.get("pb_line", 1))
+        if "pb" in rule_lines and "stop" not in rule_lines and not q.get("stop_line"):
+            stop_v, stop_e = rule("pb", "pb_line", 1)[:2]
         tp_v, _, _ = rule("tp", "tp_line", 3)
         exit_v, exit_e, exit_on = rule("exit", "exit_line", "0")
         entry_pct = num("entry_pct", 0)
@@ -591,7 +591,8 @@ def run(market: Market, q: dict) -> dict:
             raise ValueError("미리 사는 % 는 0(끔) 또는 0.1~1 사이로 넣어 주세요")
         if exit_on and exit_v is None:
             raise ValueError("청산선이 꺼져 있어요")
-        line = pick("pb_line", 1)
+        line, _, _ = rule("pb", "pb_line", 1)
+        trend_v, _, _ = rule("trend", "trend_line", 2)
         trend = q.get("trend", "none")
         if line is None:
             raise ValueError("눌림선으로 고른 이평선이 꺼져 있어요")
@@ -599,13 +600,13 @@ def run(market: Market, q: dict) -> dict:
             raise ValueError("손절선이 꺼져 있어요")
         if q.get("tp_mode") == "touch" and tp_v is None:
             raise ValueError("익절선이 꺼져 있어요")
-        if trend in ("above", "both") and pick("trend_line", 2) is None:
+        if trend in ("above", "both") and trend_v is None:
             raise ValueError("추세선으로 고른 이평선이 꺼져 있어요")
-        shown = {"stop": q.get("stop_mode") in ("line", "touch"), "tp": q.get("tp_mode") == "touch", "exit": exit_on}
+        shown = {"pb": True, "trend": trend in ("above", "both"), "stop": q.get("stop_mode") in ("line", "touch"), "tp": q.get("tp_mode") == "touch", "exit": exit_on}
         result["rule_lines"] = {k: {"kind": m[0], "n": m[1], "tf": t, "values": v}
                                 for k, (v, t, m) in rule_lines.items() if m and shown[k]}
         result["sim"] = pullback(
-            bars, line, trend_line=pick("trend_line", 2), stop_line=stop_v,
+            bars, line, trend_line=trend_v, stop_line=stop_v,
             tp_line=tp_v, tp_mode=q.get("tp_mode", "pct"), stop_ends=stop_e,
             exit_line=exit_v if exit_on else None, exit_pct=num("exit_pct", 0),
             exit_ends=exit_e if exit_on else None, entry_pct=entry_pct,

@@ -308,3 +308,19 @@ class ScanTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TrustedClientTest(unittest.TestCase):
+    def test_trusted(self):
+        from binancebot.maweb import trusted_client
+        self.assertTrue(trusted_client("127.0.0.1", "", "localhost:8790"))
+        self.assertTrue(trusted_client("127.0.0.1", "http://localhost:8790", "localhost:8790"))
+        self.assertFalse(trusted_client("127.0.0.1", "https://evil.example", "localhost:8790"))
+        # Tailscale 폰에서 이 서버를 직접 연 화면
+        self.assertTrue(trusted_client("100.74.132.1", "http://100.69.23.13:8790", "100.69.23.13:8790"))
+        self.assertTrue(trusted_client("100.74.132.1", "", "100.69.23.13:8790"))
+        # Tailscale 기기라도 다른 사이트에서 보낸 요청은 막음
+        self.assertFalse(trusted_client("100.74.132.1", "https://evil.example", "100.69.23.13:8790"))
+        # 같은 와이파이(사설망) 기기는 막음
+        self.assertFalse(trusted_client("192.168.0.5", "http://192.168.0.3:8790", "192.168.0.3:8790"))
+        self.assertFalse(trusted_client("100.128.0.1", "", "x"))   # 100.64.0.0/10 밖

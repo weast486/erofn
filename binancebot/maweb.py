@@ -755,7 +755,34 @@ def scan(market: Market, q: dict) -> dict:
 
 
 # ------------------------------------------------------------ 웹 서버
-LIVE_DIR = os.environ.get("MA_STATE_DIR", "state_ma")   # 실거래 봇(mabot)과 주고받는 폴더
+LIVE_DIR = os.environ.get("MA_STATE_DIR", "state_ma")
+
+
+def _tailscale(ip: str) -> bool:
+    """Tailscale 주소 (100.64.0.0/10, fd7a:115c:a1e0::/48) — 내 계정 기기끼리만 통하는 사설망."""
+    import ipaddress
+    try:
+        a = ipaddress.ip_address(ip.split("%")[0])
+    except ValueError:
+        return False
+    if a.version == 6 and a.ipv4_mapped:
+        a = a.ipv4_mapped
+    net = ipaddress.ip_network("100.64.0.0/10") if a.version == 4 else ipaddress.ip_network("fd7a:115c:a1e0::/48")
+    return a in net
+
+
+def trusted_client(client_ip: str, origin: str, host: str) -> bool:
+    """실거래 요청을 받아도 되는 화면인지: 이 PC(localhost) 또는 Tailscale 기기에서 이 서버를 직접 연 화면."""
+    from urllib.parse import urlparse
+    if client_ip in ("127.0.0.1", "::1", "::ffff:127.0.0.1"):
+        return not origin or origin.startswith(("http://localhost:", "http://127.0.0.1:"))
+    if not _tailscale(client_ip):
+        return False
+    if not origin:
+        return True
+    o = urlparse(origin)
+    # 다른 사이트가 몰래 보내는 요청을 막으려고, 이 서버(같은 Tailscale 주소·포트)에서 연 화면만
+    return o.scheme == "http" and _tailscale(o.hostname or "") and o.netloc == host   # 실거래 봇(mabot)과 주고받는 폴더
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -799,11 +826,9 @@ class Handler(BaseHTTPRequestHandler):
 
 
     def _local_only(self) -> bool:
-        """실거래 요청은 이 PC 에서 연 화면만 (폰·다른 기기·다른 사이트에서 온 요청은 막음)."""
-        host = self.client_address[0]
-        origin = self.headers.get("Origin", "")
-        ok_origin = not origin or origin.startswith(("http://localhost:", "http://127.0.0.1:"))
-        return host in ("127.0.0.1", "::1") and ok_origin
+        """실거래 요청은 이 PC 에서 연 화면 또는 Tailscale(내 기기끼리의 사설망)로 연 화면만.
+        같은 와이파이의 다른 기기·다른 사이트에서 온 요청은 막음 (주문은 봇 쪽에서 PIN 도 확인)."""
+        return trusted_client(self.client_address[0], self.headers.get("Origin", ""), self.headers.get("Host", ""))
 
     def do_POST(self):  # noqa: N802
         from .mabot import write_request
@@ -813,7 +838,7 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(404, b"not found", "text/plain")
                 return
             if not self._local_only():
-                raise PermissionError("실거래 버튼은 이 PC 에서 연 화면(localhost)에서만 돼요")
+                raise PermissionError("실거래 버튼은 이 PC(localhost) 또는 Tailscale 로 연 화면에서만 돼요")
             if "application/json" not in self.headers.get("Content-Type", ""):
                 raise ValueError("잘못된 요청")
             n = int(self.headers.get("Content-Length", 0) or 0)

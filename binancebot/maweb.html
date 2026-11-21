@@ -603,7 +603,7 @@ async function pollLive(){
     LV("lv_alive").textContent=`봇 켜짐 · 투입 상한 ${s.max_usdt} USDT · 배율 상한 ${s.max_lev} · 비상 손절 ${s.safety_stop?"-"+s.safety_stop+"%":"끔"}`+(s.equity!=null?` · 평가금액 ${s.equity.toFixed(2)} USDT`:"");}
   const off=!s.alive||!s.local;
   ["lv_start","lv_stop","lv_long","lv_short","lv_close"].forEach(id=>LV(id).disabled=off);
-  if(s.alive&&!s.local)LV("lv_alive").textContent+=" · 실거래 버튼은 이 PC 에서 연 화면에서만";
+  if(s.alive&&!s.local)LV("lv_alive").textContent+=" · 실거래 버튼은 이 PC 또는 Tailscale 로 연 화면에서만";
   let h="";
   if(s.cfg)h+=`<b>${s.enabled?"자동 매매 켜짐":"자동 매매 꺼짐"}</b> · ${s.cfg.symbol.replace("USDT","")} ${s.cfg.interval} · 투입 ${s.cfg.usdt} USDT x ${s.cfg.lev}배`;
   if(s.pos)h+=`<br>보유 <b class="${s.pos.dir==="long"?"pos":"neg"}">${s.pos.dir==="long"?"롱":"숏"}</b> ${s.pos.qty} @ ${fmtP(s.pos.entry)} → ${fmtP(s.price)} ${pct(s.pos.ret_pct)} (${s.pos.pnl_usdt>=0?"+":""}${s.pos.pnl_usdt.toFixed(3)} USDT)`+

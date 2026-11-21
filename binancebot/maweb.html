@@ -46,8 +46,9 @@ th{color:var(--mute);font-weight:600}
 #sc_table tr.hit{cursor:pointer}#sc_table tr.hit:hover{background:var(--hover)}
 .in{color:var(--accent-text);font-weight:700}
 .live{background:var(--soft);border:1px solid var(--accent);border-radius:10px;padding:10px;margin-top:12px}
-.rl{display:grid;grid-template-columns:44px 78px 1fr 84px;gap:4px;align-items:center;margin-top:4px;font-size:12px;color:var(--mute)}
+.rl{display:flex;gap:4px;align-items:center;margin-top:4px;font-size:12px;color:var(--mute)}
 .rl select,.rl input{margin:0}
+.rl>span:first-child{flex:0 0 44px}.rl>select{flex:1 1 0;min-width:58px}.rl>select:last-child{flex:0 0 84px}.rl .cust{display:flex;gap:4px}.rl .cust select{width:64px}.rl .cust input{width:52px}
 .sec{border-top:1px solid var(--line);margin-top:10px;padding-top:6px}.sec>b{display:block;font-size:12px;margin-bottom:4px}
 .sec>select{margin-top:4px}
 .opt{display:grid;grid-template-columns:1fr 90px;gap:6px;align-items:center;margin-top:4px;font-size:12px;color:var(--mute)}
@@ -253,15 +254,28 @@ DEF.forEach(([k,n],i)=>{
   mas.appendChild(d);document.getElementById("kind"+(i+1)).value=k;
 });
 // 손절·익절·청산선: 선 종류 · 기간 · 봉을 따로
+// 자주 쓰는 이평선 (사용자 요청 2026-11-21: 10·20·50·거래량가중 100·200)
+const PICKS=[["sma:10","MA 10"],["sma:20","MA 20"],["sma:50","MA 50"],["vwma:100","VWMA 100"],["sma:200","MA 200"],["custom","직접 입력"]];
+const PICKOPT=PICKS.map(([v,n])=>`<option value="${v}">${n}</option>`).join("");
+const RULES=["pb","trend","dfast","dslow","stop","tp","exit"];
 const KOPT=`<option value="sma">MA</option><option value="ema">EMA</option><option value="vwma">VWMA</option>`;
 const TFOPT=`<option value="">차트 봉</option>${TF.map(([k,nm])=>`<option value="${k}">${nm}봉</option>`).join("")}`;
 [["pb","vwma",100,""],["trend","sma",50,""],["dfast","sma",50,""],["dslow","vwma",100,""],["stop","vwma",100,"15m"],["tp","vwma",100,"1h"],["exit","sma",20,""]].forEach(([nm,k,n,t])=>{
   const box=document.getElementById("rl_"+nm);
-  box.insertAdjacentHTML("beforeend",`<select id="${nm}_kind">${KOPT}</select>
-  <input id="${nm}_len" type="number" min="1" max="1000" value="${n}">
+  box.insertAdjacentHTML("beforeend",`<select id="${nm}_pick" title="자주 쓰는 이평선">${PICKOPT}</select>
+  <span class="cust" id="${nm}_cust"><select id="${nm}_kind">${KOPT}</select>
+  <input id="${nm}_len" type="number" min="1" max="1000" value="${n}"></span>
   <select id="${nm}_tf" title="이 선을 계산할 봉">${TFOPT}</select>`);
   document.getElementById(nm+"_kind").value=k;document.getElementById(nm+"_tf").value=t;
+  document.getElementById(nm+"_pick").onchange=e=>{const v=e.target.value;
+    if(v!=="custom"){const [kk,nn]=v.split(":");document.getElementById(nm+"_kind").value=kk;document.getElementById(nm+"_len").value=nn}
+    e.target.dataset.forced=v==="custom"?"1":"";
+    document.getElementById(nm+"_cust").style.display=v==="custom"?"":"none";};
 });
+// 종류·기간이 자주 쓰는 선과 같으면 그 이름으로, 아니면 '직접 입력' (기간 칸 보임)
+function syncPicks(){RULES.forEach(nm=>{const v=`${document.getElementById(nm+"_kind").value}:${document.getElementById(nm+"_len").value}`;
+  const p=document.getElementById(nm+"_pick"), hit=PICKS.some(x=>x[0]===v)&&p.dataset.forced!=="1";
+  p.value=hit?v:"custom";document.getElementById(nm+"_cust").style.display=hit?"none":"";});}
 // 저장된 설정 되살리기
 const FIELDS=["bars","fast","slow","side","sl","tp","fee","lev","kind1","len1","kind2","len2","kind3","len3","kind4","len4","tf1","tf2","tf3","tf4",
   "pb_kind","pb_len","pb_tf","win_reset","dir_filter","dfast_kind","dfast_len","dfast_tf","dslow_kind","dslow_len","dslow_tf","min_above","trend","trend_kind","trend_len","trend_tf","entry","entry_pct",
@@ -299,6 +313,7 @@ document.getElementById("preset_del").onclick=()=>{const v=presetSel.value;
 // 고른 방법에 필요한 칸만 보이기
 function show(id,on){document.getElementById(id).style.display=on?"":"none"}
 function refreshForm(){
+  syncPicks();
   const st=document.getElementById("stop_sel").value, tp=document.getElementById("tp_sel").value;
   show("o_entry_pct",document.getElementById("entry").value==="touch");
   show("rl_stop",st==="touch"||st==="line");show("o_pb_sl",st!=="none");
@@ -309,6 +324,7 @@ function refreshForm(){
   show("rl_dfast",df);show("rl_dslow",df);show("o_dir_hint",df);
   show("rl_trend",["above","both"].includes(document.getElementById("trend").value));
 }
+RULES.forEach(nm=>["_kind","_len"].forEach(x=>document.getElementById(nm+x).addEventListener("change",syncPicks)));
 ["stop_sel","tp_sel","exit_sel","entry","trend","dir_filter"].forEach(id=>document.getElementById(id).addEventListener("change",refreshForm));
 // 손절 방법을 바꾸면 % 칸을 그 방법의 보통 값으로 (매수가 -% = 2, 선 = 여유 0)
 document.getElementById("stop_sel").addEventListener("change",e=>{document.getElementById("pb_sl").value=e.target.value==="pct"?2:0;refreshForm()});
@@ -370,11 +386,14 @@ function buildParams(){
   const p=new URLSearchParams({...q,interval:tf,strat,mtf:mtfOn?"1":"0"});
   [1,2,3,4].forEach(i=>p.set("ma"+i,q["kind"+i]==="off"?"off":`${q["kind"+i]}:${q["len"+i]}`));
   if(strat==="pullback"){
-    ["pb","trend","stop","tp","exit","dfast","dslow"].forEach(nm=>p.set(nm+"_ma",`${q[nm+"_kind"]}:${q[nm+"_len"]}`));
     const st=q.stop_sel, tq=q.tp_sel;
+    // 실제로 쓰는 선만 보냄 (안 쓰는 선 때문에 '차트보다 작은 봉' 경고가 뜨지 않게)
+    const used={pb:true,trend:["above","both"].includes(q.trend),dfast:q.dir_filter==="align",dslow:q.dir_filter==="align",
+      stop:st==="touch"||st==="line",tp:tq==="touch",exit:q.exit_sel==="line"};
+    Object.keys(used).forEach(nm=>{if(used[nm])p.set(nm+"_ma",`${q[nm+"_kind"]}:${q[nm+"_len"]}`);else{p.delete(nm+"_tf")}});
     p.set("stop_mode",st==="none"?"pct":st);p.set("sl",st==="none"?0:q.pb_sl);
     p.set("tp_mode",tq==="touch"?"touch":"pct");p.set("tp",tq==="pct"?q.pb_tp:0);
-    if(q.exit_sel!=="line")p.set("exit_ma","off");
+    if(!used.exit)p.set("exit_ma","off");
   }
   return {q,p,mtfOn};
 }

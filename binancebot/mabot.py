@@ -343,10 +343,15 @@ class MaBot:
             self.check_pin(req.get("pin", ""))
             self.st["cfg"] = self._new_cfg(req)
             self.st["enabled"] = True
+            # 1회 매매: 이 뒤에 새로 연 거래 하나가 정리되면 자동으로 멈춤
+            self.st["once"] = bool(req.get("once"))
+            self.st["once_since"] = int(self.now() * 1000)
             c = self.st["cfg"]
-            self.msg(f"자동 매매 시작: {c['symbol']} {c['interval']} · 투입 {c['usdt']:g} USDT x {c['lev']:g}배")
+            self.msg(f"{'1회 매매' if self.st['once'] else '자동 매매'} 시작: {c['symbol']} {c['interval']} · "
+                     f"투입 {c['usdt']:g} USDT x {c['lev']:g}배")
         elif cmd == "stop":
             self.st["enabled"] = False
+            self.st["once"] = False
             self._cancel_entries()
             self.msg("자동 매매 멈춤 (새 진입 안 함, 보유 중이면 손절·익절은 계속 관리)")
         elif cmd in ("long", "short"):
@@ -567,12 +572,15 @@ class MaBot:
                 w.writeheader()
             w.writerow(row)
         self.msg(f"정리됨 ({reason}) @ {px:.6g} · {ret:+.2f}% (배율 전) · {row['pnl_usdt']:+.4f} USDT")
+        if self.st.get("once") and pos.get("t_ms", 0) >= self.st.get("once_since", 0):
+            self.st["enabled"], self.st["once"] = False, False
+            self.msg("1회 매매 끝 — 자동 매매 멈춤 (다시 하려면 버튼을 다시 눌러 주세요)")
         self.st["pos"] = None
 
     def write_status(self, res: dict | None = None) -> None:
         c = self.st.get("cfg")
         pos = self.st.get("pos")
-        out = {"time": int(self.now()), "dry": self.cfg.dry_run, "enabled": self.st.get("enabled"),
+        out = {"time": int(self.now()), "dry": self.cfg.dry_run, "enabled": self.st.get("enabled"), "once": bool(self.st.get("once")),
                "max_usdt": self.cfg.max_usdt, "max_lev": self.cfg.max_lev, "safety_stop": self.cfg.safety_stop, "pin_set": bool(self.cfg.pin),
                "cfg": {k: c[k] for k in ("symbol", "interval", "usdt", "lev")} if c else None,
                "price": self.last_price, "msgs": self.st["msgs"][-15:], "trades": self.st["trades"][-20:],

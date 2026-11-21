@@ -845,7 +845,7 @@ class Handler(BaseHTTPRequestHandler):
             req = json.loads(self.rfile.read(min(n, 200_000)) or b"{}")
             if req.get("cmd") not in ("start", "stop", "long", "short", "close"):
                 raise ValueError("모르는 요청")
-            write_request(LIVE_DIR, {k: req.get(k) for k in ("cmd", "q", "usdt", "lev", "pin", "symbol")})
+            write_request(LIVE_DIR, {k: req.get(k) for k in ("cmd", "q", "usdt", "lev", "pin", "symbol", "once")})
             self._send(200, json.dumps({"ok": True}).encode(), "application/json; charset=utf-8")
         except Exception as exc:  # noqa: BLE001
             self._send(400, json.dumps({"error": str(exc)}, ensure_ascii=False).encode(),

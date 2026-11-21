@@ -27,7 +27,7 @@ select,input{width:100%;background:var(--field);color:var(--text);border:1px sol
 .dot{width:12px;height:12px;border-radius:50%}
 .go{margin-top:12px;width:100%;background:var(--accent);color:#111;border:0;border-radius:8px;padding:9px;font-weight:700;cursor:pointer;font:inherit;font-weight:700}
 .chk{display:flex;align-items:center;gap:6px;margin-top:10px;font-size:13px}.chk input{width:auto}
-#chart{height:520px}
+#chart{height:600px}
 .cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:8px;margin-top:12px}
 .card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:10px;box-shadow:0 1px 3px rgba(16,24,40,.06)}
 .card .k{color:var(--mute);font-size:12px}.card .v{font-size:18px;font-weight:700;margin-top:2px}
@@ -77,8 +77,14 @@ details{margin-top:10px;border-top:1px solid var(--line);padding-top:6px}summary
     <select id="symbol"><option>BTCUSDT</option><option>ETHUSDT</option></select>
     <h2 style="margin-top:14px">2. 차트 봉 <span class="hint">(가장 작은 선의 봉으로)</span></h2>
     <div class="tfs" id="tfs"></div>
+    <label class="chk"><input type="checkbox" id="rsi_on" checked> 차트 아래 RSI <input id="rsi_len" type="number" min="2" max="100" value="14" style="width:56px;margin:0 2px" title="RSI 기간"> (70·30 선)</label>
+    <label class="chk"><input type="checkbox" id="mtf" checked> 봉별 VWMA100 만 보기 (1분~일봉 6줄)</label>
+    <div id="mtf_legend" style="display:flex;flex-wrap:wrap;gap:4px 10px;font-size:12px;color:var(--mute);margin-top:4px"></div>
+    <div id="mas_box">
+      <div id="mas"></div>
+      <div style="font-size:12px;color:var(--mute);margin-top:4px">끄면 이 차트 봉의 이평선 4개를 그려요 (선마다 종류·기간을 바꿀 수 있어요).</div>
+    </div>
     <h2 style="margin-top:14px">3. 매매 규칙</h2>
-    <div class="tfs" id="strats"><button data-k="pullback">눌림 매매</button><button data-k="cross">교차 매매</button></div>
     <div id="p-pullback">
       <div class="row" style="margin-top:8px">
         <select id="preset" title="빠른 설정"></select>
@@ -127,16 +133,6 @@ details{margin-top:10px;border-top:1px solid var(--line);padding-top:6px}summary
         <div class="opt"><span title="산 봉 포함. 이 봉 수가 지나면 그 봉 종가에 정리">최대 보유 봉 수 (0 = 없음)</span><input id="max_hold" type="number" value="0" min="0"></div>
       </div>
     </div>
-    <div id="p-cross">
-      <div class="row">
-        <div><label>빠른 선</label><select id="fast"><option value="1">선 1</option><option value="2">선 2</option><option value="3">선 3</option><option value="4">선 4</option></select></div>
-        <div><label>느린 선</label><select id="slow"><option value="1">선 1</option><option value="2" selected>선 2</option><option value="3">선 3</option><option value="4">선 4</option></select></div>
-      </div>
-      <div class="row">
-        <div><label>손절 % (0=없음)</label><input id="sl" type="number" value="2" min="0" step="0.5"></div>
-        <div><label>익절 % (0=없음)</label><input id="tp" type="number" value="0" min="0" step="0.5"></div>
-      </div>
-    </div>
     <label>방향</label>
     <select id="side">
       <option value="long">롱만</option>
@@ -165,11 +161,6 @@ details{margin-top:10px;border-top:1px solid var(--line);padding-top:6px}summary
       </div>
       <label>불러올 봉 개수</label>
       <input id="bars" type="number" value="1000" min="100" max="5000" step="100">
-      <h2 style="margin-top:12px">차트 이평선</h2>
-      <label class="chk"><input type="checkbox" id="mtf" checked> 봉별 VWMA100 만 보기 (1분~일봉 6줄)</label>
-      <div id="mtf_legend" style="display:flex;flex-wrap:wrap;gap:4px 10px;font-size:12px;color:var(--mute);margin-top:4px"></div>
-      <div id="mas"></div>
-      <div style="font-size:12px;color:var(--mute);margin-top:4px">선 1~4 는 교차 매매에서만 쓰고 그때만 차트에 그려요. 눌림 매매는 위에서 고른 선만 써요.</div>
     </details>
     <button class="go" id="go">계산하기</button>
     <label class="chk"><input type="checkbox" id="auto"> 자동 새로고침 (봉에 맞춰)</label>
@@ -210,6 +201,7 @@ details{margin-top:10px;border-top:1px solid var(--line);padding-top:6px}summary
       </div>
       <div class="lvbtns">
         <button id="lv_start" class="b-go">자동 매매 시작</button>
+        <button id="lv_once" class="b-go" title="같은 규칙으로 한 번만: 진입해서 정리되면 저절로 멈춤">1회 매매</button>
         <button id="lv_stop">자동 멈춤</button>
         <button id="lv_long" class="b-long">롱 시장가</button>
         <button id="lv_short" class="b-short">숏 시장가</button>
@@ -230,7 +222,8 @@ const TF_SEC={"1m":60,"5m":300,"15m":900,"1h":3600,"4h":14400,"1d":86400};
 const COLORS=["#e0a100","#2f80ed","#9b51e0","#e05252"];
 const KST=9*3600;
 const REASON={cross:"교차",stop:"손절",take:"익절",line:"손절선",exit:"이탈",time:"시간",manual:"수동",safety:"비상손절"};
-const DEF=[["ema",20],["sma",50],["vwma",100],["sma",200]];
+// 차트 4선 (사용자 요청 2026-11-21: 20·50·거래량가중 100·200)
+const DEF=[["sma",20],["sma",50],["vwma",100],["sma",200]];
 let tf="1h", chart, candle, lineSeries=[], timer=null, lastSignal=null;
 // 봉별 VWMA100 (작은 봉일수록 옅고 가늘게)
 const MTF=[["1m","1분","#b0b7c3",1],["5m","5분","#e0a100",1],["15m","15분","#2f80ed",2],["1h","1시간","#9b51e0",2],["4h","4시간","#e05252",3],["1d","일봉","#111827",3]];
@@ -277,7 +270,7 @@ function syncPicks(){RULES.forEach(nm=>{const v=`${document.getElementById(nm+"_
   const p=document.getElementById(nm+"_pick"), hit=PICKS.some(x=>x[0]===v)&&p.dataset.forced!=="1";
   p.value=hit?v:"custom";document.getElementById(nm+"_cust").style.display=hit?"none":"";});}
 // 저장된 설정 되살리기
-const FIELDS=["bars","fast","slow","side","sl","tp","fee","lev","kind1","len1","kind2","len2","kind3","len3","kind4","len4","tf1","tf2","tf3","tf4",
+const FIELDS=["bars","side","fee","lev","kind1","len1","kind2","len2","kind3","len3","kind4","len4","tf1","tf2","tf3","tf4",
   "pb_kind","pb_len","pb_tf","win_reset","dir_filter","dfast_kind","dfast_len","dfast_tf","dslow_kind","dslow_len","dslow_tf","min_above","trend","trend_kind","trend_len","trend_tf","entry","entry_pct",
   "stop_sel","stop_kind","stop_len","stop_tf","pb_sl","tp_sel","tp_kind","tp_len","tp_tf","pb_tp","exit_sel","exit_kind","exit_len","exit_tf","exit_pct","max_hold"];
 // 빠른 설정 (차트 봉 + 눌림 매매 칸). 내 설정은 이 브라우저에 저장
@@ -328,25 +321,21 @@ RULES.forEach(nm=>["_kind","_len"].forEach(x=>document.getElementById(nm+x).addE
 ["stop_sel","tp_sel","exit_sel","entry","trend","dir_filter"].forEach(id=>document.getElementById(id).addEventListener("change",refreshForm));
 // 손절 방법을 바꾸면 % 칸을 그 방법의 보통 값으로 (매수가 -% = 2, 선 = 여유 0)
 document.getElementById("stop_sel").addEventListener("change",e=>{document.getElementById("pb_sl").value=e.target.value==="pct"?2:0;refreshForm()});
-FIELDS.forEach(f=>{if(saved[f]!==undefined)document.getElementById(f).value=saved[f]});
+// 예전에 저장된 선 1~4(EMA20 등)는 한 번만 새 기본 4선으로 바꿈
+FIELDS.forEach(f=>{if(saved[f]!==undefined&&(saved.mas_v2||!/^(kind|len|tf)[1-4]$/.test(f)))document.getElementById(f).value=saved[f]});
 refreshForm();
 if(saved.mtf!==undefined)document.getElementById("mtf").checked=saved.mtf;
 document.getElementById("mtf_legend").innerHTML=MTF.map(([k,n,c])=>`<span><span style="display:inline-block;width:14px;height:3px;background:${c};vertical-align:middle;margin-right:3px"></span>${n}</span>`).join("");
-document.getElementById("mtf").onchange=()=>load();
+function markMtf(){const on=document.getElementById("mtf").checked;
+  document.getElementById("mas_box").style.display=on?"none":"";document.getElementById("mtf_legend").style.display=on?"flex":"none";}
+document.getElementById("mtf").onchange=()=>{markMtf();load()};
+markMtf();
 if(saved.tf)tf=saved.tf;markTf();
-// 매매 방식 (눌림 / 교차)
-let strat=saved.strat||"pullback";
+// 매매 방식: 눌림 매매
+const strat="pullback";   // 교차 매매는 2026-11-21 사용자 요청으로 화면에서 뺌 (눌림 매매만)
 const NOTES={
-  pullback:"롱: 직전 N봉(더 자세히)의 종가가 모두 진입선 위에 있다가 가격이 진입선까지 내려오면 삼 (지정가 = 직전 봉까지 끝난 선 값). 숏은 반대. 선마다 종류·기간·봉을 그 자리에서 골라요 — 차트 봉은 그중 가장 작은 봉으로 두세요. 차트에 진입선(굵은 노랑)·손절(빨강 점선)·익절(초록 점선)·청산(회색 점선)이 보여요. 산 봉에서는 손절만 확인하고 익절은 다음 봉부터 봐요. 같은 봉에서 둘 다 닿으면 손절. 추가 청산은 손절·익절과 함께 걸려요: 산 뒤 종가가 그 선 위에 한 번 있었다가 아래로 마감하면 다음 봉 시가에 팔아요. 선이 차트보다 큰 봉이면 그 큰 봉이 끝날 때의 종가로만 판단해요. 자주 쓰는 설정은 위 '빠른 설정'에서 고르거나 '저장'으로 남겨 두세요. 시각은 한국 시간.",
-  cross:"빠른 선이 느린 선을 위로 넘으면 롱, 아래로 넘으면 청산(또는 숏). 교차는 봉이 끝났을 때 확인하고 다음 봉 시가에 사고판 것으로 계산해요. 같은 봉에서 손절·익절이 둘 다 닿으면 손절. 시각은 한국 시간."};
-const strats=document.getElementById("strats");
-[...strats.children].forEach(b=>b.onclick=()=>{strat=b.dataset.k;markStrat();load()});
-function markStrat(){[...strats.children].forEach(b=>b.classList.toggle("on",b.dataset.k===strat));
-  document.getElementById("p-cross").style.display=strat==="cross"?"":"none";
-  document.getElementById("p-pullback").style.display=strat==="pullback"?"":"none";
-  document.querySelector(".p-pb-only").style.display=strat==="pullback"?"":"none";
-  document.getElementById("note").textContent=NOTES[strat];}
-markStrat();
+  pullback:"롱: 직전 N봉(더 자세히)의 종가가 모두 진입선 위에 있다가 가격이 진입선까지 내려오면 삼 (지정가 = 직전 봉까지 끝난 선 값). 숏은 반대. 선마다 종류·기간·봉을 그 자리에서 골라요 — 차트 봉은 그중 가장 작은 봉으로 두세요. 차트에 진입선(굵은 노랑)·손절(빨강 점선)·익절(초록 점선)·청산(회색 점선)이 보여요. 산 봉에서는 손절만 확인하고 익절은 다음 봉부터 봐요. 같은 봉에서 둘 다 닿으면 손절. 추가 청산은 손절·익절과 함께 걸려요: 산 뒤 종가가 그 선 위에 한 번 있었다가 아래로 마감하면 다음 봉 시가에 팔아요. 선이 차트보다 큰 봉이면 그 큰 봉이 끝날 때의 종가로만 판단해요. 자주 쓰는 설정은 위 '빠른 설정'에서 고르거나 '저장'으로 남겨 두세요. 시각은 한국 시간."};
+document.getElementById("note").textContent=NOTES.pullback;
 
 // 차트
 chart=LightweightCharts.createChart(document.getElementById("chart"),{
@@ -358,6 +347,37 @@ candle=chart.addCandlestickSeries({upColor:"#089981",downColor:"#e5484d",borderV
 COLORS.forEach(c=>lineSeries.push(chart.addLineSeries({color:c,lineWidth:2,priceLineVisible:false,lastValueVisible:false})));
 MTF.forEach(([k,n,c,w])=>mtfSeries[k]=chart.addLineSeries({color:c,lineWidth:w,priceLineVisible:false,lastValueVisible:false,crosshairMarkerVisible:false,title:n,autoscaleInfoProvider:()=>null}));
 Object.entries(RULE_STYLE).forEach(([k,[c,,st]])=>ruleSeries[k]=chart.addLineSeries({color:c,lineWidth:k==="pb"?3:2,lineStyle:st,priceLineVisible:false,lastValueVisible:false,crosshairMarkerVisible:false}));
+// RSI (2026-11-21 사용자 요청): 차트 아래쪽 칸, 와일더 방식, 진행 중인 봉 포함
+// 과매수(70 위) 빨강·과매도(30 아래) 파랑 채우기 (2026-11-21 사용자 요청)
+const RSI_AUTO=()=>({priceRange:{minValue:0,maxValue:100}});
+const rsiHi=chart.addBaselineSeries({priceScaleId:"rsi",baseValue:{type:"price",price:70},topFillColor1:"rgba(229,72,77,.45)",topFillColor2:"rgba(229,72,77,.45)",
+  topLineColor:"rgba(0,0,0,0)",bottomFillColor1:"rgba(0,0,0,0)",bottomFillColor2:"rgba(0,0,0,0)",bottomLineColor:"rgba(0,0,0,0)",
+  lineWidth:1,priceLineVisible:false,lastValueVisible:false,crosshairMarkerVisible:false,autoscaleInfoProvider:RSI_AUTO});
+const rsiLo=chart.addBaselineSeries({priceScaleId:"rsi",baseValue:{type:"price",price:30},bottomFillColor1:"rgba(37,99,235,.45)",bottomFillColor2:"rgba(37,99,235,.45)",
+  bottomLineColor:"rgba(0,0,0,0)",topFillColor1:"rgba(0,0,0,0)",topFillColor2:"rgba(0,0,0,0)",topLineColor:"rgba(0,0,0,0)",
+  lineWidth:1,priceLineVisible:false,lastValueVisible:false,crosshairMarkerVisible:false,autoscaleInfoProvider:RSI_AUTO});
+const rsiSeries=chart.addLineSeries({color:"#7c3aed",lineWidth:2,priceScaleId:"rsi",priceLineVisible:false,lastValueVisible:true,title:"RSI",
+  autoscaleInfoProvider:()=>({priceRange:{minValue:0,maxValue:100}})});
+chart.priceScale("rsi").applyOptions({scaleMargins:{top:0.78,bottom:0.02},borderColor:"#e3e7ee"});
+[[70,"#e5484d"],[30,"#089981"],[50,"#c7cdd6"]].forEach(([v,c])=>rsiSeries.createPriceLine({price:v,color:c,lineWidth:1,lineStyle:2,axisLabelVisible:false}));
+function calcRsi(cl,n){const out=new Array(cl.length).fill(null);if(cl.length<=n)return out;
+  let g=0,l=0;for(let i=1;i<=n;i++){const d=cl[i]-cl[i-1];if(d>0)g+=d;else l-=d}g/=n;l/=n;
+  out[n]=l===0?100:100-100/(1+g/l);
+  for(let i=n+1;i<cl.length;i++){const d=cl[i]-cl[i-1];g=(g*(n-1)+Math.max(d,0))/n;l=(l*(n-1)+Math.max(-d,0))/n;out[i]=l===0?100:100-100/(1+g/l)}
+  return out}
+try{const r=JSON.parse(localStorage.getItem("maweb_rsi")||"{}");if(r.on!==undefined)document.getElementById("rsi_on").checked=r.on;if(r.len)document.getElementById("rsi_len").value=r.len}catch(e){}
+let lastData=null;
+function drawRsi(){const d=lastData;if(!d)return;const on=document.getElementById("rsi_on").checked;
+  const n=Math.max(2,Math.min(100,parseInt(document.getElementById("rsi_len").value)||14));
+  try{localStorage.setItem("maweb_rsi",JSON.stringify({on,len:n}))}catch(e){}
+  chart.priceScale("right").applyOptions({scaleMargins:on?{top:0.05,bottom:0.26}:{top:0.1,bottom:0.1}});
+  rsiSeries.applyOptions({visible:on,title:`RSI ${n}`});
+  const v=calcRsi(d.bars.map(b=>b.c),n);
+  const pts=on?v.map((x,j)=>x==null?null:{time:d.bars[j].t+KST,value:x}).filter(Boolean):[];
+  rsiSeries.setData(pts);
+  rsiHi.setData(pts.map(p=>({time:p.time,value:Math.max(p.value,70)})));
+  rsiLo.setData(pts.map(p=>({time:p.time,value:Math.min(p.value,30)})));}
+["rsi_on","rsi_len"].forEach(id=>document.getElementById(id).addEventListener("change",drawRsi));
 new ResizeObserver(()=>chart.applyOptions({width:document.getElementById("chart").clientWidth})).observe(document.getElementById("chart"));
 
 // 종목 목록
@@ -399,7 +419,7 @@ function buildParams(){
 }
 async function load(){
   const {q,p,mtfOn}=buildParams();
-  try{const old=JSON.parse(localStorage.getItem("maweb")||"{}");localStorage.setItem("maweb",JSON.stringify({...old,...q,tf,strat,mtf:mtfOn}))}catch(e){}
+  try{const old=JSON.parse(localStorage.getItem("maweb")||"{}");localStorage.setItem("maweb",JSON.stringify({...old,...q,tf,strat,mtf:mtfOn,mas_v2:true}))}catch(e){}
   document.getElementById("status").textContent="불러오는 중…";
   document.getElementById("err").textContent="";
   try{
@@ -415,9 +435,10 @@ async function load(){
 function draw(d){
   const sh=t=>t+KST;
   candle.setData(d.bars.map(b=>({time:sh(b.t),open:b.o,high:b.h,low:b.l,close:b.c})));
+  lastData=d;drawRsi();
   const toPts=vals=>vals.map((v,j)=>v==null?null:{time:sh(d.bars[j].t),value:v}).filter(Boolean);
   const mt=d.mtf&&d.mtf.lines;
-  d.lines.forEach((l,i)=>lineSeries[i].setData(!mt&&d.strat==="cross"&&l?toPts(l.values):[]));
+  d.lines.forEach((l,i)=>lineSeries[i].setData(!mt&&l?toPts(l.values):[]));
   MTF.forEach(([k])=>mtfSeries[k].setData(mt&&mt[k]?toPts(mt[k]):[]));
   const rl=d.rule_lines||{};
   Object.keys(RULE_STYLE).forEach(k=>{const l=rl[k];ruleSeries[k].applyOptions({title:l?`${RULE_STYLE[k][1]} ${maName(l)}`:""});ruleSeries[k].setData(l?toPts(l.values):[])});
@@ -435,9 +456,8 @@ function draw(d){
 
   // 지금 상태
   const live=document.getElementById("live");
-  const fl=d.lines[document.getElementById("fast").value-1], sl=d.lines[document.getElementById("slow").value-1];
-  if(!s){live.innerHTML="빠른 선과 느린 선을 서로 다른 켜진 선으로 골라 주세요.";}
-  else if(d.strat==="pullback"){
+  if(!s){live.innerHTML="계산 결과가 없어요.";}
+  else{
     const pl=(d.rule_lines||{}).pb, k=d.bars.length-2, last=d.bars[d.bars.length-1].c;
     let txt=`<b>지금</b> · 가격 ${fmtP(last)} · 진입선 ${maName(pl)} ${fmtP(pl.values[k])} (가격이 선 ${last>=pl.values[k]?"위":"아래"} ${pct((last/pl.values[k]-1)*100)})`;
     if(s.open)txt+=` · 모의 보유: <b>${s.open.dir==="long"?"롱":"숏"}</b> ${fmtP(s.open.entry)} → ${fmtP(s.open.price)} ${pct(s.open.ret_pct)}`+
@@ -446,17 +466,6 @@ function draw(d){
     txt+=s.pending?` · <b style="color:var(--accent-text)">${s.pending}</b>`:" · 조건 안 맞음 (대기 없음)";
     if(s.pending){const key=d.symbol+tf+d.bars[d.bars.length-1].t+s.pending;
       if(lastSignal&&lastSignal!==key&&document.getElementById("auto").checked)notify(`${d.symbol} ${s.pending}`);lastSignal=key;}
-    live.innerHTML=txt;
-  }
-  else{
-    const k=d.bars.length-2, fv=fl.values[k], sv=sl.values[k];
-    let txt=`<b>지금</b> · 마지막으로 끝난 봉 기준 ${maName(fl)} ${fv!=null?fmtP(fv):"-"} ${fv>sv?"&gt;":"&lt;"} ${maName(sl)} ${sv!=null?fmtP(sv):"-"} (${fv>sv?"골든크로스 쪽":"데드크로스 쪽"})`;
-    if(s.open)txt+=` · 모의 보유: <b>${s.open.dir==="long"?"롱":"숏"}</b> ${fmtP(s.open.entry)} → ${fmtP(s.open.price)} ${pct(s.open.ret_pct)}`;
-    else txt+=" · 모의 보유 없음";
-    if(s.pending){txt+=` · <b style="color:var(--accent-text)">새 신호: 다음 봉 시가에 ${s.pending}</b>`;
-      const key=d.symbol+tf+d.bars[d.bars.length-1].t+s.pending;
-      if(lastSignal&&lastSignal!==key&&document.getElementById("auto").checked)notify(`${d.symbol} ${s.pending}`);
-      lastSignal=key;}
     live.innerHTML=txt;
   }
   // 요약
@@ -569,11 +578,14 @@ function ruleText(){
 async function sendLive(cmd,needPin){
   const usdt=+LV("lv_usdt").value, lev=+LV("lv_lev").value;
   try{localStorage.setItem("maweb_live",JSON.stringify({usdt,lev}))}catch(e){}
-  if(["start","long","short"].includes(cmd)&&strat!=="pullback"){alert("실거래는 '눌림 매매'만 돼요");return}
+  if(["start","once","long","short"].includes(cmd)&&strat!=="pullback"){alert("실거래는 '눌림 매매'만 돼요");return}
   const {p}=buildParams();
   const sym=document.getElementById("symbol").value, tfn=TF.find(x=>x[0]===tf)[1];
   const real=!liveSt.dry, tag=real?"[실제 주문]":"[드라이런 · 가상 계좌]";
   const what={start:`자동 매매를 시작할까요?\n${sym} · ${tfn}봉 · 투입 ${usdt} USDT x ${lev}배 (주문 금액 약 ${usdt*lev} USDT)\n${ruleText()}`,
+    once:`1회 매매를 시작할까요? (한 번 진입해서 정리되면 저절로 멈춰요)
+${sym} · ${tfn}봉 · 투입 ${usdt} USDT x ${lev}배 (주문 금액 약 ${usdt*lev} USDT)
+${ruleText()}`,
     stop:"자동 매매를 멈출까요? (새 진입만 멈추고, 들고 있는 포지션의 손절·익절은 계속 관리해요)",
     long:`${sym} 롱 시장가로 살까요?\n투입 ${usdt} USDT x ${lev}배 (약 ${usdt*lev} USDT)\n손절·익절은 지금 화면 규칙으로 봇이 걸어요:\n${ruleText()}`,
     short:`${sym} 숏 시장가로 팔까요?\n투입 ${usdt} USDT x ${lev}배 (약 ${usdt*lev} USDT)\n손절·익절은 지금 화면 규칙으로 봇이 걸어요:\n${ruleText()}`,
@@ -583,12 +595,13 @@ async function sendLive(cmd,needPin){
   if(needPin&&real&&!pin){alert("실제 주문은 PIN 을 넣어 주세요 (.env.ma 의 MA_PIN)");return}
   try{
     const r=await fetch("/api/live",{method:"POST",headers:{"Content-Type":"application/json"},
-      body:JSON.stringify({cmd,q:Object.fromEntries(p),usdt,lev,pin,symbol:(liveSt.cfg||{}).symbol})});
+      body:JSON.stringify({cmd:cmd==="once"?"start":cmd,once:cmd==="once",q:Object.fromEntries(p),usdt,lev,pin,symbol:(liveSt.cfg||{}).symbol})});
     const d=await r.json();if(d.error)throw new Error(d.error);
     liveSent=Date.now();LV("lv_info").innerHTML="<b>요청 보냄</b> — 봇이 몇 초 안에 처리해요 (아래 기록 확인)";setTimeout(pollLive,1500);
   }catch(e){alert("요청 실패: "+e.message)}
 }
 LV("lv_start").onclick=()=>sendLive("start",true);
+LV("lv_once").onclick=()=>sendLive("once",true);
 LV("lv_stop").onclick=()=>sendLive("stop",false);
 LV("lv_long").onclick=()=>sendLive("long",true);
 LV("lv_short").onclick=()=>sendLive("short",true);
@@ -602,10 +615,10 @@ async function pollLive(){
   else{badge.className="badge "+(s.dry?"dry":"real");badge.textContent=s.dry?"드라이런 (가상 계좌)":"실제 주문";
     LV("lv_alive").textContent=`봇 켜짐 · 투입 상한 ${s.max_usdt} USDT · 배율 상한 ${s.max_lev} · 비상 손절 ${s.safety_stop?"-"+s.safety_stop+"%":"끔"}`+(s.equity!=null?` · 평가금액 ${s.equity.toFixed(2)} USDT`:"");}
   const off=!s.alive||!s.local;
-  ["lv_start","lv_stop","lv_long","lv_short","lv_close"].forEach(id=>LV(id).disabled=off);
+  ["lv_start","lv_once","lv_stop","lv_long","lv_short","lv_close"].forEach(id=>LV(id).disabled=off);
   if(s.alive&&!s.local)LV("lv_alive").textContent+=" · 실거래 버튼은 이 PC 또는 Tailscale 로 연 화면에서만";
   let h="";
-  if(s.cfg)h+=`<b>${s.enabled?"자동 매매 켜짐":"자동 매매 꺼짐"}</b> · ${s.cfg.symbol.replace("USDT","")} ${s.cfg.interval} · 투입 ${s.cfg.usdt} USDT x ${s.cfg.lev}배`;
+  if(s.cfg)h+=`<b>${s.enabled?(s.once?"1회 매매 켜짐 (한 번 정리되면 멈춤)":"자동 매매 켜짐"):"자동 매매 꺼짐"}</b> · ${s.cfg.symbol.replace("USDT","")} ${s.cfg.interval} · 투입 ${s.cfg.usdt} USDT x ${s.cfg.lev}배`;
   if(s.pos)h+=`<br>보유 <b class="${s.pos.dir==="long"?"pos":"neg"}">${s.pos.dir==="long"?"롱":"숏"}</b> ${s.pos.qty} @ ${fmtP(s.pos.entry)} → ${fmtP(s.price)} ${pct(s.pos.ret_pct)} (${s.pos.pnl_usdt>=0?"+":""}${s.pos.pnl_usdt.toFixed(3)} USDT)`+
     ` · 손절 ${s.exit&&s.exit.stop?fmtP(s.exit.stop)+(s.exit.safety?" (비상)":""):"-"} · 익절 ${s.exit&&s.exit.tp?fmtP(s.exit.tp):"-"}`;
   else if(s.entry_orders&&s.entry_orders.length)h+="<br>진입 대기: "+s.entry_orders.map(o=>`${o.cid.includes("_L_")?"롱":"숏"} 지정가 ${fmtP(o.price)} (${o.qty}개)`).join(" · ");

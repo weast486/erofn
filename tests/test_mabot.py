@@ -67,6 +67,22 @@ class MaBotTest(unittest.TestCase):
         self.assertTrue(st["alive"])
         self.assertEqual(st["cfg"]["symbol"], "TESTUSDT")
 
+    def test_once_stops_after_one_trade(self):
+        self.start(once=True)
+        self.bot.step()
+        self.assertTrue(self.bot.st["once"])
+        self.price = 18.9                                  # 진입
+        self.bot.step()
+        self.assertIsNotNone(self.bot.st["pos"])
+        self.price = 18.0                                  # 손절로 정리 → 1회 끝, 멈춤
+        self.bot.step()
+        self.assertFalse(self.bot.st["enabled"])
+        self.assertFalse(self.bot.st["once"])
+        self.assertIn("1회 매매 끝", self.bot.st["msgs"][-1]["text"])
+        self.price = 20.0
+        self.bot.step()
+        self.assertEqual(self.bot.st["entry_orders"], {})  # 다시 진입 대기 안 함
+
     def test_limits_and_pin(self):
         self.start(usdt=500)                              # 상한 100 넘음
         self.bot.step()

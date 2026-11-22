@@ -123,6 +123,51 @@ class MaBotTest(unittest.TestCase):
         self.bot.step()
         self.assertEqual(self.bot.st["trades"][-1]["reason"], "safety")
 
+    def test_multi_lines_stop_on_entered_line(self):
+        # 진입선 MA6(17.5) + MA3(19): 먼저 닿는 MA3 에 지정가, 손절은 진입한 MA3 닿음 -2%
+        q = {**Q, "pb_ma": "sma:6", "pb2_ma": "sma:3", "stop_mode": "touch", "stop_ma": "same", "sl": "2"}
+        write_request(self.dir, {"cmd": "start", "q": q, "usdt": 50, "lev": 2, "pin": ""})
+        self.bot.step()
+        o = self.bot.st["entry_orders"]["1"]
+        self.assertAlmostEqual(o["price"], 19.0)
+        self.assertEqual(o["line"], 1)
+        self.price = 18.9
+        self.bot.step()
+        self.assertEqual(self.bot.st["pos"]["line"], 1)
+        self.assertAlmostEqual(self.bot.st["exit"]["stop"], round(19.0 * 0.98, 2))
+
+    def test_exchange_lev_only_changes_margin(self):
+        # 거래소 배율 5: 거래소에는 5배로 설정, 주문 크기는 그대로 투입금 x 화면 배율(50 x 2 = 100 USDT)
+        self.bot.cfg.exchange_lev = 5
+        self.start()
+        self.bot.step()
+        self.assertEqual(self.bot.st["lev_set"], "TESTUSDT:5")
+        self.assertAlmostEqual(self.bot.st["entry_orders"]["1"]["qty"], round(100 / 19.0, 3), places=3)
+
+    def test_symbol_change_cancels_old_entry_orders(self):
+        self.start()
+        self.bot.step()
+        old_ex = self.bot.ex
+        cid = self.bot.st["entry_orders"]["1"]["cid"]
+        self.bot.exchange("OTHERUSDT")
+        self.assertEqual(self.bot.st["entry_orders"], {})
+        self.assertNotIn(cid, [o.get("cid") for o in old_ex.s.get("orders", [])])
+
+    def test_start_ignores_sim_entry_before_start(self):
+        # 켜기 전 봉에서 모의 매매가 이미 들어갔어도(저가가 선에 닿은 봉), 켠 뒤에는 그걸 따라 기다리지 않고 바로 지정가
+        closes = [10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 20]
+        bars = mk_bars(closes)
+        bars[-2]["l"] = 17.9                               # 앞 봉에서 3선(18) 닿음 → 모의 매매 롱 진입
+        self.market.bars = lambda s, i, c: bars[-c:]
+        self.start()
+        self.bot.st["entry_from"] = bars[-1]["t"]          # 진행 중인 봉에서 켬
+        self.bot.step()
+        self.assertIn("1", self.bot.st["entry_orders"])
+        self.bot.st["entry_from"] = 0                      # 예전 방식이면 모의 포지션 때문에 주문 없음
+        self.bot.st["entry_orders"] = {}
+        self.bot.step()
+        self.assertEqual(self.bot.st["entry_orders"], {})
+
     def test_old_request_ignored(self):
         d = Path(self.dir) / "req"
         (d / "0_old.json").write_text(json.dumps({"cmd": "long", "q": Q, "usdt": 50, "lev": 1,

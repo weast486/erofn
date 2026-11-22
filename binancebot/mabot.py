@@ -52,6 +52,9 @@ class Settings:
     max_lev: float = 5.0
     paper_equity: float = 1000.0
     safety_stop: float = 10.0   # 규칙 손절이 없을 때(선이 반대쪽 등) 거는 비상 손절 % (0 = 끔)
+    # 거래소 배율 (0 = 화면 배율과 같게). 크게 두면 주문 크기(투입금 x 화면 배율)는 그대로이고
+    # 거래소가 잡는 증거금만 줄어듦 (예: 50 USDT x 3배 = 150 USDT 주문, 거래소 5배면 증거금 30) — 대신 강제청산가가 가까워짐
+    exchange_lev: float = 0.0
     state_dir: str = "state_ma"
 
     @classmethod
@@ -61,7 +64,8 @@ class Settings:
                    dry_run=(e("MA_DRY_RUN", "true").strip().lower() not in ("false", "0", "no")),
                    pin=e("MA_PIN", ""), max_usdt=_f(e("MA_MAX_USDT"), 100.0), max_lev=_f(e("MA_MAX_LEV"), 5.0),
                    paper_equity=_f(e("MA_PAPER_EQUITY"), 1000.0),
-                   safety_stop=_f(e("MA_SAFETY_STOP"), 10.0), state_dir=e("MA_STATE_DIR", "state_ma"))
+                   safety_stop=_f(e("MA_SAFETY_STOP"), 10.0), state_dir=e("MA_STATE_DIR", "state_ma"),
+                   exchange_lev=_f(e("MA_EXCHANGE_LEV"), 0.0))
 
 
 # ------------------------------------------------------------ 거래소 (실제 / 가상)
@@ -267,6 +271,11 @@ class MaBot:
 
     def exchange(self, symbol: str):
         if self.ex is None or self.ex.sym != symbol:
+            if self.ex is not None and self.st.get("entry_orders"):
+                # 종목을 바꾸면 예전 종목에 걸어 둔 진입 지정가는 그 종목에서 취소 (안 그러면 기록만 지워지고 주문이 남음)
+                for o in self.st["entry_orders"].values():
+                    self.ex.cancel(o["cid"])
+                self.st["entry_orders"] = {}
             self.ex = self.make_exchange(symbol)
             self.st["lev_set"] = ""
         return self.ex
@@ -280,6 +289,7 @@ class MaBot:
         return qty
 
     def ensure_lev(self, lev: float) -> None:
+        lev = max(lev, min(self.cfg.exchange_lev, 20))   # 거래소 배율은 주문 배율 이상 (증거금만 줄어듦)
         key = f"{self.ex.sym}:{int(lev)}"
         if self.st.get("lev_set") != key:
             self.ex.setup(int(lev))
@@ -346,6 +356,8 @@ class MaBot:
             # 1회 매매: 이 뒤에 새로 연 거래 하나가 정리되면 자동으로 멈춤
             self.st["once"] = bool(req.get("once"))
             self.st["once_since"] = int(self.now() * 1000)
+            # 켠 시각부터 진입을 찾음 (그 전에 모의 매매가 이미 들어간 자리는 따라가지 않음)
+            self.st["entry_from"] = int(self.now())
             c = self.st["cfg"]
             self.msg(f"{'1회 매매' if self.st['once'] else '자동 매매'} 시작: {c['symbol']} {c['interval']} · "
                      f"투입 {c['usdt']:g} USDT x {c['lev']:g}배")
@@ -407,7 +419,8 @@ class MaBot:
         price = ex.price()
         self.last_price = price
         qty, entry = ex.position()
-        res = run(self.market, {**c["q"], "symbol": c["symbol"], "interval": c["interval"], "_live": "1"})
+        res = run(self.market, {**c["q"], "symbol": c["symbol"], "interval": c["interval"], "_live": "1",
+                                "_entry_from": str(self.st.get("entry_from", 0))})
         bars = res["bars"]
         if qty == 0:
             self.flat(res, price)
@@ -437,7 +450,9 @@ class MaBot:
                 self.msg(f"{'롱' if o['dir'] == 'long' else '숏'} 진입 (종가 확인) 시장가 {qty:g}개 @ {px or price:.6g}")
             return
         tick = self.ex.f.get("tick", 0)
-        want = {str(w["dir"]): round_tick(w["price"], tick) for w in (sim or {}).get("wait_orders", [])}
+        waits = (sim or {}).get("wait_orders", [])
+        want = {str(w["dir"]): round_tick(w["price"], tick) for w in waits}
+        want_line = {str(w["dir"]): w.get("line", 0) for w in waits}
         have = self.st["entry_orders"]
         for d, o in list(have.items()):
             if d not in want or abs(o["price"] - want[d]) >= max(tick, 1e-12) * 0.5:
@@ -451,7 +466,7 @@ class MaBot:
                 qty = self.qty_for(c["usdt"], c["lev"], px)
                 cid = f"ma_{'L' if d == '1' else 'S'}_{uuid.uuid4().hex[:12]}"
                 self.ex.limit("BUY" if d == "1" else "SELL", qty, px, cid)
-                have[d] = {"cid": cid, "price": px, "qty": qty}
+                have[d] = {"cid": cid, "price": px, "qty": qty, "line": want_line.get(d, 0)}
                 self.msg(f"{'롱' if d == '1' else '숏'} 진입 지정가 {qty:g}개 @ {px:.6g}")
             except Exception as exc:  # noqa: BLE001
                 key = f"{d}:{bars[-1]['t']}"
@@ -467,10 +482,12 @@ class MaBot:
         side_close = "SELL" if d > 0 else "BUY"
         pos = self.st.get("pos")
         if not pos or pos.get("dir") != d:
+            li = self._entry_line(res, d, entry)
             self._cancel_entries()
             self.ex.cancel_all()
             pos = self.st["pos"] = {"dir": d, "entry": entry, "qty": abs(qty), "t_ms": int(self.now() * 1000),
-                                    "bar": bars[-1]["t"], "last_closed": bars[n - 2]["t"], "armed": False}
+                                    "bar": bars[-1]["t"], "last_closed": bars[n - 2]["t"], "armed": False,
+                                    "line": li}
             self.st["exit"] = {}
             self.msg(f"{'롱' if d > 0 else '숏'} 보유 시작 {abs(qty):g}개 @ {entry:.6g}")
         pos["entry"], pos["qty"] = entry, abs(qty)
@@ -478,6 +495,9 @@ class MaBot:
         stop_mode, tp_mode = q.get("stop_mode", "pct"), q.get("tp_mode", "pct")
         prev_c = bars[n - 2]["c"]
         stop_px = tp_px = None
+        if live.get("stop_same"):   # 손절선 = 진입한 그 진입선
+            li = min(pos.get("line", 0), len(live["pb_lines"]) - 1)
+            live = {**live, "stop": live["pb_lines"][li], "stop_ends": live["pb_ends"][li]}
         if stop_mode == "pct" and sl > 0:
             stop_px = entry * (1 - d * sl / 100)
         elif stop_mode == "touch" and live.get("stop") and live["stop"][n - 2] is not None:
@@ -541,6 +561,19 @@ class MaBot:
                 self.msg(f"손절 {want['stop'] or '-'}{' (비상)' if safety else ''} · 익절 {want['tp'] or '-'}")
             self.st["exit"] = want
 
+    def _entry_line(self, res: dict, d: int, entry: float) -> int:
+        """새로 생긴 포지션이 어느 진입선으로 들어왔는지: 걸어 둔 지정가 → 모의 매매 → 진입가에 가장 가까운 선."""
+        o = self.st.get("entry_orders", {}).get(str(d))
+        if o and "line" in o:
+            return int(o["line"])
+        sim_open = (res.get("sim") or {}).get("open")
+        if sim_open and sim_open.get("dir") == ("long" if d > 0 else "short") and "line" in sim_open:
+            return int(sim_open["line"])
+        pls = (res.get("live") or {}).get("pb_lines") or []
+        k = len(res["bars"]) - 2
+        near = [(abs(pl[k] - entry), li) for li, pl in enumerate(pls) if pl and pl[k] is not None]
+        return min(near)[1] if near else 0
+
     def record_close(self, price: float) -> None:
         pos = self.st["pos"]
         d = pos["dir"]
@@ -587,7 +620,7 @@ class MaBot:
                "entry_orders": list(self.st["entry_orders"].values()), "exit": self.st.get("exit") or {}}
         if c:
             q = c["q"]
-            out["rule"] = {k: q.get(k) for k in ("pb_ma", "stop_mode", "stop_ma", "sl", "tp_mode", "tp_ma", "tp",
+            out["rule"] = {k: q.get(k) for k in ("pb_ma", "pb2_ma", "pb3_ma", "stop_mode", "stop_ma", "sl", "tp_mode", "tp_ma", "tp",
                                                  "exit_ma", "entry", "entry_pct", "side", "max_hold", "win_reset", "dir_filter", "dfast_ma", "dslow_ma")}
         if pos and self.last_price:
             d = pos["dir"]

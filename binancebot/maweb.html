@@ -93,6 +93,9 @@ details{margin-top:10px;border-top:1px solid var(--line);padding-top:6px}summary
       </div>
       <div class="sec"><b>진입</b>
         <div class="rl" id="rl_pb"><span>진입선</span></div>
+        <div class="rl" id="rl_pb2"><span>진입선 2</span></div>
+        <div class="rl" id="rl_pb3"><span>진입선 3</span></div>
+        <div class="hint" style="color:var(--mute)">진입선을 여러 개 고르면 선마다 따로 기다렸다가, 가격이 먼저 닿는 선에서 들어가요 (한 번에 한 포지션). 손절선은 '진입한 선'으로 두세요.</div>
         <select id="entry">
           <option value="touch">선에 닿으면 바로 (지정가)</option>
           <option value="confirm">닿은 뒤 종가가 선 위로 마감하면 다음 봉 시가</option>
@@ -217,6 +220,23 @@ details{margin-top:10px;border-top:1px solid var(--line);padding-top:6px}summary
   </div>
 </div>
 <script>
+// 화면 설정을 서버에 저장해 PC·폰 어디서 열어도 같게: 열 때 서버 값을 먼저 받아 두고, 바뀌면 서버에도 저장
+(function(){
+  const KEYS=["maweb","maweb_presets","maweb_rsi","maweb_live"];
+  let srv={};
+  try{const x=new XMLHttpRequest();x.open("GET","/api/prefs",false);x.send();if(x.status===200)srv=JSON.parse(x.responseText)||{}}catch(e){}
+  const timers={};
+  function push(k,v){clearTimeout(timers[k]);timers[k]=setTimeout(()=>{
+    fetch("/api/prefs",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({key:k,value:v})}).catch(()=>{})},400)}
+  try{
+    KEYS.forEach(k=>{
+      if(typeof srv[k]==="string")localStorage.setItem(k,srv[k]);
+      else{const v=localStorage.getItem(k);if(v!==null)push(k,v)}   // 서버에 아직 없으면 이 기기 값을 올림
+    });
+    const orig=Storage.prototype.setItem;
+    Storage.prototype.setItem=function(k,v){orig.call(this,k,v);if(this===window.localStorage&&KEYS.includes(k))push(k,String(v))};
+  }catch(e){}
+})();
 const TF=[["1m","1분"],["5m","5분"],["15m","15분"],["1h","1시간"],["4h","4시간"],["1d","일봉"]];
 const TF_SEC={"1m":60,"5m":300,"15m":900,"1h":3600,"4h":14400,"1d":86400};
 const COLORS=["#e0a100","#2f80ed","#9b51e0","#e05252"];
@@ -228,7 +248,7 @@ let tf="1h", chart, candle, lineSeries=[], timer=null, lastSignal=null;
 // 봉별 VWMA100 (작은 봉일수록 옅고 가늘게)
 const MTF=[["1m","1분","#b0b7c3",1],["5m","5분","#e0a100",1],["15m","15분","#2f80ed",2],["1h","1시간","#9b51e0",2],["4h","4시간","#e05252",3],["1d","일봉","#111827",3]];
 let mtfSeries={}, ruleSeries={};
-const RULE_STYLE={pb:["#f0b90b","진입",0],dfast:["#e05252","방향 빠른",0],dslow:["#9b51e0","방향 느린",0],trend:["#2f80ed","추세",2],stop:["#e5484d","손절",2],tp:["#089981","익절",2],exit:["#6b7280","청산",2]};
+const RULE_STYLE={pb:["#f0b90b","진입",0],pb2:["#f2994a","진입2",0],pb3:["#bb6bd9","진입3",0],dfast:["#e05252","방향 빠른",0],dslow:["#9b51e0","방향 느린",0],trend:["#2f80ed","추세",2],stop:["#e5484d","손절",2],tp:["#089981","익절",2],exit:["#6b7280","청산",2]};
 
 const saved=(()=>{try{return JSON.parse(localStorage.getItem("maweb")||"{}")}catch(e){return {}}})();
 
@@ -250,36 +270,44 @@ DEF.forEach(([k,n],i)=>{
 // 자주 쓰는 이평선 (사용자 요청 2026-11-21: 10·20·50·거래량가중 100·200)
 const PICKS=[["sma:10","MA 10"],["sma:20","MA 20"],["sma:50","MA 50"],["vwma:100","VWMA 100"],["sma:200","MA 200"],["custom","직접 입력"]];
 const PICKOPT=PICKS.map(([v,n])=>`<option value="${v}">${n}</option>`).join("");
-const RULES=["pb","trend","dfast","dslow","stop","tp","exit"];
+const RULES=["pb","pb2","pb3","trend","dfast","dslow","stop","tp","exit"];
+// 진입선 2·3 은 '쓰지 않음', 손절선은 '진입한 선'(진입선이 여러 개일 때)도 고를 수 있음
+const SPECIAL={pb2:["off","쓰지 않음"],pb3:["off","쓰지 않음"],stop:["same","진입한 선"]};
+const isSpecial=k=>k==="off"||k==="same";
 const KOPT=`<option value="sma">MA</option><option value="ema">EMA</option><option value="vwma">VWMA</option>`;
 const TFOPT=`<option value="">차트 봉</option>${TF.map(([k,nm])=>`<option value="${k}">${nm}봉</option>`).join("")}`;
-[["pb","vwma",100,""],["trend","sma",50,""],["dfast","sma",50,""],["dslow","vwma",100,""],["stop","vwma",100,"15m"],["tp","vwma",100,"1h"],["exit","sma",20,""]].forEach(([nm,k,n,t])=>{
+[["pb","vwma",100,""],["pb2","off",100,""],["pb3","off",200,""],["trend","sma",50,""],["dfast","sma",50,""],["dslow","vwma",100,""],["stop","vwma",100,"15m"],["tp","vwma",100,"1h"],["exit","sma",20,""]].forEach(([nm,k,n,t])=>{
   const box=document.getElementById("rl_"+nm);
-  box.insertAdjacentHTML("beforeend",`<select id="${nm}_pick" title="자주 쓰는 이평선">${PICKOPT}</select>
-  <span class="cust" id="${nm}_cust"><select id="${nm}_kind">${KOPT}</select>
+  const sp=SPECIAL[nm]?`<option value="${SPECIAL[nm][0]}">${SPECIAL[nm][1]}</option>`:"";
+  box.insertAdjacentHTML("beforeend",`<select id="${nm}_pick" title="자주 쓰는 이평선">${nm==="stop"?PICKOPT+sp:sp+PICKOPT}</select>
+  <span class="cust" id="${nm}_cust"><select id="${nm}_kind">${KOPT}${sp}</select>
   <input id="${nm}_len" type="number" min="1" max="1000" value="${n}"></span>
   <select id="${nm}_tf" title="이 선을 계산할 봉">${TFOPT}</select>`);
   document.getElementById(nm+"_kind").value=k;document.getElementById(nm+"_tf").value=t;
   document.getElementById(nm+"_pick").onchange=e=>{const v=e.target.value;
-    if(v!=="custom"){const [kk,nn]=v.split(":");document.getElementById(nm+"_kind").value=kk;document.getElementById(nm+"_len").value=nn}
+    if(isSpecial(v))document.getElementById(nm+"_kind").value=v;
+    else if(v!=="custom"){const [kk,nn]=v.split(":");document.getElementById(nm+"_kind").value=kk;document.getElementById(nm+"_len").value=nn}
     e.target.dataset.forced=v==="custom"?"1":"";
-    document.getElementById(nm+"_cust").style.display=v==="custom"?"":"none";};
+    document.getElementById(nm+"_cust").style.display=v==="custom"?"":"none";
+    document.getElementById(nm+"_tf").style.display=isSpecial(v)?"none":"";};
 });
 // 종류·기간이 자주 쓰는 선과 같으면 그 이름으로, 아니면 '직접 입력' (기간 칸 보임)
-function syncPicks(){RULES.forEach(nm=>{const v=`${document.getElementById(nm+"_kind").value}:${document.getElementById(nm+"_len").value}`;
+function syncPicks(){RULES.forEach(nm=>{const kd=document.getElementById(nm+"_kind").value, v=`${kd}:${document.getElementById(nm+"_len").value}`;
   const p=document.getElementById(nm+"_pick"), hit=PICKS.some(x=>x[0]===v)&&p.dataset.forced!=="1";
+  document.getElementById(nm+"_tf").style.display=isSpecial(kd)?"none":"";
+  if(isSpecial(kd)){p.value=kd;document.getElementById(nm+"_cust").style.display="none";return}
   p.value=hit?v:"custom";document.getElementById(nm+"_cust").style.display=hit?"none":"";});}
 // 저장된 설정 되살리기
 const FIELDS=["bars","side","fee","lev","kind1","len1","kind2","len2","kind3","len3","kind4","len4","tf1","tf2","tf3","tf4",
-  "pb_kind","pb_len","pb_tf","win_reset","dir_filter","dfast_kind","dfast_len","dfast_tf","dslow_kind","dslow_len","dslow_tf","min_above","trend","trend_kind","trend_len","trend_tf","entry","entry_pct",
+  "pb_kind","pb_len","pb_tf","pb2_kind","pb2_len","pb2_tf","pb3_kind","pb3_len","pb3_tf","win_reset","dir_filter","dfast_kind","dfast_len","dfast_tf","dslow_kind","dslow_len","dslow_tf","min_above","trend","trend_kind","trend_len","trend_tf","entry","entry_pct",
   "stop_sel","stop_kind","stop_len","stop_tf","pb_sl","tp_sel","tp_kind","tp_len","tp_tf","pb_tp","exit_sel","exit_kind","exit_len","exit_tf","exit_pct","max_hold"];
 // 빠른 설정 (차트 봉 + 눌림 매매 칸). 내 설정은 이 브라우저에 저장
 const PRESETS={
-  "5분 VWMA100 눌림 · 15분 VWMA100 손절 · 5분 20선 이탈":{tf:"5m",pb_kind:"vwma",pb_len:100,pb_tf:"",entry:"touch",entry_pct:0,
+  "5분 VWMA100 눌림 · 15분 VWMA100 손절 · 5분 20선 이탈":{tf:"5m",pb_kind:"vwma",pb_len:100,pb_tf:"",pb2_kind:"off",pb3_kind:"off",entry:"touch",entry_pct:0,
     stop_sel:"touch",stop_kind:"vwma",stop_len:100,stop_tf:"15m",pb_sl:0,tp_sel:"none",exit_sel:"line",exit_kind:"sma",exit_len:20,exit_tf:"",trend:"none",max_hold:0},
-  "5분 VWMA100 눌림 · 손절 -2% · 익절 +4%":{tf:"5m",pb_kind:"vwma",pb_len:100,pb_tf:"",entry:"touch",entry_pct:0,
+  "5분 VWMA100 눌림 · 손절 -2% · 익절 +4%":{tf:"5m",pb_kind:"vwma",pb_len:100,pb_tf:"",pb2_kind:"off",pb3_kind:"off",entry:"touch",entry_pct:0,
     stop_sel:"pct",pb_sl:2,tp_sel:"pct",pb_tp:4,exit_sel:"none",trend:"none",max_hold:0},
-  "15분 VWMA100 눌림 · 1시간 VWMA100 손절 · 15분 20선 이탈":{tf:"15m",pb_kind:"vwma",pb_len:100,pb_tf:"",entry:"touch",entry_pct:0,
+  "15분 VWMA100 눌림 · 1시간 VWMA100 손절 · 15분 20선 이탈":{tf:"15m",pb_kind:"vwma",pb_len:100,pb_tf:"",pb2_kind:"off",pb3_kind:"off",entry:"touch",entry_pct:0,
     stop_sel:"touch",stop_kind:"vwma",stop_len:100,stop_tf:"1h",pb_sl:0,tp_sel:"none",exit_sel:"line",exit_kind:"sma",exit_len:20,exit_tf:"",trend:"none",max_hold:0},
 };
 const myPresets=(()=>{try{return JSON.parse(localStorage.getItem("maweb_presets")||"{}")}catch(e){return {}}})();
@@ -346,7 +374,7 @@ chart=LightweightCharts.createChart(document.getElementById("chart"),{
 candle=chart.addCandlestickSeries({upColor:"#089981",downColor:"#e5484d",borderVisible:false,wickUpColor:"#089981",wickDownColor:"#e5484d"});
 COLORS.forEach(c=>lineSeries.push(chart.addLineSeries({color:c,lineWidth:2,priceLineVisible:false,lastValueVisible:false})));
 MTF.forEach(([k,n,c,w])=>mtfSeries[k]=chart.addLineSeries({color:c,lineWidth:w,priceLineVisible:false,lastValueVisible:false,crosshairMarkerVisible:false,title:n,autoscaleInfoProvider:()=>null}));
-Object.entries(RULE_STYLE).forEach(([k,[c,,st]])=>ruleSeries[k]=chart.addLineSeries({color:c,lineWidth:k==="pb"?3:2,lineStyle:st,priceLineVisible:false,lastValueVisible:false,crosshairMarkerVisible:false}));
+Object.entries(RULE_STYLE).forEach(([k,[c,,st]])=>ruleSeries[k]=chart.addLineSeries({color:c,lineWidth:k.startsWith("pb")?3:2,lineStyle:st,priceLineVisible:false,lastValueVisible:false,crosshairMarkerVisible:false}));
 // RSI (2026-11-21 사용자 요청): 차트 아래쪽 칸, 와일더 방식, 진행 중인 봉 포함
 // 과매수(70 위) 빨강·과매도(30 아래) 파랑 채우기 (2026-11-21 사용자 요청)
 const RSI_AUTO=()=>({priceRange:{minValue:0,maxValue:100}});
@@ -408,9 +436,10 @@ function buildParams(){
   if(strat==="pullback"){
     const st=q.stop_sel, tq=q.tp_sel;
     // 실제로 쓰는 선만 보냄 (안 쓰는 선 때문에 '차트보다 작은 봉' 경고가 뜨지 않게)
-    const used={pb:true,trend:["above","both"].includes(q.trend),dfast:q.dir_filter==="align",dslow:q.dir_filter==="align",
+    const used={pb:true,pb2:q.pb2_kind!=="off",pb3:q.pb3_kind!=="off",trend:["above","both"].includes(q.trend),dfast:q.dir_filter==="align",dslow:q.dir_filter==="align",
       stop:st==="touch"||st==="line",tp:tq==="touch",exit:q.exit_sel==="line"};
-    Object.keys(used).forEach(nm=>{if(used[nm])p.set(nm+"_ma",`${q[nm+"_kind"]}:${q[nm+"_len"]}`);else{p.delete(nm+"_tf")}});
+    Object.keys(used).forEach(nm=>{if(used[nm])p.set(nm+"_ma",q[nm+"_kind"]==="same"?"same":`${q[nm+"_kind"]}:${q[nm+"_len"]}`);else{p.delete(nm+"_tf")}});
+    if(used.stop&&q.stop_kind==="same")p.delete("stop_tf");
     p.set("stop_mode",st==="none"?"pct":st);p.set("sl",st==="none"?0:q.pb_sl);
     p.set("tp_mode",tq==="touch"?"touch":"pct");p.set("tp",tq==="pct"?q.pb_tp:0);
     if(!used.exit)p.set("exit_ma","off");
@@ -566,9 +595,10 @@ try{const o=JSON.parse(localStorage.getItem("maweb_live")||"{}");if(o.usdt)LV("l
 let liveSt={}, liveSent=0;
 function ruleText(){
   const g=id=>document.getElementById(id), opt=id=>g(id).options[g(id).selectedIndex].text;
-  const line=nm=>`${opt(nm+"_kind")}${g(nm+"_len").value}${g(nm+"_tf").value?" "+opt(nm+"_tf"):""}`;
+  const line=nm=>g(nm+"_kind").value==="same"?"진입한 선":`${opt(nm+"_kind")}${g(nm+"_len").value}${g(nm+"_tf").value?" "+opt(nm+"_tf"):""}`;
   const st=g("stop_sel").value, tp=g("tp_sel").value;
-  return `진입 ${line("pb")} ${g("entry").value==="touch"?"닿으면 지정가":"종가 확인"}`+
+  const pbs=["pb","pb2","pb3"].filter(nm=>g(nm+"_kind").value!=="off").map(line).join("·");
+  return `진입 ${pbs} ${g("entry").value==="touch"?"닿으면 지정가":"종가 확인"}`+
     ` · 손절 ${st==="none"?"없음":st==="pct"?"-"+g("pb_sl").value+"%":line("stop")+(st==="line"?" 마감 이탈":" 닿음")}`+
     ` · 익절 ${tp==="none"?"없음":tp==="pct"?"+"+g("pb_tp").value+"%":line("tp")+" 닿음"}`+
     `${g("exit_sel").value==="line"?" · 청산 "+line("exit")+" 이탈":""}`+

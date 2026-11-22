@@ -187,7 +187,9 @@ def pullback(bars: list[dict], line: list, trend_line: list | None = None, stop_
              tp_pct: float = 0.0, max_hold: int = 0, fee_pct: float = 0.05, leverage: float = 1.0,
              stop_ends: list | None = None, exit_line: list | None = None, exit_pct: float = 0.0,
              exit_ends: list | None = None, entry_pct: float = 0.0,
-             dir_fast: list | None = None, dir_slow: list | None = None, win_reset: int = 0) -> dict:
+             dir_fast: list | None = None, dir_slow: list | None = None, win_reset: int = 0,
+             extra_lines: list | None = None, stop_same: bool = False, line_ends: list | None = None,
+             entry_from: int = 0) -> dict:
     """이평선 눌림 매매.
 
     롱: 직전 min_above 봉의 종가가 모두 눌림선 위 + 추세 조건 → 가격이 눌림선까지 내려오면 매수.
@@ -205,6 +207,9 @@ def pullback(bars: list[dict], line: list, trend_line: list | None = None, stop_
     dir_fast·dir_slow: 방향 필터 — 빠른 선 > 느린 선(정배열)이면 롱만, 빠른 선 < 느린 선(역배열)이면 숏만 대기.
     win_reset: 이익으로 끝난 거래 다음, 같은 방향 진입은 그 거래 진입 봉부터 가격이 진입 전 win_reset 봉의
       최고가(롱)를 넘거나 최저가(숏) 아래로 내려간 적이 있어야 (새 고점·저점 → 다시 선까지 되돌아올 때). 0 = 끔.
+    extra_lines: 진입선을 더 (예: MA50 + VWMA100 + MA200). 선마다 따로 대기 조건을 보고, 같은 봉에서 여러 선에
+      닿으면 가격이 먼저 닿는 선(롱 = 가장 높은 선, 숏 = 가장 낮은 선)으로 진입. 한 번에 한 포지션.
+    stop_same: 손절선 = 진입한 그 선 (line_ends = 진입선마다 끝나는 봉 표시, stop_ends 대신).
     stop_ends·exit_ends: 선이 차트보다 큰 봉이면 그 큰 봉이 끝나는 차트 봉에서만 종가 판단 (None = 차트 봉마다).
     진입한 봉에서는 손절만 확인 (익절은 다음 봉부터, 봉 안 순서를 모르므로 보수적으로).
     """
@@ -212,6 +217,8 @@ def pullback(bars: list[dict], line: list, trend_line: list | None = None, stop_
     last_closed = n - 2
     fee = fee_pct / 100
     stop_line = stop_line or line
+    pls = [line] + list(extra_lines or [])          # 진입선들
+    lends = line_ends or [None] * len(pls)
     dirs = {"long": [1], "short": [-1], "both": [1, -1]}[side]
     trades: list[dict] = []
     pos = None
@@ -231,8 +238,9 @@ def pullback(bars: list[dict], line: list, trend_line: list | None = None, stop_
             g["ext"] = max(g["ext"], b["h"]) if d > 0 else min(g["ext"], b["l"])
         return d * (g["ext"] - g["ref"]) > 0
 
-    def ok_setup(k: int, d: int) -> bool:
-        """k 번째 봉이 끝난 시점에서 d 방향 눌림 대기 조건."""
+    def ok_setup(k: int, d: int, li: int = 0) -> bool:
+        """k 번째 봉이 끝난 시점에서 d 방향, li 번째 진입선 눌림 대기 조건."""
+        line = pls[li]
         if k - min_above + 1 < 0 or line[k] is None:
             return False
         for j in range(k - min_above + 1, k + 1):
@@ -257,7 +265,7 @@ def pullback(bars: list[dict], line: list, trend_line: list | None = None, stop_
         ret = (d * (price / pos["entry"] - 1) - 2 * fee) * 100
         trades.append({"dir": "long" if d > 0 else "short", "entry_time": pos["t"], "entry": pos["entry"],
                        "exit_time": bars[i]["t"], "exit": price, "reason": reason,
-                       "ret_pct": ret, "bars": i - pos["i"] + 1})
+                       "ret_pct": ret, "bars": i - pos["i"] + 1, "line": pos["li"]})
         if win_reset > 0 and ret > 0:   # 이익 거래 → 다음 같은 방향은 새 고점(롱)·저점(숏)을 본 뒤에만
             e = pos["i"]
             before = bars[max(0, e - win_reset):e] or [bars[e]]
@@ -267,18 +275,21 @@ def pullback(bars: list[dict], line: list, trend_line: list | None = None, stop_
             gate.pop(d, None)
         pos = None
 
-    def open_pos(i: int, d: int, price: float) -> None:
+    def open_pos(i: int, d: int, price: float, li: int = 0) -> None:
         nonlocal pos
-        pos = {"dir": d, "entry": price, "t": bars[i]["t"], "i": i}
+        pos = {"dir": d, "entry": price, "t": bars[i]["t"], "i": i, "li": li}
         gate.pop(d, None)
         if stop_mode == "pct" and stop_pct > 0:
             pos["sl"] = price * (1 - d * stop_pct / 100)
         if tp_mode == "pct" and tp_pct > 0:
             pos["tp"] = price * (1 + d * tp_pct / 100)
 
+    def sline() -> list:
+        return pls[pos["li"]] if stop_same else stop_line
+
     def stop_level(i: int) -> float | None:
         if stop_mode == "touch":
-            v = stop_line[i - 1] if i >= 1 else None
+            v = sline()[i - 1] if i >= 1 else None
             return None if v is None else v * (1 - pos["dir"] * stop_pct / 100)
         return pos.get("sl")
 
@@ -314,8 +325,8 @@ def pullback(bars: list[dict], line: list, trend_line: list | None = None, stop_
             close_pos(i, b["o"], pend_reason)
             exited = True
         pend_close = False
-        if pend_open is not None and pos is None:
-            open_pos(i, pend_open, b["o"])
+        if pend_open is not None and pos is None and b["t"] >= entry_from:
+            open_pos(i, pend_open[0], b["o"], pend_open[1])
             entered_now = True
         else:
             entered_now = False
@@ -333,13 +344,21 @@ def pullback(bars: list[dict], line: list, trend_line: list | None = None, stop_
                     close_pos(i, max(b["o"], tp) if d > 0 else min(b["o"], tp), "take")
                     exited = True
         # 3) 진입 (touch: 지정가는 진행 중인 봉에서도 체결될 수 있음)
-        if pos is None and not exited and entry == "touch":
+        # entry_from: 실거래 봇이 자동 매매를 켠 시각 — 그 전에 시작한 봉에서는 새로 진입하지 않음
+        # (켜기 전에 지나간 진입 때문에 봇이 기다리지 않게. 켠 순간의 진행 중인 봉은 봇의 지정가가 맡음)
+        if pos is None and not exited and entry == "touch" and b["t"] >= entry_from:
             for d in dirs:
-                if not ok_setup(i - 1, d):
-                    continue
-                lv = line[i - 1] * (1 + d * entry_pct / 100)
-                if (b["l"] <= lv) if d > 0 else (b["h"] >= lv):
-                    open_pos(i, d, min(b["o"], lv) if d > 0 else max(b["o"], lv))
+                # 닿은 진입선 중 가격이 먼저 닿는 선 (롱 = 가장 높은 선, 숏 = 가장 낮은 선)
+                hits = []
+                for li, pl in enumerate(pls):
+                    if not ok_setup(i - 1, d, li):
+                        continue
+                    lv = pl[i - 1] * (1 + d * entry_pct / 100)
+                    if (b["l"] <= lv) if d > 0 else (b["h"] >= lv):
+                        hits.append((d * lv, -li, lv, li))
+                if hits:
+                    _, _, lv, li = max(hits)
+                    open_pos(i, d, min(b["o"], lv) if d > 0 else max(b["o"], lv), li)
                     entered_now = True
                     px = pct_stop_hit(b, i, entry_bar=True)
                     if px is not None:
@@ -350,8 +369,9 @@ def pullback(bars: list[dict], line: list, trend_line: list | None = None, stop_
         # 4) 봉이 끝난 뒤 판단: 손절선 이탈·보유 기간·confirm 진입
         if pos:
             d = pos["dir"]
-            if stop_mode == "line" and stop_line[i] is not None and (stop_ends is None or stop_ends[i]):
-                lim = stop_line[i] * (1 - d * stop_pct / 100)
+            sl_v, sl_e = (pls[pos["li"]], lends[pos["li"]]) if stop_same else (stop_line, stop_ends)
+            if stop_mode == "line" and sl_v[i] is not None and (sl_e is None or sl_e[i]):
+                lim = sl_v[i] * (1 - d * stop_pct / 100)
                 if d * (b["c"] - lim) < 0:
                     pend_close, pend_reason = True, "line"
             if not pend_close and exit_line is not None and exit_line[i] is not None                     and (exit_ends is None or exit_ends[i]):
@@ -365,41 +385,49 @@ def pullback(bars: list[dict], line: list, trend_line: list | None = None, stop_
             continue
         if entry == "confirm" and not exited:
             for d in dirs:
-                lv = line[i - 1]
-                if ok_setup(i - 1, d) and lv is not None and ((b["l"] <= lv) if d > 0 else (b["h"] >= lv)):
-                    armed.setdefault(d, i)
-                if d in armed:
-                    if i - armed[d] >= confirm_bars:
-                        del armed[d]
-                    elif line[i] is not None and d * (b["c"] - line[i]) > 0:  # 닿은 봉이 선 위로 마감해도 인정
-                        pend_open = d
+                for li, pl in enumerate(pls):
+                    lv = pl[i - 1]
+                    if ok_setup(i - 1, d, li) and lv is not None and ((b["l"] <= lv) if d > 0 else (b["h"] >= lv)):
+                        armed.setdefault((d, li), i)
+                for key in [x for x in armed if x[0] == d]:
+                    li = key[1]
+                    if i - armed[key] >= confirm_bars:
+                        del armed[key]
+                    elif pls[li][i] is not None and d * (b["c"] - pls[li][i]) > 0:  # 닿은 봉이 선 위로 마감해도 인정
+                        pend_open = (d, li)
                         armed.clear()
                         break
+                if pend_open is not None:
+                    break
 
     open_info = None
     if pos:
         last = bars[-1]["c"]
         d = pos["dir"]
-        open_info = {"dir": "long" if d > 0 else "short", "entry_time": pos["t"], "entry": pos["entry"],
+        open_info = {"dir": "long" if d > 0 else "short", "entry_time": pos["t"], "entry": pos["entry"], "line": pos["li"],
                      "price": last, "ret_pct": (d * (last / pos["entry"] - 1) - fee) * 100,
                      "sl": stop_level(n) if stop_mode != "line" else None, "tp": tp_level(n)}
     # 실거래 봇용: 지금 걸어 둘 진입 지정가 (진행 중인 봉 기준)
+    # 진입선이 여러 개면 방향마다 가격이 먼저 닿는 선 하나 (롱 = 가장 높은 선, 숏 = 가장 낮은 선)
     wait_orders = []
     if pos is None and entry == "touch" and n >= 2:
         for d in dirs:
-            if ok_setup(n - 2, d):
-                wait_orders.append({"dir": d, "price": line[n - 2] * (1 + d * entry_pct / 100)})
+            c = [(d * pl[n - 2], -li, li) for li, pl in enumerate(pls) if ok_setup(n - 2, d, li)]
+            if c:
+                li = max(c)[2]
+                wait_orders.append({"dir": d, "price": pls[li][n - 2] * (1 + d * entry_pct / 100), "line": li})
     pending = None
     if pend_close:
         pending = "다음 봉 시가에 청산 (" + ("청산선 이탈" if pend_reason == "exit" else "손절선 이탈") + ")"
     elif pend_open is not None:
-        pending = f"다음 봉 시가에 {'롱' if pend_open > 0 else '숏'} 진입 (눌림 확인)"
+        pending = f"다음 봉 시가에 {'롱' if pend_open[0] > 0 else '숏'} 진입 (눌림 확인)"
     elif pos is None and n >= 2:
         waits = []
+        tag = (lambda li: f" (진입선 {li + 1})") if len(pls) > 1 else (lambda li: "")
+        for w in wait_orders:
+            waits.append(f"{'롱' if w['dir'] > 0 else '숏'} 지정가 대기 {w['price']:.6g}{tag(w['line'])}")
         for d in dirs:
-            if entry == "touch" and ok_setup(n - 2, d):
-                waits.append(f"{'롱' if d > 0 else '숏'} 지정가 대기 {line[n - 2] * (1 + d * entry_pct / 100):.6g}")
-            elif entry == "confirm" and d in armed:
+            if entry == "confirm" and any(x[0] == d for x in armed):
                 waits.append(f"{'롱' if d > 0 else '숏'}: 눌림선 닿음, 종가가 선 {'위' if d > 0 else '아래'}로 마감하면 진입")
         pending = " / ".join(waits) or None
     return {"trades": trades, "open": open_info, "pending": pending, "stats": stats(trades, leverage),
@@ -562,8 +590,12 @@ def run(market: Market, q: dict) -> dict:
     line_tfs = [(q.get(f"tf{k}", "") or interval) for k in (1, 2, 3, 4)]
     # 손절·익절·추가 청산 선은 따로 고를 수 있음 (stop_ma=vwma:100 + stop_tf=15m). 없으면 선 1~4 번호(stop_line 등)
     rule_defs = {}
+    # 손절선 'same' = 진입한 그 진입선 (진입선이 여러 개일 때)
+    stop_same = q.get("strat") == "pullback" and q.get("stop_ma") == "same"
     if q.get("strat") == "pullback":
-        for name in ("pb", "trend", "stop", "tp", "exit", "dfast", "dslow"):
+        for name in ("pb", "pb2", "pb3", "trend", "stop", "tp", "exit", "dfast", "dslow"):
+            if name == "stop" and stop_same:
+                continue
             if q.get(f"{name}_ma"):
                 rule_defs[name] = (parse_ma(q[f"{name}_ma"]), q.get(f"{name}_tf", "") or interval)
     for t in line_tfs + [t for _, t in rule_defs.values()]:
@@ -590,7 +622,7 @@ def run(market: Market, q: dict) -> dict:
     lines = [make(m, t) for m, t in zip(mas, line_tfs)]
     rule_lines = {name: (make(m, t), t, m) for name, (m, t) in rule_defs.items()}
     small = [f"선 {i + 1}" for i, (m, t) in enumerate(zip(mas, line_tfs)) if m and INTERVALS[t] < chart_sec]
-    small += [{"pb": "진입선", "trend": "추세선", "dfast": "방향 빠른 선", "dslow": "방향 느린 선", "stop": "손절선", "tp": "익절선", "exit": "청산선"}[k] for k, (v, t, m) in rule_lines.items()
+    small += [{"pb": "진입선", "pb2": "진입선 2", "pb3": "진입선 3", "trend": "추세선", "dfast": "방향 빠른 선", "dslow": "방향 느린 선", "stop": "손절선", "tp": "익절선", "exit": "청산선"}[k] for k, (v, t, m) in rule_lines.items()
               if m and INTERVALS[t] < chart_sec]
     fast_i, slow_i = int(q.get("fast", 1)) - 1, int(q.get("slow", 2)) - 1
     result = {"symbol": symbol, "interval": interval, "bars": bars, "strat": q.get("strat", "cross"),
@@ -620,6 +652,9 @@ def run(market: Market, q: dict) -> dict:
         stop_v, stop_e, _ = rule("stop", "stop_line", q.get("pb_line", 1))
         if "pb" in rule_lines and "stop" not in rule_lines and not q.get("stop_line"):
             stop_v, stop_e = rule("pb", "pb_line", 1)[:2]
+        # 진입선 2·3 (예: MA50 + VWMA100 + MA200). 끝나는 봉 표시는 손절선 'same' 때 씀
+        extra = [rule_lines[k] for k in ("pb2", "pb3") if k in rule_lines and rule_lines[k][2]]
+        extra_v = [v for v, t, m in extra]
         tp_v, _, _ = rule("tp", "tp_line", 3)
         exit_v, exit_e, exit_on = rule("exit", "exit_line", "0")
         entry_pct = num("entry_pct", 0)
@@ -627,7 +662,8 @@ def run(market: Market, q: dict) -> dict:
             raise ValueError("미리 사는 % 는 0(끔) 또는 0.1~1 사이로 넣어 주세요")
         if exit_on and exit_v is None:
             raise ValueError("청산선이 꺼져 있어요")
-        line, _, _ = rule("pb", "pb_line", 1)
+        line, line_e, _ = rule("pb", "pb_line", 1)
+        line_ends = [line_e] + [ends_tf(t) for v, t, m in extra]
         trend_v, _, _ = rule("trend", "trend_line", 2)
         dir_on = q.get("dir_filter") == "align"
         dfast_v = rule_lines.get("dfast", (None,))[0] if dir_on else None
@@ -643,12 +679,15 @@ def run(market: Market, q: dict) -> dict:
             raise ValueError("익절선이 꺼져 있어요")
         if trend in ("above", "both") and trend_v is None:
             raise ValueError("추세선으로 고른 이평선이 꺼져 있어요")
-        shown = {"pb": True, "dfast": dir_on, "dslow": dir_on, "trend": trend in ("above", "both"), "stop": q.get("stop_mode") in ("line", "touch"), "tp": q.get("tp_mode") == "touch", "exit": exit_on}
+        if stop_same and q.get("stop_mode") in ("line", "touch"):
+            stop_v, stop_e = line, line_e
+        shown = {"pb": True, "pb2": True, "pb3": True, "dfast": dir_on, "dslow": dir_on, "trend": trend in ("above", "both"), "stop": q.get("stop_mode") in ("line", "touch"), "tp": q.get("tp_mode") == "touch", "exit": exit_on}
         result["rule_lines"] = {k: {"kind": m[0], "n": m[1], "tf": t, "values": v}
                                 for k, (v, t, m) in rule_lines.items() if m and shown[k]}
         if q.get("_live"):
             # 실거래 봇이 보유 중 손절·익절·청산을 직접 계산하는 데 쓰는 선 값
-            result["live"] = {"stop": stop_v, "stop_ends": stop_e, "tp": tp_v,
+            result["live"] = {"stop": stop_v, "stop_ends": stop_e, "tp": tp_v, "stop_same": stop_same,
+                              "pb_lines": [line] + extra_v, "pb_ends": line_ends,
                               "exit": exit_v if exit_on else None, "exit_ends": exit_e if exit_on else None,
                               "chart_sec": chart_sec}
         result["sim"] = pullback(
@@ -656,6 +695,8 @@ def run(market: Market, q: dict) -> dict:
             tp_line=tp_v, tp_mode=q.get("tp_mode", "pct"), stop_ends=stop_e,
             exit_line=exit_v if exit_on else None, exit_pct=num("exit_pct", 0),
             exit_ends=exit_e if exit_on else None, entry_pct=entry_pct, win_reset=int(num("win_reset", 0)),
+            extra_lines=extra_v, stop_same=stop_same, line_ends=line_ends,
+            entry_from=int(num("_entry_from", 0)),
             side=q.get("side", "long"), min_above=int(num("min_above", 5)), trend=trend,
             slope_bars=int(num("slope_bars", 5)) or 1, entry=q.get("entry", "touch"),
             confirm_bars=int(num("confirm_bars", 5)) or 1, stop_mode=q.get("stop_mode", "pct"),
@@ -785,6 +826,45 @@ def trusted_client(client_ip: str, origin: str, host: str) -> bool:
     return o.scheme == "http" and _tailscale(o.hostname or "") and o.netloc == host   # 실거래 봇(mabot)과 주고받는 폴더
 
 
+# 화면 설정(이평선·진입선·손절·빠른 설정·투입금 등)을 기기끼리 공유하려고 서버 파일에 저장
+PREF_KEYS = ("maweb", "maweb_presets", "maweb_rsi", "maweb_live")
+
+
+def prefs_path() -> Path:
+    return Path(LIVE_DIR) / "web_prefs.json"
+
+
+def load_prefs() -> dict:
+    try:
+        d = json.loads(prefs_path().read_text(encoding="utf-8"))
+        return {k: v for k, v in d.items() if k in PREF_KEYS and isinstance(v, str)}
+    except (OSError, ValueError):
+        return {}
+
+
+_prefs_lock = threading.Lock()
+
+
+def save_pref(key: str, value: str) -> None:
+    if key not in PREF_KEYS or not isinstance(value, str) or len(value) > 500_000:
+        raise ValueError("잘못된 설정")
+    json.loads(value)   # 화면이 저장하는 값은 모두 JSON 글자
+    with _prefs_lock:
+        d = load_prefs()
+        d[key] = value
+        p = prefs_path()
+        p.parent.mkdir(parents=True, exist_ok=True)
+        tmp = p.with_suffix(".tmp")
+        tmp.write_text(json.dumps(d, ensure_ascii=False), encoding="utf-8")
+        os.replace(tmp, p)
+
+
+def same_origin(origin: str, host: str) -> bool:
+    """이 서버에서 연 화면이 보낸 요청인지 (다른 사이트가 몰래 설정을 바꾸지 못하게)."""
+    from urllib.parse import urlparse
+    return bool(origin) and urlparse(origin).netloc == host
+
+
 class Handler(BaseHTTPRequestHandler):
     market: Market
 
@@ -812,6 +892,8 @@ class Handler(BaseHTTPRequestHandler):
                 data = run(self.market, q)
             elif u.path == "/api/scan":
                 data = scan(self.market, q)
+            elif u.path == "/api/prefs":
+                data = load_prefs()
             elif u.path == "/api/live/status":
                 from .mabot import read_status
                 data = read_status(LIVE_DIR)
@@ -834,6 +916,14 @@ class Handler(BaseHTTPRequestHandler):
         from .mabot import write_request
         u = urlparse(self.path)
         try:
+            if u.path == "/api/prefs":
+                if not same_origin(self.headers.get("Origin", ""), self.headers.get("Host", ""))                         or "application/json" not in self.headers.get("Content-Type", ""):
+                    raise PermissionError("잘못된 요청")
+                n = int(self.headers.get("Content-Length", 0) or 0)
+                req = json.loads(self.rfile.read(min(n, 600_000)) or b"{}")
+                save_pref(str(req.get("key")), req.get("value"))
+                self._send(200, b'{"ok": true}', "application/json; charset=utf-8")
+                return
             if u.path != "/api/live":
                 self._send(404, b"not found", "text/plain")
                 return

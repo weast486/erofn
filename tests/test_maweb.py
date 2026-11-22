@@ -227,6 +227,31 @@ class PullbackTest(unittest.TestCase):
         self.assertEqual(d["strat"], "pullback")
         self.assertIn("stats", d["sim"])
 
+    def test_multi_lines_first_touched_and_stop_same(self):
+        # 진입선 2개: 100 과 90. 둘 다 아래로 뚫는 봉이면 먼저 닿는 높은 선(100)으로 진입
+        b = self.rows([(103, 104, 85, 95), (95, 95, 95, 95)])
+        r = pullback(b, [100.0] * len(b), extra_lines=[[90.0] * len(b)], stop_pct=50, fee_pct=0)
+        self.assertEqual((r["open"]["entry"], r["open"]["line"]), (100.0, 0))
+        # 첫 선(120)은 가격 위라 대기 안 됨 → 90 선에서 진입, 손절은 진입한 90 선 종가 이탈
+        b = self.rows([(103, 104, 89, 92), (92, 92, 88, 88), (87, 87, 87, 87), (87, 87, 87, 87)])
+        r = pullback(b, [120.0] * len(b), extra_lines=[[90.0] * len(b)], stop_mode="line", stop_pct=0,
+                     stop_same=True, fee_pct=0)
+        t = r["trades"][0]
+        self.assertEqual((t["entry"], t["line"], t["reason"], t["exit"]), (90.0, 1, "line", 87))
+        # 지정가 대기는 방향마다 가격이 먼저 닿는 선 하나
+        b = self.rows([(104, 106, 103, 105)])
+        r = pullback(b, [100.0] * len(b), extra_lines=[[90.0] * len(b), [95.0] * len(b)], fee_pct=0)
+        self.assertEqual(r["wait_orders"], [{"dir": 1, "price": 100.0, "line": 0}])
+
+    def test_run_multi_lines_same_stop(self):
+        q = {"strat": "pullback", "interval": "5m", "pb_ma": "sma:2", "pb2_ma": "sma:4", "pb3_ma": "sma:6",
+             "stop_mode": "line", "stop_ma": "same", "sl": "0", "side": "both", "_live": "1"}
+        d = run(FakeMarket(), q)
+        self.assertEqual(len(d["live"]["pb_lines"]), 3)
+        self.assertTrue(d["live"]["stop_same"])
+        self.assertIn("pb3", d["rule_lines"])
+        self.assertNotIn("stop", d["rule_lines"])
+
 
 class MtfTest(unittest.TestCase):
     def test_bigger_tf_steps(self):
@@ -304,6 +329,28 @@ class ScanTest(unittest.TestCase):
         found = scan(ScanMarket(), q)["found"]  # ScanMarket 봉은 변동이 없어 ATR 0
         self.assertEqual([r["atr_pct"] for r in found], [0.0, 0.0])
         self.assertEqual(scan(ScanMarket(), {**q, "atr_min": "1"})["found"], [])
+
+
+class PrefsTest(unittest.TestCase):
+    def test_prefs_saved_and_shared(self):
+        import tempfile
+        from binancebot import maweb
+        with tempfile.TemporaryDirectory() as d:
+            old = maweb.LIVE_DIR
+            maweb.LIVE_DIR = d
+            try:
+                self.assertEqual(maweb.load_prefs(), {})
+                maweb.save_pref("maweb_live", '{"usdt": 50, "lev": 3}')
+                self.assertEqual(maweb.load_prefs(), {"maweb_live": '{"usdt": 50, "lev": 3}'})
+                with self.assertRaises(ValueError):
+                    maweb.save_pref("other", "{}")
+                with self.assertRaises(ValueError):
+                    maweb.save_pref("maweb", "not json")
+            finally:
+                maweb.LIVE_DIR = old
+        self.assertTrue(maweb.same_origin("http://100.70.1.2:8790", "100.70.1.2:8790"))
+        self.assertFalse(maweb.same_origin("http://evil.example", "localhost:8790"))
+        self.assertFalse(maweb.same_origin("", "localhost:8790"))
 
 
 if __name__ == "__main__":

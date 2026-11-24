@@ -55,6 +55,9 @@ class Settings:
     # 거래소 배율 (0 = 화면 배율과 같게). 크게 두면 주문 크기(투입금 x 화면 배율)는 그대로이고
     # 거래소가 잡는 증거금만 줄어듦 (예: 50 USDT x 3배 = 150 USDT 주문, 거래소 5배면 증거금 30) — 대신 강제청산가가 가까워짐
     exchange_lev: float = 0.0
+    # 한 거래 최대 손실 USDT (0 = 끔). 손절가를 '이만큼 잃는 가격'(수수료 추정 포함)보다 멀리 두지 않음 —
+    # 거래소 손절도 그 가격에 걸고, 봇도 가격이 거기 닿으면 시장가 정리. 급변(갭)이면 조금 넘을 수 있음
+    max_loss_usdt: float = 0.0
     state_dir: str = "state_ma"
 
     @classmethod
@@ -65,7 +68,7 @@ class Settings:
                    pin=e("MA_PIN", ""), max_usdt=_f(e("MA_MAX_USDT"), 100.0), max_lev=_f(e("MA_MAX_LEV"), 5.0),
                    paper_equity=_f(e("MA_PAPER_EQUITY"), 1000.0),
                    safety_stop=_f(e("MA_SAFETY_STOP"), 10.0), state_dir=e("MA_STATE_DIR", "state_ma"),
-                   exchange_lev=_f(e("MA_EXCHANGE_LEV"), 0.0))
+                   exchange_lev=_f(e("MA_EXCHANGE_LEV"), 0.0), max_loss_usdt=_f(e("MA_MAX_LOSS_USDT"), 0.0))
 
 
 # ------------------------------------------------------------ 거래소 (실제 / 가상)
@@ -508,6 +511,12 @@ class MaBot:
         safety = False
         if stop_px is None and self.cfg.safety_stop > 0:   # 규칙 손절이 안 걸리는 동안 비상 손절
             stop_px, safety = entry * (1 - d * self.cfg.safety_stop / 100), True
+        cap = self.cfg.max_loss_usdt
+        if cap > 0 and abs(qty) > 0:   # 최대 손실 제한: 잃는 돈 = 수량 x 가격 차 + 왕복 수수료(시장가 0.05% x 2 추정)
+            room = (cap - abs(qty) * entry * 0.001) / abs(qty)
+            cap_px = entry - d * max(room, entry * 0.001)
+            if stop_px is None or d * (cap_px - stop_px) > 0:
+                stop_px, safety = cap_px, "maxloss"
         if bars[-1]["t"] > pos["bar"]:   # 익절은 산 다음 봉부터 (모의 매매와 같게)
             if tp_mode == "pct" and tpp > 0:
                 tp_px = entry * (1 + d * tpp / 100)
@@ -540,7 +549,7 @@ class MaBot:
                 return
         # 손절가를 이미 넘었으면 바로 정리 (거래소 손절 주문이 못 걸릴 때 대비)
         if stop_px is not None and d * (price - stop_px) <= 0:
-            self.close_now(self.ex.sym, "safety" if safety else "stop")
+            self.close_now(self.ex.sym, safety if isinstance(safety, str) else ("safety" if safety else "stop"))
             return
         tick = self.ex.f.get("tick", 0)
         want = {"safety": safety, "stop": round_tick(stop_px, tick) if stop_px else None,
@@ -558,7 +567,8 @@ class MaBot:
                 except Exception as exc:  # noqa: BLE001
                     self.msg(f"익절 지정가 실패: {exc}")
             if (want["stop"], want["tp"]) != (self.st.get("exit", {}).get("stop"), self.st.get("exit", {}).get("tp")):
-                self.msg(f"손절 {want['stop'] or '-'}{' (비상)' if safety else ''} · 익절 {want['tp'] or '-'}")
+                tag = f" (최대 손실 {cap:g} USDT)" if safety == "maxloss" else (" (비상)" if safety else "")
+                self.msg(f"손절 {want['stop'] or '-'}{tag} · 익절 {want['tp'] or '-'}")
             self.st["exit"] = want
 
     def _entry_line(self, res: dict, d: int, entry: float) -> int:
@@ -589,7 +599,7 @@ class MaBot:
             cands = [(abs(px - v), r) for r, v in (("stop", ex.get("stop")), ("take", ex.get("tp"))) if v]
             reason = min(cands)[1] if cands else "?"
             if reason == "stop" and ex.get("safety"):
-                reason = "safety"
+                reason = ex["safety"] if isinstance(ex["safety"], str) else "safety"
         c = self.st["cfg"]
         ret = d * (px / pos["entry"] - 1) * 100
         row = {"time": time.strftime("%Y-%m-%d %H:%M:%S"), "symbol": self.ex.sym, "dir": "long" if d > 0 else "short",
@@ -614,7 +624,7 @@ class MaBot:
         c = self.st.get("cfg")
         pos = self.st.get("pos")
         out = {"time": int(self.now()), "dry": self.cfg.dry_run, "enabled": self.st.get("enabled"), "once": bool(self.st.get("once")),
-               "max_usdt": self.cfg.max_usdt, "max_lev": self.cfg.max_lev, "safety_stop": self.cfg.safety_stop, "pin_set": bool(self.cfg.pin),
+               "max_usdt": self.cfg.max_usdt, "max_lev": self.cfg.max_lev, "safety_stop": self.cfg.safety_stop, "max_loss_usdt": self.cfg.max_loss_usdt, "pin_set": bool(self.cfg.pin),
                "cfg": {k: c[k] for k in ("symbol", "interval", "usdt", "lev")} if c else None,
                "price": self.last_price, "msgs": self.st["msgs"][-15:], "trades": self.st["trades"][-20:],
                "entry_orders": list(self.st["entry_orders"].values()), "exit": self.st.get("exit") or {}}

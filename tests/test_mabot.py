@@ -123,6 +123,30 @@ class MaBotTest(unittest.TestCase):
         self.bot.step()
         self.assertEqual(self.bot.st["trades"][-1]["reason"], "safety")
 
+    def test_max_loss_caps_stop(self):
+        # 손절 없음(비상 -10%) + 최대 손실 2 USDT: 손절가를 2 USDT 잃는 가격으로 당기고, 닿으면 정리
+        self.bot.cfg.max_loss_usdt = 2.0
+        q = {**Q, "stop_mode": "pct", "sl": "0"}
+        write_request(self.dir, {"cmd": "long", "q": q, "usdt": 50, "lev": 1, "pin": ""})
+        self.bot.step()
+        self.bot.step()
+        ex = self.bot.st["exit"]
+        pos = self.bot.st["pos"]
+        self.assertEqual(ex["safety"], "maxloss")
+        loss = pos["qty"] * (pos["entry"] - ex["stop"]) + pos["qty"] * pos["entry"] * 0.001
+        self.assertAlmostEqual(loss, 2.0, delta=0.05)
+        self.price = ex["stop"] - 0.01
+        self.bot.step()
+        self.assertIsNone(self.bot.st["pos"])
+        self.assertEqual(self.bot.st["trades"][-1]["reason"], "maxloss")
+
+    def test_max_loss_keeps_tighter_rule_stop(self):
+        self.bot.cfg.max_loss_usdt = 50.0                 # 규칙 손절(-2%)이 더 가까우면 그대로
+        write_request(self.dir, {"cmd": "long", "q": Q, "usdt": 50, "lev": 1, "pin": ""})
+        self.bot.step()
+        self.bot.step()
+        self.assertFalse(self.bot.st["exit"]["safety"])
+
     def test_multi_lines_stop_on_entered_line(self):
         # 진입선 MA6(17.5) + MA3(19): 먼저 닿는 MA3 에 지정가, 손절은 진입한 MA3 닿음 -2%
         q = {**Q, "pb_ma": "sma:6", "pb2_ma": "sma:3", "stop_mode": "touch", "stop_ma": "same", "sl": "2"}

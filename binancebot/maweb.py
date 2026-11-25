@@ -189,7 +189,7 @@ def pullback(bars: list[dict], line: list, trend_line: list | None = None, stop_
              exit_ends: list | None = None, entry_pct: float = 0.0,
              dir_fast: list | None = None, dir_slow: list | None = None, win_reset: int = 0,
              extra_lines: list | None = None, stop_same: bool = False, line_ends: list | None = None,
-             entry_from: int = 0) -> dict:
+             entry_from: int = 0, opp_tp: float = 0.0, opp_block: float = 0.0) -> dict:
     """이평선 눌림 매매.
 
     롱: 직전 min_above 봉의 종가가 모두 눌림선 위 + 추세 조건 → 가격이 눌림선까지 내려오면 매수.
@@ -209,6 +209,8 @@ def pullback(bars: list[dict], line: list, trend_line: list | None = None, stop_
       최고가(롱)를 넘거나 최저가(숏) 아래로 내려간 적이 있어야 (새 고점·저점 → 다시 선까지 되돌아올 때). 0 = 끔.
     extra_lines: 진입선을 더 (예: MA50 + VWMA100 + MA200). 선마다 따로 대기 조건을 보고, 같은 봉에서 여러 선에
       닿으면 가격이 먼저 닿는 선(롱 = 가장 높은 선, 숏 = 가장 낮은 선)으로 진입. 한 번에 한 포지션.
+    opp_tp·opp_block: 진입선이 여러 개일 때, 진입하는 순간 이익 쪽(롱이면 위)에 있는 다른 진입선(반대 방향 선)까지
+      거리가 opp_block% 미만이면 진입 안 함, opp_tp% 이하이면 그 선에 닿을 때 익절 (원래 익절이 더 가까우면 그것). 0 = 끔.
     stop_same: 손절선 = 진입한 그 선 (line_ends = 진입선마다 끝나는 봉 표시, stop_ends 대신).
     stop_ends·exit_ends: 선이 차트보다 큰 봉이면 그 큰 봉이 끝나는 차트 봉에서만 종가 판단 (None = 차트 봉마다).
     진입한 봉에서는 손절만 확인 (익절은 다음 봉부터, 봉 안 순서를 모르므로 보수적으로).
@@ -227,6 +229,16 @@ def pullback(bars: list[dict], line: list, trend_line: list | None = None, stop_
     pend_open = None   # confirm 진입: 다음 봉 시가에 열 방향
     armed: dict[int, int] = {}  # confirm: 방향 → 닿은 봉 번호
     gate: dict[int, dict] = {}   # win_reset: 방향 → {기준 가격, 확인 시작 봉, 지금까지 본 봉, 그동안 최고·최저}
+
+    def opp_line(k: int, li: int, d: int, price: float):
+        """k 번째 봉 값 기준, li 로 price 에 들어갈 때 이익 쪽에 있는 가장 가까운 다른 진입선 (거리 %, 선 번호)."""
+        c = [(d * (pl[k] / price - 1) * 100, lj) for lj, pl in enumerate(pls)
+             if lj != li and k >= 0 and pl[k] is not None and d * (pl[k] - price) > 0]
+        return min(c) if c else None
+
+    def blocked(k: int, li: int, d: int, price: float) -> bool:
+        o = opp_line(k, li, d, price) if opp_block > 0 else None
+        return o is not None and o[0] < opp_block
 
     def gate_ok(k: int, d: int) -> bool:
         g = gate.get(d)
@@ -279,6 +291,9 @@ def pullback(bars: list[dict], line: list, trend_line: list | None = None, stop_
         nonlocal pos
         pos = {"dir": d, "entry": price, "t": bars[i]["t"], "i": i, "li": li}
         gate.pop(d, None)
+        o = opp_line(i - 1, li, d, price) if opp_tp > 0 else None
+        if o is not None and o[0] <= opp_tp:
+            pos["opp"] = o[1]   # 반대 방향 진입선에서 익절
         if stop_mode == "pct" and stop_pct > 0:
             pos["sl"] = price * (1 - d * stop_pct / 100)
         if tp_mode == "pct" and tp_pct > 0:
@@ -294,6 +309,16 @@ def pullback(bars: list[dict], line: list, trend_line: list | None = None, stop_
         return pos.get("sl")
 
     def tp_level(i: int) -> float | None:
+        base = tp_base(i)
+        if pos.get("opp") is None or i < 1:
+            return base
+        v = pls[pos["opp"]][i - 1]
+        d = pos["dir"]
+        if v is None or d * (v - pos["entry"]) <= 0 or (i < n and d * (v - bars[i - 1]["c"]) <= 0):
+            return base
+        return v if base is None or d * (v - base) < 0 else base
+
+    def tp_base(i: int) -> float | None:
         if tp_mode == "touch":
             v = tp_line[i - 1] if (tp_line is not None and i >= 1) else None
             d = pos["dir"]
@@ -325,7 +350,7 @@ def pullback(bars: list[dict], line: list, trend_line: list | None = None, stop_
             close_pos(i, b["o"], pend_reason)
             exited = True
         pend_close = False
-        if pend_open is not None and pos is None and b["t"] >= entry_from:
+        if pend_open is not None and pos is None and b["t"] >= entry_from                 and not blocked(i - 1, pend_open[1], pend_open[0], b["o"]):
             open_pos(i, pend_open[0], b["o"], pend_open[1])
             entered_now = True
         else:
@@ -354,6 +379,8 @@ def pullback(bars: list[dict], line: list, trend_line: list | None = None, stop_
                     if not ok_setup(i - 1, d, li):
                         continue
                     lv = pl[i - 1] * (1 + d * entry_pct / 100)
+                    if blocked(i - 1, li, d, min(b["o"], lv) if d > 0 else max(b["o"], lv)):
+                        continue   # 반대 방향 진입선이 너무 가까움
                     if (b["l"] <= lv) if d > 0 else (b["h"] >= lv):
                         hits.append((d * lv, -li, lv, li))
                 if hits:
@@ -405,6 +432,7 @@ def pullback(bars: list[dict], line: list, trend_line: list | None = None, stop_
         last = bars[-1]["c"]
         d = pos["dir"]
         open_info = {"dir": "long" if d > 0 else "short", "entry_time": pos["t"], "entry": pos["entry"], "line": pos["li"],
+                     "opp": pos.get("opp"),
                      "price": last, "ret_pct": (d * (last / pos["entry"] - 1) - fee) * 100,
                      "sl": stop_level(n) if stop_mode != "line" else None, "tp": tp_level(n)}
     # 실거래 봇용: 지금 걸어 둘 진입 지정가 (진행 중인 봉 기준)
@@ -412,7 +440,8 @@ def pullback(bars: list[dict], line: list, trend_line: list | None = None, stop_
     wait_orders = []
     if pos is None and entry == "touch" and n >= 2:
         for d in dirs:
-            c = [(d * pl[n - 2], -li, li) for li, pl in enumerate(pls) if ok_setup(n - 2, d, li)]
+            c = [(d * pl[n - 2], -li, li) for li, pl in enumerate(pls) if ok_setup(n - 2, d, li)
+                 and not blocked(n - 2, li, d, pl[n - 2] * (1 + d * entry_pct / 100))]
             if c:
                 li = max(c)[2]
                 wait_orders.append({"dir": d, "price": pls[li][n - 2] * (1 + d * entry_pct / 100), "line": li})
@@ -634,8 +663,8 @@ def run(market: Market, q: dict) -> dict:
     num = lambda k, dflt: float(q.get(k, dflt) or 0)  # noqa: E731
     if result["strat"] == "pullback":
         def ends_tf(t):
-            """그 선이 차트보다 큰 봉이면 큰 봉이 끝나는 차트 봉만 True."""
-            if INTERVALS[t] <= chart_sec:
+            """그 선이 차트보다 큰 봉이면 큰 봉이 끝나는 차트 봉만 True. ends5=1(실거래 봇)이면 차트 봉마다."""
+            if INTERVALS[t] <= chart_sec or q.get("ends5") == "1":
                 return None
             return [(b["t"] + chart_sec) % INTERVALS[t] == 0 for b in bars]
 
@@ -696,7 +725,7 @@ def run(market: Market, q: dict) -> dict:
             exit_line=exit_v if exit_on else None, exit_pct=num("exit_pct", 0),
             exit_ends=exit_e if exit_on else None, entry_pct=entry_pct, win_reset=int(num("win_reset", 0)),
             extra_lines=extra_v, stop_same=stop_same, line_ends=line_ends,
-            entry_from=int(num("_entry_from", 0)),
+            entry_from=int(num("_entry_from", 0)), opp_tp=num("opp_tp", 0), opp_block=num("opp_block", 0),
             side=q.get("side", "long"), min_above=int(num("min_above", 5)), trend=trend,
             slope_bars=int(num("slope_bars", 5)) or 1, entry=q.get("entry", "touch"),
             confirm_bars=int(num("confirm_bars", 5)) or 1, stop_mode=q.get("stop_mode", "pct"),

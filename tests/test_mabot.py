@@ -4,7 +4,7 @@ import time
 import unittest
 from pathlib import Path
 
-from binancebot.mabot import MaBot, PaperExchange, Settings, read_status, write_request
+from binancebot.mabot import MaBot, PaperExchange, Settings, base5, read_status, rule_summary, write_request
 
 
 def mk_bars(closes, sec=300):
@@ -160,6 +160,55 @@ class MaBotTest(unittest.TestCase):
         self.assertEqual(self.bot.st["pos"]["line"], 1)
         self.assertAlmostEqual(self.bot.st["exit"]["stop"], round(19.0 * 0.98, 2))
 
+    def test_opposite_line_take_profit(self):
+        # 진입선 MA3(19, 아래) + 위에 있는 MA10(반대 방향 선): 18.9 에 롱 → 위 선까지 20% 안이면 그 선에서 익절
+        self.market.closes = [22] * 8 + [16, 17, 18, 19, 20, 20]
+        q = {**Q, "pb2_ma": "sma:10", "opp_tp": "20", "opp_block": "1"}
+        write_request(self.dir, {"cmd": "start", "q": q, "usdt": 50, "lev": 2, "pin": ""})
+        self.bot.step()
+        self.assertEqual(self.bot.st["entry_orders"]["1"]["line"], 0)
+        self.price = 18.9
+        self.bot.step()
+        self.assertEqual(self.bot.st["pos"]["opp"], 1)
+        self.market.closes = self.market.closes + [19.2, 19.2]   # 다음 봉 (익절은 산 다음 봉부터)
+        self.bot.step()
+        self.assertAlmostEqual(self.bot.st["exit"]["tp"], 19.52)  # 그 봉의 MA10
+
+    def test_stop_checked_on_5m_bars(self):
+        # 차트는 1시간봉이어도 봇은 5분봉으로 계산: 1시간봉 3선은 진행 중인 1시간봉까지 반영((19+20+20)/3),
+        # 손절선 종가 이탈은 5분봉이 끝날 때마다
+        chart = mk_bars([10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 20], sec=3600)
+        five = {"closes": [20] * 6}
+
+        def bars(symbol, interval, count):
+            if interval == "5m":
+                t0 = chart[-1]["t"]
+                return [{"t": t0 + i * 300, "o": c, "h": c + 0.1, "l": c - 0.1, "c": c, "v": 1.0, "q": c}
+                        for i, c in enumerate(five["closes"])][-count:]
+            return chart[-count:]
+        self.market.bars = bars
+        q = {**Q, "interval": "1h", "stop_mode": "line", "stop_ma": "sma:3", "sl": "2"}
+        write_request(self.dir, {"cmd": "start", "q": q, "usdt": 50, "lev": 2, "pin": ""})
+        self.bot.step()
+        self.assertAlmostEqual(self.bot.st["entry_orders"]["1"]["price"], 19.67)
+        self.price = 18.9                                  # 1시간봉 3선에 닿아 롱
+        self.bot.step()
+        self.assertIsNotNone(self.bot.st["pos"])
+        five["closes"] = [20] * 6 + [19.5, 19.5]
+        self.bot.step()
+        self.assertIsNotNone(self.bot.st["pos"])           # 아직 5분봉 종가 이탈 없음
+        five["closes"] = [20] * 6 + [19.5, 19.5, 18.5, 18.6]   # 5분봉이 19.28(19.67 -2%) 아래로 마감
+        self.price = 18.7
+        self.bot.step()
+        self.assertEqual(self.bot.st["pos"]["reason"], "line")
+        self.bot.step()                                   # 다음 확인에서 정리 기록
+        self.assertIsNone(self.bot.st["pos"])
+        self.assertEqual(self.bot.st["trades"][-1]["reason"], "line")
+
+    def test_base5_keeps_chart_lines(self):
+        q = base5({"interval": "4h", "pb_ma": "sma:200", "pb_tf": "", "stop_tf": "15m", "tf1": ""}, "4h")
+        self.assertEqual((q["interval"], q["pb_tf"], q["stop_tf"], q["tf1"], q["ends5"]), ("5m", "4h", "15m", "4h", "1"))
+
     def test_exchange_lev_only_changes_margin(self):
         # 거래소 배율 5: 거래소에는 5배로 설정, 주문 크기는 그대로 투입금 x 화면 배율(50 x 2 = 100 USDT)
         self.bot.cfg.exchange_lev = 5
@@ -198,6 +247,17 @@ class MaBotTest(unittest.TestCase):
                                                   "time": time.time() - 3600}), encoding="utf-8")
         self.bot.step()
         self.assertIsNone(self.bot.st["cfg"])
+
+    def test_rule_summary(self):
+        q = {"side": "both", "pb_ma": "vwma:100", "pb_tf": "5m", "pb3_ma": "vwma:100", "pb3_tf": "15m",
+             "pb2_kind": "off", "entry": "touch", "entry_pct": "0.2", "min_above": "5", "stop_mode": "line",
+             "stop_ma": "same", "sl": "0.5", "tp_mode": "pct", "tp": "3", "max_hold": "10", "opp_tp": "3", "opp_block": "1"}
+        rows = dict(rule_summary(q, "5m"))
+        self.assertIn("5분봉 VWMA100 / 15분봉 VWMA100", rows["진입"])
+        self.assertIn("진입한 선", rows["손절"])
+        self.assertEqual(rows["익절"], "진입가 +3% 지정가")
+        self.assertIn("50분", rows["최대 보유"])
+        self.assertIn("반대 진입선", rows)
 
     def test_cross_not_allowed(self):
         self.start(q={**Q, "strat": "cross"})

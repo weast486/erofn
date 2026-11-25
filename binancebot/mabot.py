@@ -422,7 +422,7 @@ class MaBot:
         price = ex.price()
         self.last_price = price
         qty, entry = ex.position()
-        res = run(self.market, {**c["q"], "symbol": c["symbol"], "interval": c["interval"], "_live": "1",
+        res = run(self.market, {**base5(c["q"], c["interval"]), "symbol": c["symbol"], "_live": "1",
                                 "_entry_from": str(self.st.get("entry_from", 0))})
         bars = res["bars"]
         if qty == 0:
@@ -483,6 +483,7 @@ class MaBot:
         n = len(bars)
         d = 1 if qty > 0 else -1
         side_close = "SELL" if d > 0 else "BUY"
+        b5 = bars   # 봇은 늘 5분봉으로 계산 (base5)
         pos = self.st.get("pos")
         if not pos or pos.get("dir") != d:
             li = self._entry_line(res, d, entry)
@@ -490,13 +491,16 @@ class MaBot:
             self.ex.cancel_all()
             pos = self.st["pos"] = {"dir": d, "entry": entry, "qty": abs(qty), "t_ms": int(self.now() * 1000),
                                     "bar": bars[-1]["t"], "last_closed": bars[n - 2]["t"], "armed": False,
-                                    "line": li}
+                                    "line": li, "opp": self._opp_line(res, li, d, entry),
+                                    "bar5": b5[-1]["t"], "last5": b5[-2]["t"]}
             self.st["exit"] = {}
             self.msg(f"{'롱' if d > 0 else '숏'} 보유 시작 {abs(qty):g}개 @ {entry:.6g}")
         pos["entry"], pos["qty"] = entry, abs(qty)
+        pos.setdefault("bar5", b5[-1]["t"])
+        pos.setdefault("last5", b5[-2]["t"])
         sl, tpp = _f(q.get("sl")), _f(q.get("tp"))
         stop_mode, tp_mode = q.get("stop_mode", "pct"), q.get("tp_mode", "pct")
-        prev_c = bars[n - 2]["c"]
+        prev_c = b5[-2]["c"]   # 직전에 끝난 5분봉 종가
         stop_px = tp_px = None
         if live.get("stop_same"):   # 손절선 = 진입한 그 진입선
             li = min(pos.get("line", 0), len(live["pb_lines"]) - 1)
@@ -505,7 +509,7 @@ class MaBot:
             stop_px = entry * (1 - d * sl / 100)
         elif stop_mode == "touch" and live.get("stop") and live["stop"][n - 2] is not None:
             v = live["stop"][n - 2] * (1 - d * sl / 100)
-            first = bars[-1]["t"] == pos["bar"]
+            first = b5[-1]["t"] == pos["bar5"]
             if (first and d * (entry - v) > 0) or (not first and d * (prev_c - v) > 0):
                 stop_px = v
         safety = False
@@ -517,23 +521,32 @@ class MaBot:
             cap_px = entry - d * max(room, entry * 0.001)
             if stop_px is None or d * (cap_px - stop_px) > 0:
                 stop_px, safety = cap_px, "maxloss"
-        if bars[-1]["t"] > pos["bar"]:   # 익절은 산 다음 봉부터 (모의 매매와 같게)
+        if b5[-1]["t"] > pos["bar5"]:   # 익절은 산 다음 5분봉부터
             if tp_mode == "pct" and tpp > 0:
                 tp_px = entry * (1 + d * tpp / 100)
             elif tp_mode == "touch" and live.get("tp") and live["tp"][n - 2] is not None:
                 v = live["tp"][n - 2]
                 if d * (v - entry) > 0 and d * (v - prev_c) > 0:
                     tp_px = v
-        # 봉이 끝났을 때 종가로 판단하는 것들 (산 봉부터)
+            oj, pls = pos.get("opp"), live.get("pb_lines") or []
+            if oj is not None and oj < len(pls) and pls[oj] and pls[oj][n - 2] is not None:
+                v = pls[oj][n - 2]   # 반대 방향 진입선에서 익절 (원래 익절이 더 가까우면 그것)
+                if d * (v - entry) > 0 and d * (v - prev_c) > 0 and (tp_px is None or d * (v - tp_px) < 0):
+                    tp_px = v
         k = n - 2
+        # 손절선 종가 이탈: 5분봉이 끝날 때마다 그 종가로 판단 (산 5분봉부터)
+        if b5[-2]["t"] > pos["last5"] and b5[-2]["t"] >= pos["bar5"]:
+            pos["last5"] = b5[-2]["t"]
+            sv, se = live.get("stop"), live.get("stop_ends")
+            if stop_mode == "line" and sv and sv[k] is not None and (se is None or se[k]) \
+                    and d * (b5[-2]["c"] - sv[k] * (1 - d * sl / 100)) < 0:
+                self.close_now(self.ex.sym, "line")
+                return
+        # 차트 봉이 끝났을 때 종가로 판단하는 것들 (청산선·최대 보유 봉, 산 봉부터)
         if bars[k]["t"] > pos["last_closed"] and bars[k]["t"] >= pos["bar"]:
             pos["last_closed"] = bars[k]["t"]
             cl = bars[k]["c"]
             reason = None
-            sv, se = live.get("stop"), live.get("stop_ends")
-            if stop_mode == "line" and sv and sv[k] is not None and (se is None or se[k]) \
-                    and d * (cl - sv[k] * (1 - d * sl / 100)) < 0:
-                reason = "line"
             xv, xe = live.get("exit"), live.get("exit_ends")
             if not reason and xv and xv[k] is not None and (xe is None or xe[k]):
                 lim = xv[k] * (1 - d * _f(q.get("exit_pct")) / 100)
@@ -570,6 +583,17 @@ class MaBot:
                 tag = f" (최대 손실 {cap:g} USDT)" if safety == "maxloss" else (" (비상)" if safety else "")
                 self.msg(f"손절 {want['stop'] or '-'}{tag} · 익절 {want['tp'] or '-'}")
             self.st["exit"] = want
+
+    def _opp_line(self, res: dict, li: int, d: int, entry: float):
+        """진입 순간 이익 쪽에 있는 가장 가까운 다른 진입선이 opp_tp% 안이면 그 선 번호 (거기서 익절)."""
+        lim = _f(self.st["cfg"]["q"].get("opp_tp"))
+        pls = (res.get("live") or {}).get("pb_lines") or []
+        k = len(res["bars"]) - 2
+        if lim <= 0 or k < 0:
+            return None
+        c = [(d * (pl[k] / entry - 1) * 100, lj) for lj, pl in enumerate(pls)
+             if lj != li and pl and pl[k] is not None and d * (pl[k] - entry) > 0]
+        return min(c)[1] if c and min(c)[0] <= lim else None
 
     def _entry_line(self, res: dict, d: int, entry: float) -> int:
         """새로 생긴 포지션이 어느 진입선으로 들어왔는지: 걸어 둔 지정가 → 모의 매매 → 진입가에 가장 가까운 선."""
@@ -631,7 +655,7 @@ class MaBot:
         if c:
             q = c["q"]
             out["rule"] = {k: q.get(k) for k in ("pb_ma", "pb2_ma", "pb3_ma", "stop_mode", "stop_ma", "sl", "tp_mode", "tp_ma", "tp",
-                                                 "exit_ma", "entry", "entry_pct", "side", "max_hold", "win_reset", "dir_filter", "dfast_ma", "dslow_ma")}
+                                                 "exit_ma", "entry", "entry_pct", "side", "max_hold", "win_reset", "opp_tp", "opp_block", "dir_filter", "dfast_ma", "dslow_ma")}
         if pos and self.last_price:
             d = pos["dir"]
             out["pos"] = {"dir": "long" if d > 0 else "short", "qty": pos["qty"], "entry": pos["entry"],
@@ -643,7 +667,12 @@ class MaBot:
         except Exception:  # noqa: BLE001
             pass
         if res and res.get("sim"):
-            out["pending"] = res["sim"].get("pending")
+            self._view = {"pending": res["sim"].get("pending"), "lines": line_values(res, c["q"] if c else {})}
+        if c:
+            out["rule_text"] = rule_summary(c["q"], c["interval"])
+            view = getattr(self, "_view", None) or {}
+            out["pending"] = view.get("pending")
+            out["line_now"] = view.get("lines") or []
         tmp = self.dir / (STATUS_FILE + ".tmp")
         tmp.write_text(json.dumps(out, ensure_ascii=False), encoding="utf-8")
         os.replace(tmp, self.dir / STATUS_FILE)
@@ -669,7 +698,95 @@ class MaBot:
             time.sleep(0.5)
 
 
+# ------------------------------------------------------------ 지금 쓰는 조건 (화면 '진행 중인 조건' 칸)
+TF_NAME = {"1m": "1분", "3m": "3분", "5m": "5분", "15m": "15분", "30m": "30분", "1h": "1시간", "2h": "2시간",
+           "4h": "4시간", "6h": "6시간", "12h": "12시간", "1d": "일"}
+KIND_NAME = {"sma": "MA", "ema": "EMA", "vwma": "VWMA"}
+
+
+def _line_name(q: dict, name: str, interval: str) -> str:
+    ma = q.get(f"{name}_ma") or ""
+    if ":" not in ma:
+        return ""
+    kind, n = ma.split(":", 1)
+    tf = q.get(f"{name}_tf") or interval
+    return f"{TF_NAME.get(tf, tf)}봉 {KIND_NAME.get(kind, kind)}{n}"
+
+
+def rule_summary(q: dict, interval: str) -> list[list[str]]:
+    """봇이 지금 쓰는 규칙을 [항목, 내용] 줄로. 봉 수는 늘 5분봉 기준 (base5)."""
+    ln = lambda name: _line_name(q, name, interval)  # noqa: E731
+    num = lambda k: float(q.get(k) or 0)  # noqa: E731
+    pbs = [ln(k) for k in ("pb", "pb2", "pb3") if q.get(f"{k}_kind", "on") != "off" and ln(k)]
+    side = {"long": "롱만", "short": "숏만", "both": "롱·숏"}.get(q.get("side", "long"), q.get("side", ""))
+    rows = [["방향", side]]
+    ent = " / ".join(pbs) or "-"
+    how = "닿으면 지정가" if q.get("entry", "touch") == "touch" else f"닿은 뒤 5분봉 종가 확인 ({int(num('confirm_bars') or 5)}봉 안)"
+    pre = f", 선 {num('entry_pct'):g}% 앞에 미리 걸기" if num("entry_pct") else ""
+    rows.append(["진입", f"{ent} {how}{pre}"])
+    rows.append(["진입 조건", f"직전 5분봉 {int(num('min_above') or 5)}개 종가가 선 위(숏은 아래)"])
+    trend = q.get("trend", "none")
+    if trend != "none":
+        t = {"slope": "진입선 기울기 같은 방향", "above": f"가격이 {ln('trend')} 위(숏은 아래)",
+             "both": f"진입선 기울기 + {ln('trend')} 위(숏은 아래)"}.get(trend, trend)
+        rows.append(["추세 조건", t])
+    if q.get("dir_filter") == "align":
+        rows.append(["방향 필터", f"{ln('dfast')} > {ln('dslow')} 이면 롱만, 반대면 숏만"])
+    if num("win_reset"):
+        rows.append(["이익 뒤", f"직전 5분봉 {int(num('win_reset'))}개 고점(롱)·저점(숏)을 먼저 넘어야 다시 진입"])
+    if len(pbs) > 1 and (num("opp_tp") or num("opp_block")):
+        rows.append(["반대 진입선", f"{num('opp_tp'):g}% 이하로 가까우면 거기서 익절, {num('opp_block'):g}% 미만이면 진입 안 함"])
+    sm = q.get("stop_mode", "pct")
+    sline = "진입한 선" if q.get("stop_ma") == "same" else ln("stop")
+    stop = {"none": "없음", "pct": f"진입가 -{num('sl'):g}% 닿으면",
+            "line": f"5분봉 종가가 {sline}에서 {num('sl'):g}% 넘게 벗어나면 시장가",
+            "touch": f"{sline} -{num('sl'):g}% 닿으면 (거래소 손절)"}.get(sm, sm)
+    rows.append(["손절", stop])
+    tm = q.get("tp_mode", "pct")
+    tp = {"none": "없음", "pct": f"진입가 +{num('tp'):g}% 지정가", "touch": f"{ln('tp')} 닿으면"}.get(tm, tm)
+    rows.append(["익절", tp])
+    if q.get("exit_ma") and q.get("exit_ma") != "off" and ln("exit"):
+        rows.append(["추가 청산", f"5분봉 종가가 {ln('exit')}에서 {num('exit_pct'):g}% 넘게 벗어나면"])
+    if num("max_hold"):
+        mh = int(num("max_hold"))
+        rows.append(["최대 보유", f"5분봉 {mh}개 ({mh * 5}분) 지나면 정리"])
+    return rows
+
+
+def line_values(res: dict, q: dict) -> list[list]:
+    """지금 선 값 [이름, 값] (진행 중인 봉 포함)."""
+    live = res.get("live") or {}
+    out = []
+    for i, v in enumerate(live.get("pb_lines") or []):
+        if v and v[-1] is not None:
+            out.append([f"진입선 {i + 1}", v[-1]])
+    for key, name in (("stop", "손절선"), ("tp", "익절선"), ("exit", "청산선")):
+        v = live.get(key)
+        if key == "stop" and (live.get("stop_same") or q.get("stop_mode") not in ("line", "touch")):
+            continue
+        if key == "tp" and q.get("tp_mode") != "touch":
+            continue
+        if v and v[-1] is not None:
+            out.append([name, v[-1]])
+    return out
+
+
 # ------------------------------------------------------------ 화면(maweb) 쪽: 요청 파일·상태 읽기
+FIVE_TF_KEYS = ("tf1", "tf2", "tf3", "tf4") + tuple(f"{n}_tf" for n in
+                                               ("pb", "pb2", "pb3", "trend", "stop", "tp", "exit", "dfast", "dslow"))
+
+
+def base5(q: dict, interval: str) -> dict:
+    """봇 계산은 차트 봉과 상관없이 늘 5분봉으로: 봉을 비워 둔 선(= 차트 봉)은 원래 차트 봉 선으로 남기고
+    진입 조건 봉 수·최대 보유 봉·손절·익절·청산 판단은 5분봉마다 (큰 봉 선도 5분봉 종가로 판단)."""
+    out = dict(q)
+    for k in FIVE_TF_KEYS:
+        if not out.get(k):
+            out[k] = interval
+    out["interval"], out["ends5"] = "5m", "1"
+    return out
+
+
 def write_request(state_dir: str, req: dict) -> None:
     d = Path(state_dir) / REQ_DIR
     d.mkdir(parents=True, exist_ok=True)

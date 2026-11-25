@@ -243,6 +243,24 @@ class PullbackTest(unittest.TestCase):
         r = pullback(b, [100.0] * len(b), extra_lines=[[90.0] * len(b), [95.0] * len(b)], fee_pct=0)
         self.assertEqual(r["wait_orders"], [{"dir": 1, "price": 100.0, "line": 0}])
 
+    def test_opposite_line_take_and_block(self):
+        # 진입선 100(아래, 롱) + 102.5(위, 반대 방향): 100 에 롱 진입 → 위 선까지 2.5% ≤ 3% → 102.5 에서 익절
+        flat = [(101, 101.5, 100.5, 101)] * 6
+        b = ohlc(flat + [(101, 101, 99.5, 100.2), (100.2, 103, 100, 102.8), (102.8, 102.8, 102.8, 102.8)])
+        kw = dict(stop_pct=5, fee_pct=0, opp_tp=3, opp_block=1)
+        r = pullback(b, [100.0] * len(b), extra_lines=[[102.5] * len(b)], **kw)
+        t = r["trades"][0]
+        self.assertEqual((t["entry"], t["exit"], t["reason"]), (100.0, 102.5, "take"))
+        # 끄면 익절 없음 → 보유 중
+        self.assertIsNotNone(pullback(b, [100.0] * len(b), extra_lines=[[102.5] * len(b)], stop_pct=5, fee_pct=0)["open"])
+        # 위 선까지 0.8% < 1% → 진입 안 함, 지정가 대기도 없음
+        flat = [(100.5, 100.7, 100.3, 100.5)] * 6
+        b = ohlc(flat + [(100.5, 100.5, 99.5, 100.2), (100.2, 100.6, 100, 100.4)])
+        r = pullback(b, [100.0] * len(b), extra_lines=[[100.8] * len(b)], **kw)
+        self.assertEqual(r["trades"], [])
+        self.assertIsNone(r["open"])
+        self.assertEqual(pullback(ohlc(flat), [100.0] * 6, extra_lines=[[100.8] * 6], **kw)["wait_orders"], [])
+
     def test_run_multi_lines_same_stop(self):
         q = {"strat": "pullback", "interval": "5m", "pb_ma": "sma:2", "pb2_ma": "sma:4", "pb3_ma": "sma:6",
              "stop_mode": "line", "stop_ma": "same", "sl": "0", "side": "both", "_live": "1"}

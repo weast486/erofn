@@ -38,6 +38,9 @@ th:first-child,td:first-child{text-align:left}
 th{color:var(--mute);font-weight:600}
 .tbl{max-height:320px;overflow:auto;margin-top:12px}
 #status{color:var(--mute);font-size:12px;margin-left:auto}
+.lvrule{margin:8px 0;font-size:12px}.lvrule table{border-collapse:collapse;width:100%}
+.lvrule th{text-align:left;color:var(--mute);font-weight:normal;padding:2px 8px 2px 0;white-space:nowrap;vertical-align:top}
+.lvrule td{padding:2px 0}.lvrule-h{font-weight:bold;margin-bottom:4px}
 #err{color:var(--down);margin-top:8px;font-size:13px}
 .note{color:var(--mute);font-size:12px;margin-top:10px}
 .scanrow{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:0 10px}
@@ -102,6 +105,8 @@ details{margin-top:10px;border-top:1px solid var(--line);padding-top:6px}summary
         </select>
         <div class="opt" id="o_entry_pct"><span>선보다 미리 %</span><input id="entry_pct" type="number" value="0" min="0" max="1" step="0.1" title="0 = 선 가격, 0.1~1"></div>
         <div class="opt"><span title="이익으로 끝난 거래 다음 같은 방향 진입은, 그 거래 진입 뒤 가격이 진입 전 N봉 최고가(롱)를 넘거나 최저가(숏) 아래로 간 적이 있어야 함 (새 고점·저점 → 다시 선까지 되돌아올 때)">이익 뒤엔 새 고점·저점 먼저 (진입 전 N봉, 0 = 끔)</span><input id="win_reset" type="number" value="0" min="0" max="500" step="1"></div>
+        <div class="opt"><span title="진입선이 2개 이상일 때: 진입하는 순간 이익 쪽(롱이면 위)에 있는 다른 진입선까지 이 % 이하면 그 선에서 익절 (원래 익절이 더 가까우면 그것). 0 = 끔">반대 진입선 익절 (거리 % 이하)</span><input id="opp_tp" type="number" value="3" min="0" max="20" step="0.5"></div>
+        <div class="opt"><span title="진입하려는 가격에서 이익 쪽에 있는 다른 진입선까지 이 % 미만이면 진입 안 함. 0 = 끔">반대 진입선이 가까우면 진입 금지 (% 미만)</span><input id="opp_block" type="number" value="1" min="0" max="20" step="0.5"></div>
       </div>
       <div class="sec"><b>방향 필터</b>
         <select id="dir_filter">
@@ -211,6 +216,7 @@ details{margin-top:10px;border-top:1px solid var(--line);padding-top:6px}summary
         <button id="lv_close" class="b-close">전부 청산</button>
       </div>
       <div id="lv_info" class="lvinfo"></div>
+      <div id="lv_rule" class="lvrule"></div>
       <div id="lv_msgs" class="lvmsgs"></div>
     </div>
     <div class="panel" style="margin-top:12px"><div id="chart"></div></div>
@@ -299,7 +305,7 @@ function syncPicks(){RULES.forEach(nm=>{const kd=document.getElementById(nm+"_ki
   p.value=hit?v:"custom";document.getElementById(nm+"_cust").style.display=hit?"none":"";});}
 // 저장된 설정 되살리기
 const FIELDS=["bars","side","fee","lev","kind1","len1","kind2","len2","kind3","len3","kind4","len4","tf1","tf2","tf3","tf4",
-  "pb_kind","pb_len","pb_tf","pb2_kind","pb2_len","pb2_tf","pb3_kind","pb3_len","pb3_tf","win_reset","dir_filter","dfast_kind","dfast_len","dfast_tf","dslow_kind","dslow_len","dslow_tf","min_above","trend","trend_kind","trend_len","trend_tf","entry","entry_pct",
+  "pb_kind","pb_len","pb_tf","pb2_kind","pb2_len","pb2_tf","pb3_kind","pb3_len","pb3_tf","win_reset","opp_tp","opp_block","dir_filter","dfast_kind","dfast_len","dfast_tf","dslow_kind","dslow_len","dslow_tf","min_above","trend","trend_kind","trend_len","trend_tf","entry","entry_pct",
   "stop_sel","stop_kind","stop_len","stop_tf","pb_sl","tp_sel","tp_kind","tp_len","tp_tf","pb_tp","exit_sel","exit_kind","exit_len","exit_tf","exit_pct","max_hold"];
 // 빠른 설정 (차트 봉 + 눌림 매매 칸). 내 설정은 이 브라우저에 저장
 const PRESETS={
@@ -602,6 +608,7 @@ function ruleText(){
     ` · 손절 ${st==="none"?"없음":st==="pct"?"-"+g("pb_sl").value+"%":line("stop")+(st==="line"?" 마감 이탈":" 닿음")}`+
     ` · 익절 ${tp==="none"?"없음":tp==="pct"?"+"+g("pb_tp").value+"%":line("tp")+" 닿음"}`+
     `${g("exit_sel").value==="line"?" · 청산 "+line("exit")+" 이탈":""}`+
+    `${(g("pb2_kind").value!=="off"||g("pb3_kind").value!=="off")&&(+g("opp_tp").value||+g("opp_block").value)?" · 반대 진입선까지 "+g("opp_tp").value+"% 이하면 거기서 익절, "+g("opp_block").value+"% 미만이면 진입 안 함":""}`+
     `${+g("win_reset").value?" · 이익 뒤 진입 전 "+g("win_reset").value+"봉 고점(롱)·저점(숏) 돌파 먼저":""}`+
     `${g("dir_filter").value==="align"?" · 방향 "+line("dfast")+" > "+line("dslow")+" 롱만, 반대면 숏만":""} · ${opt("side")}`;
 }
@@ -656,6 +663,17 @@ async function pollLive(){
   if(s.trades&&s.trades.length){const t=s.trades.slice(-3).reverse();
     h+="<br>최근 정리: "+t.map(x=>`${x.time.slice(5,16)} ${x.dir==="long"?"롱":"숏"} ${REASON[x.reason]||x.reason} ${x.ret_pct>=0?"+":""}${x.ret_pct}%`).join(" · ");}
   if(Date.now()-liveSent>4000)LV("lv_info").innerHTML=h;
+  let r="";
+  if(s.alive&&s.rule_text&&s.rule_text.length){
+    const rows=s.rule_text.slice();
+    if(s.max_loss_usdt)rows.push(["최대 손실",`한 거래 ${s.max_loss_usdt} USDT 넘게 잃으면 바로 정리`]);
+    if(s.safety_stop)rows.push(["비상 손절",`규칙 손절이 없을 때 진입가 -${s.safety_stop}% (거래소)`]);
+    r=`<div class="lvrule-h">진행 중인 조건 <span class="hint">(봇이 지금 쓰는 값 · 봉 수는 모두 5분봉 기준)</span></div><table>`+
+      rows.map(x=>`<tr><th>${x[0]}</th><td>${x[1]}</td></tr>`).join("")+
+      ((s.line_now&&s.line_now.length)?`<tr><th>지금 선 값</th><td>${s.line_now.map(x=>`${x[0]} ${fmtP(x[1])}`).join(" · ")}${s.price?` (현재가 ${fmtP(s.price)})`:""}</td></tr>`:"")+
+      "</table>";
+  }
+  LV("lv_rule").innerHTML=r;
   LV("lv_msgs").innerHTML=(s.msgs||[]).slice().reverse().map(m=>`${fmtT(m.t).slice(3)} ${m.text}`).join("<br>");
 }
 pollLive();setInterval(pollLive,3000);

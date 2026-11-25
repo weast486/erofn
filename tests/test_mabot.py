@@ -259,6 +259,29 @@ class MaBotTest(unittest.TestCase):
         self.assertIn("50분", rows["최대 보유"])
         self.assertIn("반대 진입선", rows)
 
+    def test_far_reverse_entry_market(self):
+        # 숏 대기(가격이 3선 아래) 중 끝난 5분봉 종가가 3선에서 5% 넘게 아래 → 롱 시장가, 손절 -1% · 익절 +3%
+        self.market.closes = [30, 29, 28, 27, 26, 25, 24, 23, 22, 21, 20, 14, 14]
+        self.price = 14.0
+        q = {**Q, "side": "short", "far_pct": "5", "far_sl": "1", "far_tp": "3"}
+        write_request(self.dir, {"cmd": "start", "q": q, "usdt": 50, "lev": 2, "pin": ""})
+        self.bot.step()
+        self.assertIn("-1", self.bot.st["entry_orders"])  # 켠 순간의 진행 중인 봉은 원래 숏 지정가만
+        self.bot.st["entry_from"] = 0                     # (넘어가는 봉이 끝난 뒤 켜져 있던 것처럼)
+        self.bot.step()
+        self.assertEqual(self.bot.st["entry_orders"], {})  # 숏 지정가 취소 → 롱 시장가
+        self.bot.step()                                   # 다음 확인에서 보유 시작 (반대 진입)
+        pos = self.bot.st["pos"]
+        self.assertEqual((pos["dir"], pos.get("far")), (1, True))
+        e = pos["entry"]
+        self.assertAlmostEqual(self.bot.st["exit"]["stop"], round(e * 0.99, 2))
+        self.assertAlmostEqual(self.bot.st["exit"]["tp"], round(e * 1.03, 2))
+        self.bot.step()                                   # 같은 봉에서 다시 사지 않음
+        self.price = 13.8
+        self.bot.step()
+        self.assertIsNone(self.bot.st["pos"])
+        self.assertEqual(self.bot.st["trades"][-1]["reason"], "far_stop")
+
     def test_cross_not_allowed(self):
         self.start(q={**Q, "strat": "cross"})
         self.bot.step()

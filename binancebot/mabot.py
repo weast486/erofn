@@ -443,6 +443,18 @@ class MaBot:
             self._cancel_entries()
             return
         q = c["q"]
+        fo = (sim or {}).get("far_open")
+        if fo and fo["t"] == bars[-1]["t"] and self.st.get("far_bar") != bars[-1]["t"]:
+            # 반대 진입: 기다리던 진입선에서 far_pct% 넘게 벗어난 5분봉이 끝남 → 반대 방향 시장가
+            self.st["far_bar"] = bars[-1]["t"]
+            self._cancel_entries()
+            self.ensure_lev(c["lev"])
+            qty = self.qty_for(c["usdt"], c["lev"], price)
+            d = 1 if fo["dir"] == "long" else -1
+            self.st["far_pos"] = {"dir": d, "t_ms": int(self.now() * 1000)}
+            px = self.ex.market("BUY" if d > 0 else "SELL", qty)
+            self.msg(f"{'롱' if d > 0 else '숏'} 반대 진입 (진입선에서 {_f(q.get('far_pct')):g}% 벗어남) 시장가 {qty:g}개 @ {px or price:.6g}")
+            return
         if q.get("entry") == "confirm":
             o = sim.get("open") if sim else None
             if o and o["entry_time"] == bars[-1]["t"] and self.st.get("confirm_bar") != bars[-1]["t"]:
@@ -493,6 +505,9 @@ class MaBot:
                                     "bar": bars[-1]["t"], "last_closed": bars[n - 2]["t"], "armed": False,
                                     "line": li, "opp": self._opp_line(res, li, d, entry),
                                     "bar5": b5[-1]["t"], "last5": b5[-2]["t"]}
+            fp = self.st.pop("far_pos", None)
+            if fp and fp["dir"] == d and self.now() * 1000 - fp["t_ms"] < 600_000:
+                pos["far"] = True   # 반대 진입: 손절·익절 % 만
             self.st["exit"] = {}
             self.msg(f"{'롱' if d > 0 else '숏'} 보유 시작 {abs(qty):g}개 @ {entry:.6g}")
         pos["entry"], pos["qty"] = entry, abs(qty)
@@ -505,7 +520,10 @@ class MaBot:
         if live.get("stop_same"):   # 손절선 = 진입한 그 진입선
             li = min(pos.get("line", 0), len(live["pb_lines"]) - 1)
             live = {**live, "stop": live["pb_lines"][li], "stop_ends": live["pb_ends"][li]}
-        if stop_mode == "pct" and sl > 0:
+        far = bool(pos.get("far"))
+        if far:
+            stop_px = entry * (1 - d * _f(q.get("far_sl") or 1) / 100)
+        elif stop_mode == "pct" and sl > 0:
             stop_px = entry * (1 - d * sl / 100)
         elif stop_mode == "touch" and live.get("stop") and live["stop"][n - 2] is not None:
             v = live["stop"][n - 2] * (1 - d * sl / 100)
@@ -521,7 +539,9 @@ class MaBot:
             cap_px = entry - d * max(room, entry * 0.001)
             if stop_px is None or d * (cap_px - stop_px) > 0:
                 stop_px, safety = cap_px, "maxloss"
-        if b5[-1]["t"] > pos["bar5"]:   # 익절은 산 다음 5분봉부터
+        if far:
+            tp_px = entry * (1 + d * _f(q.get("far_tp") or 3) / 100)
+        elif b5[-1]["t"] > pos["bar5"]:   # 익절은 산 다음 5분봉부터
             if tp_mode == "pct" and tpp > 0:
                 tp_px = entry * (1 + d * tpp / 100)
             elif tp_mode == "touch" and live.get("tp") and live["tp"][n - 2] is not None:
@@ -534,8 +554,9 @@ class MaBot:
                 if d * (v - entry) > 0 and d * (v - prev_c) > 0 and (tp_px is None or d * (v - tp_px) < 0):
                     tp_px = v
         k = n - 2
+        # 반대 진입(far)은 손절·익절 % 만 (선 손절·청산선·최대 보유 없음)
         # 손절선 종가 이탈: 5분봉이 끝날 때마다 그 종가로 판단 (산 5분봉부터)
-        if b5[-2]["t"] > pos["last5"] and b5[-2]["t"] >= pos["bar5"]:
+        if not far and b5[-2]["t"] > pos["last5"] and b5[-2]["t"] >= pos["bar5"]:
             pos["last5"] = b5[-2]["t"]
             sv, se = live.get("stop"), live.get("stop_ends")
             if stop_mode == "line" and sv and sv[k] is not None and (se is None or se[k]) \
@@ -543,7 +564,7 @@ class MaBot:
                 self.close_now(self.ex.sym, "line")
                 return
         # 차트 봉이 끝났을 때 종가로 판단하는 것들 (청산선·최대 보유 봉, 산 봉부터)
-        if bars[k]["t"] > pos["last_closed"] and bars[k]["t"] >= pos["bar"]:
+        if not far and bars[k]["t"] > pos["last_closed"] and bars[k]["t"] >= pos["bar"]:
             pos["last_closed"] = bars[k]["t"]
             cl = bars[k]["c"]
             reason = None
@@ -618,12 +639,15 @@ class MaBot:
             log.info("정리 가격 조회 실패: %s", exc)
         px = ex_px or price
         reason = pos.get("reason")
+        far = pos.get("far")
         if not reason:   # 거래소 손절·익절 주문으로 정리됨 → 가까운 쪽
             ex = self.st.get("exit", {})
             cands = [(abs(px - v), r) for r, v in (("stop", ex.get("stop")), ("take", ex.get("tp"))) if v]
             reason = min(cands)[1] if cands else "?"
             if reason == "stop" and ex.get("safety"):
                 reason = ex["safety"] if isinstance(ex["safety"], str) else "safety"
+        if far and reason in ("stop", "take"):
+            reason = "far_" + reason   # 반대 진입 손절·익절
         c = self.st["cfg"]
         ret = d * (px / pos["entry"] - 1) * 100
         row = {"time": time.strftime("%Y-%m-%d %H:%M:%S"), "symbol": self.ex.sym, "dir": "long" if d > 0 else "short",
@@ -655,7 +679,7 @@ class MaBot:
         if c:
             q = c["q"]
             out["rule"] = {k: q.get(k) for k in ("pb_ma", "pb2_ma", "pb3_ma", "stop_mode", "stop_ma", "sl", "tp_mode", "tp_ma", "tp",
-                                                 "exit_ma", "entry", "entry_pct", "side", "max_hold", "win_reset", "opp_tp", "opp_block", "dir_filter", "dfast_ma", "dslow_ma")}
+                                                 "exit_ma", "entry", "entry_pct", "side", "max_hold", "win_reset", "opp_tp", "opp_block", "far_pct", "far_sl", "far_tp", "dir_filter", "dfast_ma", "dslow_ma")}
         if pos and self.last_price:
             d = pos["dir"]
             out["pos"] = {"dir": "long" if d > 0 else "short", "qty": pos["qty"], "entry": pos["entry"],
@@ -747,6 +771,9 @@ def rule_summary(q: dict, interval: str) -> list[list[str]]:
     rows.append(["익절", tp])
     if q.get("exit_ma") and q.get("exit_ma") != "off" and ln("exit"):
         rows.append(["추가 청산", f"5분봉 종가가 {ln('exit')}에서 {num('exit_pct'):g}% 넘게 벗어나면"])
+    if num("far_pct"):
+        rows.append(["반대 진입", f"가격이 진입선 전부의 바깥일 때 마지막 선(숏 대기면 가장 아래 선)에서 5분봉 종가가 {num('far_pct'):g}% 넘게 벗어나면 "
+                                f"반대 방향 시장가 · 손절 -{float(q.get('far_sl') or 1):g}% · 익절 +{float(q.get('far_tp') or 3):g}%"])
     if num("max_hold"):
         mh = int(num("max_hold"))
         rows.append(["최대 보유", f"5분봉 {mh}개 ({mh * 5}분) 지나면 정리"])

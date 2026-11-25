@@ -261,6 +261,36 @@ class PullbackTest(unittest.TestCase):
         self.assertIsNone(r["open"])
         self.assertEqual(pullback(ohlc(flat), [100.0] * 6, extra_lines=[[100.8] * 6], **kw)["wait_orders"], [])
 
+    def test_far_reverse_entry(self):
+        # 숏 대기(가격이 진입선 100 아래) 중 종가가 선에서 5% 넘게 아래(94.5) → 다음 봉 시가 롱, 손절 -1% · 익절 +3%
+        flat = [(98, 98.5, 97.5, 98)] * 6
+        cross = [(98, 98, 94, 94.5)]
+        kw = dict(side="short", stop_mode="line", stop_pct=0.5, fee_pct=0, far_pct=5, far_sl=1, far_tp=3)
+        b = ohlc(flat + cross + [(94.5, 95, 94.2, 94.8), (94.8, 97.5, 94.6, 97), (97, 97, 97, 97)])
+        r = pullback(b, [100.0] * len(b), **kw)
+        t = r["trades"][0]
+        self.assertEqual((t["dir"], t["entry"], t["reason"], t["far"]), ("long", 94.5, "take", True))
+        self.assertAlmostEqual(t["exit"], 94.5 * 1.03)
+        # 넘어가는 봉이 끝난 직후: 진행 중인 봉 시가에 롱 (실거래 봇은 far_open 을 보고 시장가)
+        b2 = ohlc(flat + cross + [(94.5, 94.6, 94.4, 94.5)])
+        r2 = pullback(b2, [100.0] * len(b2), **kw)
+        self.assertEqual(r2["far_open"]["dir"], "long")
+        self.assertEqual(r2["far_open"]["t"], b2[-1]["t"])
+        self.assertAlmostEqual(r2["open"]["sl"], 94.5 * 0.99)
+        # 손절 -1%
+        b3 = ohlc(flat + cross + [(94.5, 94.6, 93.0, 93.2), (93.2, 93.2, 93.2, 93.2)])
+        t3 = pullback(b3, [100.0] * len(b3), **kw)["trades"][0]
+        self.assertEqual((t3["reason"], t3["far"]), ("stop", True))
+        self.assertAlmostEqual(t3["exit"], 94.5 * 0.99)
+        # 이미 5% 넘게 벗어나 있던 상태가 이어지면 (넘어가는 순간이 아니면) 진입 안 함 / 끄면 없음
+        far_flat = [(94, 94.5, 93.5, 94)] * 8
+        self.assertEqual(pullback(ohlc(far_flat), [100.0] * 8, **kw)["trades"], [])
+        self.assertEqual(pullback(b, [100.0] * len(b), **{**kw, "far_pct": 0})["trades"], [])
+        # 마지막 자리에서만: 아래에 진입선(90)이 더 있으면 100 에서 5% 벗어나도 반대 진입 안 함
+        kw2 = {**kw, "side": "both"}
+        r4 = pullback(b, [100.0] * len(b), extra_lines=[[90.0] * len(b)], **kw2)
+        self.assertFalse(any(t.get("far") for t in r4["trades"]))
+
     def test_run_multi_lines_same_stop(self):
         q = {"strat": "pullback", "interval": "5m", "pb_ma": "sma:2", "pb2_ma": "sma:4", "pb3_ma": "sma:6",
              "stop_mode": "line", "stop_ma": "same", "sl": "0", "side": "both", "_live": "1"}

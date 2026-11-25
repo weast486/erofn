@@ -189,7 +189,8 @@ def pullback(bars: list[dict], line: list, trend_line: list | None = None, stop_
              exit_ends: list | None = None, entry_pct: float = 0.0,
              dir_fast: list | None = None, dir_slow: list | None = None, win_reset: int = 0,
              extra_lines: list | None = None, stop_same: bool = False, line_ends: list | None = None,
-             entry_from: int = 0, opp_tp: float = 0.0, opp_block: float = 0.0) -> dict:
+             entry_from: int = 0, opp_tp: float = 0.0, opp_block: float = 0.0,
+             far_pct: float = 0.0, far_sl: float = 1.0, far_tp: float = 3.0) -> dict:
     """이평선 눌림 매매.
 
     롱: 직전 min_above 봉의 종가가 모두 눌림선 위 + 추세 조건 → 가격이 눌림선까지 내려오면 매수.
@@ -211,6 +212,9 @@ def pullback(bars: list[dict], line: list, trend_line: list | None = None, stop_
       닿으면 가격이 먼저 닿는 선(롱 = 가장 높은 선, 숏 = 가장 낮은 선)으로 진입. 한 번에 한 포지션.
     opp_tp·opp_block: 진입선이 여러 개일 때, 진입하는 순간 이익 쪽(롱이면 위)에 있는 다른 진입선(반대 방향 선)까지
       거리가 opp_block% 미만이면 진입 안 함, opp_tp% 이하이면 그 선에 닿을 때 익절 (원래 익절이 더 가까우면 그것). 0 = 끔.
+    far_pct: 반대 진입 — 진입을 기다리는 동안(예: 숏 대기, 가격이 진입선 아래) 끝난 봉 종가가 가장 먼저 닿을
+      진입선(숏 = 가장 아래 선, 롱 = 가장 위 선)에서 far_pct% 넘게 — 가격이 진입선 전부의 바깥일 때만(마지막 자리) — 벗어나면(직전 봉은 안 벗어남) 다음 봉 시가에
+      반대 방향(이 예에서는 롱) 진입. 손절 -far_sl% · 익절 +far_tp% 만 씀 (선 손절·청산·최대 보유 없음). 0 = 끔.
     stop_same: 손절선 = 진입한 그 선 (line_ends = 진입선마다 끝나는 봉 표시, stop_ends 대신).
     stop_ends·exit_ends: 선이 차트보다 큰 봉이면 그 큰 봉이 끝나는 차트 봉에서만 종가 판단 (None = 차트 봉마다).
     진입한 봉에서는 손절만 확인 (익절은 다음 봉부터, 봉 안 순서를 모르므로 보수적으로).
@@ -228,6 +232,7 @@ def pullback(bars: list[dict], line: list, trend_line: list | None = None, stop_
     pend_reason = "line"
     pend_open = None   # confirm 진입: 다음 봉 시가에 열 방향
     armed: dict[int, int] = {}  # confirm: 방향 → 닿은 봉 번호
+    far_open = None   # 마지막 반대 진입 {dir, t, line} (실거래 봇이 시장가로 따라 함)
     gate: dict[int, dict] = {}   # win_reset: 방향 → {기준 가격, 확인 시작 봉, 지금까지 본 봉, 그동안 최고·최저}
 
     def opp_line(k: int, li: int, d: int, price: float):
@@ -277,8 +282,10 @@ def pullback(bars: list[dict], line: list, trend_line: list | None = None, stop_
         ret = (d * (price / pos["entry"] - 1) - 2 * fee) * 100
         trades.append({"dir": "long" if d > 0 else "short", "entry_time": pos["t"], "entry": pos["entry"],
                        "exit_time": bars[i]["t"], "exit": price, "reason": reason,
-                       "ret_pct": ret, "bars": i - pos["i"] + 1, "line": pos["li"]})
-        if win_reset > 0 and ret > 0:   # 이익 거래 → 다음 같은 방향은 새 고점(롱)·저점(숏)을 본 뒤에만
+                       "ret_pct": ret, "bars": i - pos["i"] + 1, "line": pos["li"], "far": bool(pos.get("far"))})
+        if pos.get("far"):
+            pass
+        elif win_reset > 0 and ret > 0:   # 이익 거래 → 다음 같은 방향은 새 고점(롱)·저점(숏)을 본 뒤에만
             e = pos["i"]
             before = bars[max(0, e - win_reset):e] or [bars[e]]
             ref = max(b["h"] for b in before) if d > 0 else min(b["l"] for b in before)
@@ -287,9 +294,13 @@ def pullback(bars: list[dict], line: list, trend_line: list | None = None, stop_
             gate.pop(d, None)
         pos = None
 
-    def open_pos(i: int, d: int, price: float, li: int = 0) -> None:
-        nonlocal pos
+    def open_pos(i: int, d: int, price: float, li: int = 0, far: bool = False) -> None:
+        nonlocal pos, far_open
         pos = {"dir": d, "entry": price, "t": bars[i]["t"], "i": i, "li": li}
+        if far:
+            pos.update(far=True, sl=price * (1 - d * far_sl / 100), tp=price * (1 + d * far_tp / 100))
+            far_open = {"dir": "long" if d > 0 else "short", "t": bars[i]["t"], "line": li}
+            return
         gate.pop(d, None)
         o = opp_line(i - 1, li, d, price) if opp_tp > 0 else None
         if o is not None and o[0] <= opp_tp:
@@ -303,12 +314,16 @@ def pullback(bars: list[dict], line: list, trend_line: list | None = None, stop_
         return pls[pos["li"]] if stop_same else stop_line
 
     def stop_level(i: int) -> float | None:
+        if pos.get("far"):
+            return pos.get("sl")
         if stop_mode == "touch":
             v = sline()[i - 1] if i >= 1 else None
             return None if v is None else v * (1 - pos["dir"] * stop_pct / 100)
         return pos.get("sl")
 
     def tp_level(i: int) -> float | None:
+        if pos.get("far"):
+            return pos.get("tp")
         base = tp_base(i)
         if pos.get("opp") is None or i < 1:
             return base
@@ -336,7 +351,7 @@ def pullback(bars: list[dict], line: list, trend_line: list | None = None, stop_
         if entry_bar and d * (pos["entry"] - sl) <= 0:  # 진입한 봉: 손절가가 진입가보다 불리한 쪽일 때만
             return None
         # 선 닿음 손절: 직전 봉 종가가 손절선 안전한 쪽(롱이면 위)에 있다가 내려와 닿을 때만
-        if stop_mode == "touch" and not entry_bar and d * (bars[i - 1]["c"] - sl) <= 0:
+        if stop_mode == "touch" and not pos.get("far") and not entry_bar and d * (bars[i - 1]["c"] - sl) <= 0:
             return None
         if (b["l"] <= sl) if d > 0 else (b["h"] >= sl):
             return min(b["o"], sl) if d > 0 else max(b["o"], sl)
@@ -350,9 +365,15 @@ def pullback(bars: list[dict], line: list, trend_line: list | None = None, stop_
             close_pos(i, b["o"], pend_reason)
             exited = True
         pend_close = False
-        if pend_open is not None and pos is None and b["t"] >= entry_from                 and not blocked(i - 1, pend_open[1], pend_open[0], b["o"]):
-            open_pos(i, pend_open[0], b["o"], pend_open[1])
+        far_now = pend_open is not None and len(pend_open) > 2
+        if pend_open is not None and pos is None and b["t"] >= entry_from                 and (far_now or not blocked(i - 1, pend_open[1], pend_open[0], b["o"])):
+            open_pos(i, pend_open[0], b["o"], pend_open[1], far=far_now)
             entered_now = True
+            if far_now:   # 반대 진입은 시가에 사므로 그 봉 안 손절도 확인
+                px = pct_stop_hit(b, i, entry_bar=True)
+                if px is not None:
+                    close_pos(i, px, "stop")
+                    exited = True
         else:
             entered_now = False
         pend_open = None
@@ -361,7 +382,7 @@ def pullback(bars: list[dict], line: list, trend_line: list | None = None, stop_
             px = pct_stop_hit(b, i)
             tp = tp_level(i) if px is None else None
             if px is not None:
-                close_pos(i, px, "line" if stop_mode == "touch" else "stop")
+                close_pos(i, px, "line" if stop_mode == "touch" and not pos.get("far") else "stop")
                 exited = True
             elif tp is not None:
                 d = pos["dir"]
@@ -394,6 +415,8 @@ def pullback(bars: list[dict], line: list, trend_line: list | None = None, stop_
         if i > last_closed:
             continue
         # 4) 봉이 끝난 뒤 판단: 손절선 이탈·보유 기간·confirm 진입
+        if pos and pos.get("far"):   # 반대 진입은 손절·익절 % 만
+            continue
         if pos:
             d = pos["dir"]
             sl_v, sl_e = (pls[pos["li"]], lends[pos["li"]]) if stop_same else (stop_line, stop_ends)
@@ -410,6 +433,21 @@ def pullback(bars: list[dict], line: list, trend_line: list | None = None, stop_
             if not pend_close and max_hold > 0 and i - pos["i"] + 1 >= max_hold:
                 close_pos(i, b["c"], "time")
             continue
+        if far_pct > 0 and not exited and i >= 1:
+            for d in dirs:
+                # 마지막 자리에서만: 가격이 진입선 전부의 바깥(숏 대기 = 모든 선 아래)이고 가장 바깥 선 대기 중일 때
+                if any(pl[i] is None or d * (b["c"] - pl[i]) <= 0 for pl in pls):
+                    continue
+                li = max((d * pls[lj][i], lj) for lj in range(len(pls)))[1]   # 가장 가까운 = 마지막 선
+                if not ok_setup(i, d, li):
+                    continue
+                lv, pv = pls[li][i], pls[li][i - 1]
+                beyond = lambda cl, v: v is not None and d * (cl / v - 1) * 100 >= far_pct  # noqa: E731
+                if beyond(b["c"], lv) and not beyond(bars[i - 1]["c"], pv):
+                    pend_open = (-d, li, "far")
+                    break
+            if pend_open is not None:
+                continue
         if entry == "confirm" and not exited:
             for d in dirs:
                 for li, pl in enumerate(pls):
@@ -432,9 +470,9 @@ def pullback(bars: list[dict], line: list, trend_line: list | None = None, stop_
         last = bars[-1]["c"]
         d = pos["dir"]
         open_info = {"dir": "long" if d > 0 else "short", "entry_time": pos["t"], "entry": pos["entry"], "line": pos["li"],
-                     "opp": pos.get("opp"),
+                     "opp": pos.get("opp"), "far": bool(pos.get("far")),
                      "price": last, "ret_pct": (d * (last / pos["entry"] - 1) - fee) * 100,
-                     "sl": stop_level(n) if stop_mode != "line" else None, "tp": tp_level(n)}
+                     "sl": stop_level(n) if (stop_mode != "line" or pos.get("far")) else None, "tp": tp_level(n)}
     # 실거래 봇용: 지금 걸어 둘 진입 지정가 (진행 중인 봉 기준)
     # 진입선이 여러 개면 방향마다 가격이 먼저 닿는 선 하나 (롱 = 가장 높은 선, 숏 = 가장 낮은 선)
     wait_orders = []
@@ -449,18 +487,28 @@ def pullback(bars: list[dict], line: list, trend_line: list | None = None, stop_
     if pend_close:
         pending = "다음 봉 시가에 청산 (" + ("청산선 이탈" if pend_reason == "exit" else "손절선 이탈") + ")"
     elif pend_open is not None:
-        pending = f"다음 봉 시가에 {'롱' if pend_open[0] > 0 else '숏'} 진입 (눌림 확인)"
+        why = f"진입선에서 {far_pct:g}% 벗어남 → 반대" if len(pend_open) > 2 else "눌림 확인"
+        pending = f"다음 봉 시가에 {'롱' if pend_open[0] > 0 else '숏'} 진입 ({why})"
     elif pos is None and n >= 2:
         waits = []
         tag = (lambda li: f" (진입선 {li + 1})") if len(pls) > 1 else (lambda li: "")
         for w in wait_orders:
             waits.append(f"{'롱' if w['dir'] > 0 else '숏'} 지정가 대기 {w['price']:.6g}{tag(w['line'])}")
+        if far_pct > 0:
+            k2 = n - 2
+            for d in dirs:
+                if any(pl[k2] is None or d * (bars[k2]["c"] - pl[k2]) <= 0 for pl in pls):
+                    continue
+                li = max((d * pls[lj][k2], lj) for lj in range(len(pls)))[1]
+                if ok_setup(k2, d, li):
+                    lv = pls[li][k2] * (1 + d * far_pct / 100)
+                    waits.append(f"반대 {'숏' if d > 0 else '롱'}: 종가 {lv:.6g} {'이상' if d > 0 else '이하'}로 마감하면")
         for d in dirs:
             if entry == "confirm" and any(x[0] == d for x in armed):
                 waits.append(f"{'롱' if d > 0 else '숏'}: 눌림선 닿음, 종가가 선 {'위' if d > 0 else '아래'}로 마감하면 진입")
         pending = " / ".join(waits) or None
     return {"trades": trades, "open": open_info, "pending": pending, "stats": stats(trades, leverage),
-            "wait_orders": wait_orders}
+            "wait_orders": wait_orders, "far_open": far_open}
 
 
 # ------------------------------------------------------------ 바이낸스 시세
@@ -726,6 +774,7 @@ def run(market: Market, q: dict) -> dict:
             exit_ends=exit_e if exit_on else None, entry_pct=entry_pct, win_reset=int(num("win_reset", 0)),
             extra_lines=extra_v, stop_same=stop_same, line_ends=line_ends,
             entry_from=int(num("_entry_from", 0)), opp_tp=num("opp_tp", 0), opp_block=num("opp_block", 0),
+            far_pct=num("far_pct", 0), far_sl=num("far_sl", 1), far_tp=num("far_tp", 3),
             side=q.get("side", "long"), min_above=int(num("min_above", 5)), trend=trend,
             slope_bars=int(num("slope_bars", 5)) or 1, entry=q.get("entry", "touch"),
             confirm_bars=int(num("confirm_bars", 5)) or 1, stop_mode=q.get("stop_mode", "pct"),

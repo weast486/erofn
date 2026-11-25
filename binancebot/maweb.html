@@ -104,9 +104,11 @@ details{margin-top:10px;border-top:1px solid var(--line);padding-top:6px}summary
           <option value="confirm">닿은 뒤 종가가 선 위로 마감하면 다음 봉 시가</option>
         </select>
         <div class="opt" id="o_entry_pct"><span>선보다 미리 %</span><input id="entry_pct" type="number" value="0" min="0" max="1" step="0.1" title="0 = 선 가격, 0.1~1"></div>
-        <div class="opt"><span title="이익으로 끝난 거래 다음 같은 방향 진입은, 그 거래 진입 뒤 가격이 진입 전 N봉 최고가(롱)를 넘거나 최저가(숏) 아래로 간 적이 있어야 함 (새 고점·저점 → 다시 선까지 되돌아올 때)">이익 뒤엔 새 고점·저점 먼저 (진입 전 N봉, 0 = 끔)</span><input id="win_reset" type="number" value="0" min="0" max="500" step="1"></div>
         <div class="opt"><span title="진입선이 2개 이상일 때: 진입하는 순간 이익 쪽(롱이면 위)에 있는 다른 진입선까지 이 % 이하면 그 선에서 익절 (원래 익절이 더 가까우면 그것). 0 = 끔">반대 진입선 익절 (거리 % 이하)</span><input id="opp_tp" type="number" value="3" min="0" max="20" step="0.5"></div>
         <div class="opt"><span title="진입하려는 가격에서 이익 쪽에 있는 다른 진입선까지 이 % 미만이면 진입 안 함. 0 = 끔">반대 진입선이 가까우면 진입 금지 (% 미만)</span><input id="opp_block" type="number" value="1" min="0" max="20" step="0.5"></div>
+        <div class="opt"><span title="진입을 기다리는 동안(예: 숏 대기 = 가격이 진입선 아래) 가격이 진입선 전부의 바깥에 있을 때(마지막 자리), 끝난 봉 종가가 마지막 선(숏 대기면 가장 아래 선)에서 이 % 넘게 벗어나면 다음 봉 시가에 반대 방향(그 예에서는 롱)으로 진입. 바로 앞 봉은 안 벗어났을 때만 (넘어가는 순간 한 번). 0 = 끔">반대 진입 (진입선에서 % 벗어나면)</span><input id="far_pct" type="number" value="0" min="0" max="50" step="0.5"></div>
+        <div class="opt"><span title="반대 진입의 손절 (진입가 기준 %). 원래 손절선·청산선·최대 보유는 안 씀">반대 진입 손절 %</span><input id="far_sl" type="number" value="1" min="0.1" max="20" step="0.1"></div>
+        <div class="opt"><span title="반대 진입의 익절 (진입가 기준 % 지정가)">반대 진입 익절 %</span><input id="far_tp" type="number" value="3" min="0.1" max="50" step="0.1"></div>
       </div>
       <div class="sec"><b>방향 필터</b>
         <select id="dir_filter">
@@ -247,7 +249,7 @@ const TF=[["1m","1분"],["5m","5분"],["15m","15분"],["1h","1시간"],["4h","4�
 const TF_SEC={"1m":60,"5m":300,"15m":900,"1h":3600,"4h":14400,"1d":86400};
 const COLORS=["#e0a100","#2f80ed","#9b51e0","#e05252"];
 const KST=9*3600;
-const REASON={cross:"교차",stop:"손절",take:"익절",line:"손절선",exit:"이탈",time:"시간",manual:"수동",safety:"비상손절"};
+const REASON={cross:"교차",stop:"손절",take:"익절",line:"손절선",exit:"이탈",time:"시간",manual:"수동",safety:"비상손절",maxloss:"최대손실",far_stop:"반대진입 손절",far_take:"반대진입 익절"};
 // 차트 4선 (사용자 요청 2026-11-21: 20·50·거래량가중 100·200)
 const DEF=[["sma",20],["sma",50],["vwma",100],["sma",200]];
 let tf="1h", chart, candle, lineSeries=[], timer=null, lastSignal=null;
@@ -305,7 +307,7 @@ function syncPicks(){RULES.forEach(nm=>{const kd=document.getElementById(nm+"_ki
   p.value=hit?v:"custom";document.getElementById(nm+"_cust").style.display=hit?"none":"";});}
 // 저장된 설정 되살리기
 const FIELDS=["bars","side","fee","lev","kind1","len1","kind2","len2","kind3","len3","kind4","len4","tf1","tf2","tf3","tf4",
-  "pb_kind","pb_len","pb_tf","pb2_kind","pb2_len","pb2_tf","pb3_kind","pb3_len","pb3_tf","win_reset","opp_tp","opp_block","dir_filter","dfast_kind","dfast_len","dfast_tf","dslow_kind","dslow_len","dslow_tf","min_above","trend","trend_kind","trend_len","trend_tf","entry","entry_pct",
+  "pb_kind","pb_len","pb_tf","pb2_kind","pb2_len","pb2_tf","pb3_kind","pb3_len","pb3_tf","opp_tp","opp_block","far_pct","far_sl","far_tp","dir_filter","dfast_kind","dfast_len","dfast_tf","dslow_kind","dslow_len","dslow_tf","min_above","trend","trend_kind","trend_len","trend_tf","entry","entry_pct",
   "stop_sel","stop_kind","stop_len","stop_tf","pb_sl","tp_sel","tp_kind","tp_len","tp_tf","pb_tp","exit_sel","exit_kind","exit_len","exit_tf","exit_pct","max_hold"];
 // 빠른 설정 (차트 봉 + 눌림 매매 칸). 내 설정은 이 브라우저에 저장
 const PRESETS={
@@ -356,7 +358,8 @@ RULES.forEach(nm=>["_kind","_len"].forEach(x=>document.getElementById(nm+x).addE
 // 손절 방법을 바꾸면 % 칸을 그 방법의 보통 값으로 (매수가 -% = 2, 선 = 여유 0)
 document.getElementById("stop_sel").addEventListener("change",e=>{document.getElementById("pb_sl").value=e.target.value==="pct"?2:0;refreshForm()});
 // 예전에 저장된 선 1~4(EMA20 등)는 한 번만 새 기본 4선으로 바꿈
-FIELDS.forEach(f=>{if(saved[f]!==undefined&&(saved.mas_v2||!/^(kind|len|tf)[1-4]$/.test(f)))document.getElementById(f).value=saved[f]});
+// 반대 진입 % 는 기본 0(끔) 으로 바꾼 뒤(far_v2) 저장된 값만 되살림 (예전에 기본 5 로 저장된 값이 켜지지 않게)
+FIELDS.forEach(f=>{if(saved[f]!==undefined&&(saved.mas_v2||!/^(kind|len|tf)[1-4]$/.test(f))&&(f!=="far_pct"||saved.far_v2))document.getElementById(f).value=saved[f]});
 refreshForm();
 if(saved.mtf!==undefined)document.getElementById("mtf").checked=saved.mtf;
 document.getElementById("mtf_legend").innerHTML=MTF.map(([k,n,c])=>`<span><span style="display:inline-block;width:14px;height:3px;background:${c};vertical-align:middle;margin-right:3px"></span>${n}</span>`).join("");
@@ -454,7 +457,7 @@ function buildParams(){
 }
 async function load(){
   const {q,p,mtfOn}=buildParams();
-  try{const old=JSON.parse(localStorage.getItem("maweb")||"{}");localStorage.setItem("maweb",JSON.stringify({...old,...q,tf,strat,mtf:mtfOn,mas_v2:true}))}catch(e){}
+  try{const old=JSON.parse(localStorage.getItem("maweb")||"{}");localStorage.setItem("maweb",JSON.stringify({...old,...q,tf,strat,mtf:mtfOn,mas_v2:true,far_v2:true}))}catch(e){}
   document.getElementById("status").textContent="불러오는 중…";
   document.getElementById("err").textContent="";
   try{
@@ -483,7 +486,7 @@ function draw(d){
     s.trades.forEach(t=>{
       const L=t.dir==="long";
       markers.push({time:sh(t.entry_time),position:L?"belowBar":"aboveBar",color:L?"#089981":"#e5484d",shape:L?"arrowUp":"arrowDown",text:L?"롱":"숏"});
-      markers.push({time:sh(t.exit_time),position:L?"aboveBar":"belowBar",color:"#6b7280",shape:"circle",text:REASON[t.reason]});
+      markers.push({time:sh(t.exit_time),position:L?"aboveBar":"belowBar",color:"#6b7280",shape:"circle",text:(t.far?"반대 ":"")+REASON[t.reason]});
     });
     if(s.open){const L=s.open.dir==="long";markers.push({time:sh(s.open.entry_time),position:L?"belowBar":"aboveBar",color:L?"#089981":"#e5484d",shape:L?"arrowUp":"arrowDown",text:L?"롱(보유)":"숏(보유)"})}
   }
@@ -511,7 +514,7 @@ function draw(d){
   // 거래 표 (최근 것이 위)
   const tb=document.getElementById("trades");
   tb.innerHTML="<tr><th>진입 시각</th><th>방향</th><th>진입가</th><th>청산 시각</th><th>청산가</th><th>사유</th><th>보유 봉(산 봉 포함)</th><th>손익(배율 전)</th></tr>"+
-    (s?s.trades.slice().reverse().map(t=>`<tr><td>${fmtT(t.entry_time)}</td><td>${t.dir==="long"?"롱":"숏"}</td><td>${fmtP(t.entry)}</td><td>${fmtT(t.exit_time)}</td><td>${fmtP(t.exit)}</td><td>${REASON[t.reason]}</td><td>${t.bars}</td><td>${pct(t.ret_pct)}</td></tr>`).join(""):"");
+    (s?s.trades.slice().reverse().map(t=>`<tr><td>${fmtT(t.entry_time)}</td><td>${t.dir==="long"?"롱":"숏"}</td><td>${fmtP(t.entry)}</td><td>${fmtT(t.exit_time)}</td><td>${fmtP(t.exit)}</td><td>${t.far?"반대진입 ":""}${REASON[t.reason]}</td><td>${t.bars}</td><td>${pct(t.ret_pct)}</td></tr>`).join(""):"");
 }
 
 function schedule(){
@@ -609,7 +612,7 @@ function ruleText(){
     ` · 익절 ${tp==="none"?"없음":tp==="pct"?"+"+g("pb_tp").value+"%":line("tp")+" 닿음"}`+
     `${g("exit_sel").value==="line"?" · 청산 "+line("exit")+" 이탈":""}`+
     `${(g("pb2_kind").value!=="off"||g("pb3_kind").value!=="off")&&(+g("opp_tp").value||+g("opp_block").value)?" · 반대 진입선까지 "+g("opp_tp").value+"% 이하면 거기서 익절, "+g("opp_block").value+"% 미만이면 진입 안 함":""}`+
-    `${+g("win_reset").value?" · 이익 뒤 진입 전 "+g("win_reset").value+"봉 고점(롱)·저점(숏) 돌파 먼저":""}`+
+    `${+g("far_pct").value?" · 진입선에서 "+g("far_pct").value+"% 벗어나면 반대 진입 (손절 -"+g("far_sl").value+"% · 익절 +"+g("far_tp").value+"%)":""}`+
     `${g("dir_filter").value==="align"?" · 방향 "+line("dfast")+" > "+line("dslow")+" 롱만, 반대면 숏만":""} · ${opt("side")}`;
 }
 async function sendLive(cmd,needPin){

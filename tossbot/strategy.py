@@ -609,7 +609,8 @@ class BreakoutStrategy(PullbackStrategy):
         if not self.market_allows_buy(today):
             return
         # 조회 오류가 나면 예외가 전파되어 다음 주기(매수 시간대 안)에 다시 시도
-        cands = self.select(self.broker.client, set(self.state.positions), slots, self.params(), today)
+        cands = (self.select(self.broker.client, set(self.state.positions), slots, self.params(), today)
+                 if self.cfg.breakout_buy else [])
         self._mark_bought(today)
         if not cands:
             return
@@ -681,7 +682,7 @@ class ComboStrategy(BreakoutStrategy):
             return
         client = self.broker.client
         held = set(self.state.positions)
-        bo = self.select(client, held, slots, self.params(), today)
+        bo = self.select(client, held, slots, self.params(), today) if self.cfg.breakout_buy else []
         rs = []
         if len(bo) < slots:
             rs = self.select_rsi(client, self.universe, held | {c.symbol for c in bo}, slots - len(bo),

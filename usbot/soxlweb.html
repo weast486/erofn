@@ -1,0 +1,184 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SOXL vs 편입 상위 종목</title>
+<style>
+  :root { --bg:#0f1115; --panel:#181b22; --line:#2a2f3a; --text:#e6e8ec; --muted:#8a91a0; }
+  * { box-sizing:border-box; }
+  body { margin:0; font:14px/1.5 system-ui, "Malgun Gothic", sans-serif; background:var(--bg); color:var(--text); }
+  header { padding:14px 18px; display:flex; flex-wrap:wrap; gap:10px; align-items:center; border-bottom:1px solid var(--line); }
+  h1 { font-size:17px; margin:0 12px 0 0; }
+  .btns button, select { background:var(--panel); color:var(--text); border:1px solid var(--line); border-radius:6px; padding:5px 10px; cursor:pointer; font:inherit; }
+  .btns button.on { background:#2d6cdf; border-color:#2d6cdf; }
+  label { color:var(--muted); display:flex; gap:6px; align-items:center; }
+  main { padding:14px 18px; display:grid; gap:14px; }
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:12px; }
+  #chart { width:100%; height:480px; display:block; }
+  #legend { display:flex; flex-wrap:wrap; gap:8px 16px; margin-bottom:8px; }
+  #legend span { cursor:pointer; user-select:none; display:flex; align-items:center; gap:6px; }
+  #legend span.off { opacity:.35; }
+  #legend i { width:14px; height:3px; border-radius:2px; display:inline-block; }
+  table { width:100%; border-collapse:collapse; }
+  th, td { padding:6px 8px; border-bottom:1px solid var(--line); text-align:right; }
+  th:nth-child(-n+3), td:nth-child(-n+3) { text-align:left; }
+  th { color:var(--muted); font-weight:500; }
+  .up { color:#ef5350; } .dn { color:#42a5f5; }
+  .muted { color:var(--muted); font-size:12px; }
+  #tip { position:fixed; pointer-events:none; background:#000c; border:1px solid var(--line); border-radius:6px; padding:6px 8px; font-size:12px; display:none; z-index:5; }
+</style>
+</head>
+<body>
+<header>
+  <h1>SOXL vs 편입 상위 종목</h1>
+  <div class="btns" id="ranges"></div>
+  <label>종목 수 <select id="n"><option>3</option><option selected>5</option><option>7</option><option>10</option></select></label>
+  <label><input type="checkbox" id="div3"> SOXL ÷ 3 으로 보기</label>
+  <label><input type="checkbox" id="auto" checked> 1분마다 새로고침</label>
+  <span class="muted" id="status"></span>
+</header>
+<main>
+  <div class="card">
+    <div id="legend"></div>
+    <svg id="chart"></svg>
+    <div class="muted">세로축 = 기간 첫 봉 대비 등락률(%). 정규장 봉만. 가중평균 = 편입 비중대로 섞은 값 (SOXL 은 매일 지수의 3배라 기간이 길면 ÷3 과도 어긋남).</div>
+  </div>
+  <div class="card">
+    <table id="tbl"></table>
+    <div class="muted" id="src"></div>
+  </div>
+</main>
+<div id="tip"></div>
+<script>
+const RANGES = [["1d","오늘"],["5d","5일"],["1mo","1개월"],["3mo","3개월"],["6mo","6개월"],["1y","1년"],["2y","2년"]];
+const COLORS = ["#ffd54f","#ef5350","#66bb6a","#42a5f5","#ab47bc","#ff8a65","#26c6da","#d4e157","#ec407a","#8d6e63","#90a4ae"];
+let range = localStorage.getItem("soxl_range") || "5d";
+let data = null, hidden = new Set(JSON.parse(localStorage.getItem("soxl_hidden") || "[]"));
+const $ = id => document.getElementById(id);
+$("n").value = localStorage.getItem("soxl_n") || "5";
+$("div3").checked = localStorage.getItem("soxl_div3") === "1";
+
+function drawRanges() {
+  $("ranges").innerHTML = "";
+  for (const [k, t] of RANGES) {
+    const b = document.createElement("button");
+    b.textContent = t; b.className = k === range ? "on" : "";
+    b.onclick = () => { range = k; localStorage.setItem("soxl_range", k); drawRanges(); load(); };
+    $("ranges").append(b);
+  }
+}
+
+async function load() {
+  $("status").textContent = "불러오는 중…";
+  try {
+    const r = await fetch(`/api/compare?range=${range}&n=${$("n").value}`);
+    const j = await r.json();
+    if (j.error) throw new Error(j.error);
+    data = j; draw();
+    const err = Object.entries(j.errors).map(([s, e]) => `${s}: ${e}`).join(", ");
+    $("status").textContent = `갱신 ${new Date().toLocaleTimeString("ko-KR")} · 봉 ${j.interval}` + (err ? ` · 실패 ${err}` : "");
+  } catch (e) { $("status").textContent = "오류: " + e.message; }
+}
+
+function seriesList() {
+  const names = Object.keys(data.lines);
+  return names.map((name, i) => {
+    let v = data.lines[name];
+    if (name === data.etf && $("div3").checked) v = v.map(x => x == null ? null : x / 3);
+    return { name, v, color: COLORS[i % COLORS.length], width: name === data.etf ? 3 : (name.includes("가중") ? 2.5 : 1.5),
+             dash: name.includes("가중") ? "6 4" : "" };
+  });
+}
+
+function fmtT(t) {
+  const d = new Date(t * 1000);
+  const opt = data.interval.endsWith("m") || data.interval.endsWith("h")
+    ? { month:"numeric", day:"numeric", hour:"2-digit", minute:"2-digit", timeZone:"America/New_York" }
+    : { year:"2-digit", month:"numeric", day:"numeric", timeZone:"America/New_York" };
+  return d.toLocaleString("ko-KR", opt);
+}
+
+function draw() {
+  const svg = $("chart"), W = svg.clientWidth, H = svg.clientHeight;
+  const L = 56, R = 70, T = 10, B = 28;
+  const ss = seriesList(), shown = ss.filter(s => !hidden.has(s.name)), n = data.times.length;
+  // 범례
+  $("legend").innerHTML = "";
+  for (const s of ss) {
+    const sp = document.createElement("span");
+    sp.className = hidden.has(s.name) ? "off" : "";
+    const rk = data.top.findIndex(t => t.symbol === s.name);
+    const label = rk >= 0 ? `${rk + 1}위 ${s.name} (${data.top[rk].weight.toFixed(2)}%)` : s.name;
+    sp.innerHTML = `<i style="background:${s.color}"></i>${label}`;
+    sp.onclick = () => { hidden.has(s.name) ? hidden.delete(s.name) : hidden.add(s.name);
+      localStorage.setItem("soxl_hidden", JSON.stringify([...hidden])); draw(); };
+    $("legend").append(sp);
+  }
+  let lo = Infinity, hi = -Infinity;
+  for (const s of shown) for (const x of s.v) if (x != null) { lo = Math.min(lo, x); hi = Math.max(hi, x); }
+  if (!isFinite(lo)) { svg.innerHTML = ""; return; }
+  const pad = (hi - lo) * 0.06 || 1; lo -= pad; hi += pad;
+  const X = i => L + (W - L - R) * (n > 1 ? i / (n - 1) : 0.5);
+  const Y = v => T + (H - T - B) * (hi - v) / (hi - lo);
+  let g = "";
+  const step = niceStep((hi - lo) / 6);
+  for (let v = Math.ceil(lo / step) * step; v <= hi; v += step) {
+    g += `<line x1="${L}" x2="${W - R}" y1="${Y(v)}" y2="${Y(v)}" stroke="${Math.abs(v) < 1e-9 ? "#556" : "#252a34"}"/>`;
+    g += `<text x="${L - 6}" y="${Y(v) + 4}" fill="#8a91a0" font-size="11" text-anchor="end">${v.toFixed(step < 1 ? 1 : 0)}%</text>`;
+  }
+  for (let k = 0; k < 6; k++) {
+    const i = Math.round((n - 1) * k / 5);
+    g += `<text x="${X(i)}" y="${H - 8}" fill="#8a91a0" font-size="11" text-anchor="middle">${fmtT(data.times[i])}</text>`;
+  }
+  for (const s of shown) {
+    let d = "", pen = false;
+    s.v.forEach((x, i) => { if (x == null) { pen = false; return; } d += (pen ? "L" : "M") + X(i).toFixed(1) + "," + Y(x).toFixed(1); pen = true; });
+    g += `<path d="${d}" fill="none" stroke="${s.color}" stroke-width="${s.width}" stroke-dasharray="${s.dash}"/>`;
+    const last = [...s.v].reverse().find(x => x != null);
+    g += `<text x="${W - R + 4}" y="${Y(last) + 4}" fill="${s.color}" font-size="11">${s.name.split(" ")[0]} ${last.toFixed(1)}%</text>`;
+  }
+  g += `<line id="cross" y1="${T}" y2="${H - B}" stroke="#667" stroke-dasharray="3 3" style="display:none"/>`;
+  svg.innerHTML = g;
+  svg.onmousemove = e => {
+    const rect = svg.getBoundingClientRect(), x = e.clientX - rect.left;
+    const i = Math.max(0, Math.min(n - 1, Math.round((x - L) / (W - L - R) * (n - 1))));
+    const c = $("cross"); c.style.display = ""; c.setAttribute("x1", X(i)); c.setAttribute("x2", X(i));
+    const rows = shown.map(s => [s, s.v[i]]).filter(r => r[1] != null).sort((a, b) => b[1] - a[1])
+      .map(([s, v]) => `<div><span style="color:${s.color}">■</span> ${s.name} <b class="${v >= 0 ? "up" : "dn"}">${v >= 0 ? "+" : ""}${v.toFixed(2)}%</b></div>`).join("");
+    const tip = $("tip"); tip.innerHTML = `<div class="muted">${fmtT(data.times[i])} (미국 동부)</div>` + rows;
+    tip.style.display = "block";
+    tip.style.left = Math.min(e.clientX + 14, innerWidth - 220) + "px"; tip.style.top = (e.clientY + 14) + "px";
+  };
+  svg.onmouseleave = () => { $("tip").style.display = "none"; const c = $("cross"); if (c) c.style.display = "none"; };
+  drawTable();
+}
+
+function niceStep(x) { const p = Math.pow(10, Math.floor(Math.log10(x))); const m = x / p; return (m < 1.5 ? 1 : m < 3.5 ? 2 : m < 7.5 ? 5 : 10) * p; }
+
+function drawTable() {
+  const pct = v => `<span class="${v >= 0 ? "up" : "dn"}">${v >= 0 ? "+" : ""}${v.toFixed(2)}%</span>`;
+  const st = data.stats, etf = st[data.etf];
+  let h = `<tr><th>순위</th><th>종목</th><th>이름</th><th>편입 비중</th><th>현재가($)</th><th>기간 등락</th><th>SOXL ÷3 대비</th></tr>`;
+  if (etf) h += `<tr><td>-</td><td><b>${data.etf}</b></td><td>3배 레버리지 ETF</td><td>-</td><td>${etf.last.toFixed(2)}</td><td>${pct(etf.chg)}</td><td>-</td></tr>`;
+  data.top.forEach((t, k) => {
+    const s = st[t.symbol];
+    h += `<tr><td>${k + 1}위</td><td><b>${t.symbol}</b></td><td>${t.name}</td><td>${t.weight.toFixed(2)}%</td>` +
+      (s ? `<td>${s.last.toFixed(2)}</td><td>${pct(s.chg)}</td><td>${etf ? pct(s.chg - etf.chg / 3) : "-"}</td>` : `<td colspan="3">${data.errors[t.symbol] || "-"}</td>`) + `</tr>`;
+  });
+  const bk = Object.keys(data.lines).find(k => k.includes("가중"));
+  if (bk) { const v = data.lines[bk].filter(x => x != null).pop();
+    h += `<tr><td>-</td><td><b>가중평균</b></td><td>위 ${data.top.length}종목 비중대로</td><td>${data.top.reduce((a, t) => a + t.weight, 0).toFixed(2)}%</td><td>-</td><td>${pct(v)}</td><td>${etf ? pct(v - etf.chg / 3) : "-"}</td></tr>`; }
+  $("tbl").innerHTML = h;
+  const hd = data.holdings;
+  $("src").textContent = `편입 종목 출처: ${hd.source}${hd.date ? " (" + hd.date + " 기준)" : ""} · 시세: 야후 파이낸스 (지연될 수 있음) · 비중은 SOXL 순자산 대비(현금·스왑 포함)라 합이 100% 가 안 됨`;
+}
+
+$("n").onchange = () => { localStorage.setItem("soxl_n", $("n").value); load(); };
+$("div3").onchange = () => { localStorage.setItem("soxl_div3", $("div3").checked ? "1" : "0"); draw(); };
+addEventListener("resize", () => data && draw());
+setInterval(() => { if ($("auto").checked) load(); }, 60000);
+drawRanges(); load();
+</script>
+</body>
+</html>

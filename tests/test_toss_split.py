@@ -190,6 +190,14 @@ class SplitTest(unittest.TestCase):
         self.step(12795)  # 같은 날은 매수를 다시 시도하지 않고 익절 주문을 걺
         self.assertEqual(self.broker.pending(), [("SELL", 13200)])
 
+    def test_low_price_fixed_qty(self):
+        t = SplitTrader(SplitConfig(enabled=True, budget=20000, low_price=11000, low_qty=2), self.broker,
+                        SplitStore(Path(self.dir.name) / "s_low.json"))
+        self.assertEqual(t.buy_qty(11010), 1)
+        self.assertEqual(t.buy_qty(10860), 2)
+        self.assertEqual(t.buy_qty(6600), 2)
+        self.assertEqual(t.buy_qty(60), 2)
+
     def test_budget_per_level(self):
         from tossbot.split import regap
         t = SplitTrader(SplitConfig(enabled=True, budget=20000), self.broker,

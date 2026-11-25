@@ -45,6 +45,9 @@ class SplitConfig:
     levels: int = 10
     qty: int = 1  # 차수당 주식 수 (budget 이 0 일 때)
     budget: int = 0  # 차수당 매수 금액 상한(원), 0 = qty 주씩
+    # 매수가가 low_price 원 미만인 차수는 금액과 상관없이 low_qty 주씩 (0 = 안 씀, 2026-11-25 사용자 결정 11,000원 미만 2주)
+    low_price: int = 0
+    low_qty: int = 2
     init_held: int = 8  # 처음 상태를 만들 때 이미 산 것으로 볼 차수 (1~N차)
     gap_pct: float = 2.5  # 재진입 뒤 새 간격 = 새 시작가 x N %
     reentry_drop: float = 2.0  # 모든 차수 익절 뒤 고점 -N% 에서 재진입
@@ -63,6 +66,8 @@ class SplitConfig:
             levels=num("SPLIT_LEVELS", "levels", int),
             qty=num("SPLIT_QTY", "qty", int),
             budget=num("SPLIT_BUDGET", "budget", int),
+            low_price=num("SPLIT_LOW_PRICE", "low_price", int),
+            low_qty=num("SPLIT_LOW_QTY", "low_qty", int),
             init_held=num("SPLIT_INIT_HELD", "init_held", int),
             gap_pct=num("SPLIT_GAP_PCT", "gap_pct"),
             reentry_drop=num("SPLIT_REENTRY_DROP", "reentry_drop"),
@@ -204,6 +209,8 @@ class SplitTrader:
 
     def buy_qty(self, price: int) -> int:
         """이 가격에 한 차수로 살 주식 수."""
+        if self.cfg.low_price > 0 and price < self.cfg.low_price:
+            return self.cfg.low_qty
         return int(self.cfg.budget // price) if self.cfg.budget > 0 else self.cfg.qty
 
     def sell_price(self, lot: Lot) -> int:

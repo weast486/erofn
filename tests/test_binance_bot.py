@@ -414,3 +414,25 @@ class OvernightTest(unittest.TestCase):
         self.assertEqual(next_start(late, "").date(), NEXT)
         self.assertEqual(next_start(late, "", overnight=True), late)
         self.assertTrue(early.weekday() == 4)
+
+
+class AdrTest(unittest.TestCase):
+    def test_adr_uses_most_recent_days(self):
+        """30분봉 1500개(31일)를 넘어 최근 며칠까지 받아서 계산해야 함 (2026-11-26 버그)."""
+        day = date(2026, 11, 20)
+
+        class Fake30:
+            def klines(self, symbol, start_ms, limit=500, interval="1m"):
+                out, t = [], datetime.fromtimestamp(start_ms / 1000, ET)
+                while len(out) < limit and t.date() < day:
+                    rng = 10.0 if t.date() >= date(2026, 11, 10) else 2.0  # 최근 8거래일만 폭 10%
+                    ms = int(t.timestamp() * 1000)
+                    out.append([ms, 100, 100 + rng, 100, 100, 1, ms + 1_799_999, 0])
+                    t += timedelta(minutes=30)
+                return out
+
+        clock = Clock(datetime(2026, 11, 20, 9, 0, tzinfo=ET))
+        t = FvgTrader(Fake30(), BotConfig(state_dir=tempfile.mkdtemp()), now_fn=clock.now, sleep_fn=clock.sleep)
+        adr = t.adr(day, ["AUSDT"])["AUSDT"]
+        # 전날까지 20거래일 중 11-10 ~ 11-19 의 8일이 10%, 나머지 12일이 2% → 평균 5.2%
+        self.assertAlmostEqual(adr, (8 * 10 + 12 * 2) / 20, places=6)

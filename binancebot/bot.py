@@ -241,7 +241,15 @@ class FvgTrader:
         out = {}
         for sym in symbols:
             hl: dict[date, list[float]] = {}
-            for k in self.c.klines(sym, ms(start), limit=1500, interval="30m"):
+            # 30분봉은 하루 48개라 1500개 = 31일 → 39일 전부터 한 번만 받으면 최근 약 8일이 빠졌음 (2026-11-26 수정)
+            rows, cursor, end = [], ms(start), ms(at(day, 0, 0))
+            for _ in range(5):
+                part = self.c.klines(sym, cursor, limit=1500, interval="30m")
+                rows += part
+                if not part or int(part[-1][0]) + 1_800_000 >= end:
+                    break
+                cursor = int(part[-1][0]) + 1_800_000
+            for k in rows:
                 t = datetime.fromtimestamp(int(k[0]) / 1000, ET)
                 d = t.date()
                 close = time(13, 0) if d in US_EARLY_CLOSE else time(16, 0)

@@ -44,6 +44,7 @@ class BotConfig:
     demo: bool = False            # OKX 모의 거래(x-simulated-trading)
     dry_run: bool = True          # true 면 주문 없이 로그만
     leverage: float = 5.0         # 종목마다 평가금액 x 이 배수만큼 진입 (2종목이면 합계 최대 10배)
+    max_margin: float = 0.0       # 종목마다 진입 증거금 상한 USDT (평가금액이 더 작으면 평가금액 전부, 0 = 상한 없음, 2026-11-26)
     exchange_leverage: int = 20   # 바이낸스 레버리지 설정값 (증거금 계산용; 교차 마진이라 청산 위험은 실제 진입 금액이 결정)
     max_trades: int = 2           # 하루 최대 종목 수 (먼저 체결된 순, 2종목이면 동시에 최대 4배)
     top_n: int = 10               # 전날 정규장 거래대금 상위 N
@@ -85,6 +86,7 @@ class BotConfig:
             demo=_bool(os.environ.get("OKX_DEMO"), False),
             dry_run=_bool(os.environ.get(f"{pre}_DRY_RUN"), True),
             leverage=f("BN_LEVERAGE", "leverage"),
+            max_margin=f("BN_MAX_MARGIN", "max_margin"),
             exchange_leverage=f("BN_EXCHANGE_LEVERAGE", "exchange_leverage", int),
             max_trades=f("BN_MAX_TRADES", "max_trades", int),
             top_n=f("BN_TOP_N", "top_n", int),
@@ -115,7 +117,7 @@ class BotConfig:
         return (f"[{self.exchange.upper()}] 전날 거래대금 상위 {self.top_n}{extra}, 첫 5분봉 + 1분봉 FVG({self.entry}) {self.side}, "
                 f"손절 첫 봉 반대편{f'(거리 {self.max_stop_pct:g}% 이하만)' if self.max_stop_pct > 0 else ''}"
                 f" / 익절 {self.target_r:g}R / 9:30+{self.exit_minutes}분 정리, "
-                f"종목당 평가금액 x {self.leverage:g}배, 하루 최대 {self.max_trades}종목"
+                f"종목당 {f'min(평가금액, {self.max_margin:g}달러)' if self.max_margin > 0 else '평가금액'} x {self.leverage:g}배, 하루 최대 {self.max_trades}종목"
                 + (f" + 종가 매매(장중 -{self.on_drop:g}%↓·저가 근처 마감 {self.on_max}종목 x {self.on_leverage:g}배, "
                    f"손절 -{self.on_stop:g}%, 다음 거래일 9:30 정리)" if self.on_enabled else "")
                 + f" ({'드라이런' if self.dry_run else '실제 주문'})")
@@ -405,8 +407,9 @@ class FvgTrader:
     def enter(self, st: DayState, sym: str, side: int, lvl: float, stop: float, price: float) -> bool:
         f = filters_of(self.meta.get(sym, {}))
         eq = self.equity()
+        margin = min(eq, self.cfg.max_margin) if self.cfg.max_margin > 0 else eq
         lvl_r = round_tick(lvl, f["tick"])
-        qty = round_step(eq * self.cfg.leverage / lvl_r, f["step"])
+        qty = round_step(margin * self.cfg.leverage / lvl_r, f["step"])
         if qty <= 0 or qty * lvl_r < f["min_notional"]:
             log.info("%s 수량이 최소 주문 금액보다 작아 제외 (평가금액 %.2f)", sym, eq)
             st.dropped.append(sym)
@@ -441,7 +444,7 @@ class FvgTrader:
         tp = avg + side * risk * self.cfg.target_r if self.cfg.target_r > 0 else 0.0
         pos = {"symbol": sym, "side": side, "qty": filled, "entry": avg, "stop": round_tick(stop, f["tick"]),
                "tp": round_tick(tp, f["tick"]) if tp else 0.0, "entry_time": self.now().isoformat(),
-               "equity": eq, "stop_order": "", "tp_placed": False, "result": {}}
+               "equity": eq, "margin": margin, "stop_order": "", "tp_placed": False, "result": {}}
         st.positions[sym] = pos
         st.phase = "position"
         self.save(st)

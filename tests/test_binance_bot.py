@@ -94,6 +94,18 @@ class BotTest(unittest.TestCase):
         # 같은 날 다시 켜도 다시 매매하지 않음
         self.assertEqual(trader.run(DAY).result["trades"], 1)
 
+    def test_max_margin_caps_entry(self):
+        """BN_MAX_MARGIN: 종목마다 증거금 min(평가금액, 상한) x 배율 (2026-11-26)."""
+        first = [(100, 101, 99, 100.5)] * 5
+        fvg = [(101, 101.5, 100.8, 101.4), (101.4, 103, 101.3, 102.9), (102.9, 103.5, 102.2, 103.2)]
+        after = [(103.2, 103.3, 102.0, 102.5), (102.5, 102.6, 101.3, 101.4)]
+        up = [(101.4, 107, 101.4, 107)] * 3
+        for margin, want in ((100, 300), (5000, 3000)):  # 평가금액 1000, 3배
+            trader, clock = self._setup(first + fvg + after + up)
+            trader.cfg.leverage, trader.cfg.max_margin = 3, margin
+            pos = trader.run(DAY).positions["AUSDT"]
+            self.assertAlmostEqual(pos["qty"], round_step(want / 101.5, 0.001))
+
     def test_short_stop_and_time_exit(self):
         first = [(100, 101, 99, 99.5)] * 5
         fvg = [(99, 98.8, 98.5, 98.6), (98.6, 98.6, 97, 97.1), (97.1, 97.8, 96.8, 97.0)]  # 숏 진입가 98.5 (갭 다 메움)

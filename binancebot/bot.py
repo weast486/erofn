@@ -56,6 +56,8 @@ class BotConfig:
     short_max_need: float = 2.0   # 익절가까지 가려면 그날 폭(고점 → 익절가)이 ADR 의 이 배수 이상 필요하면 제외
     target_r: float = 2.0         # 익절 = 손절 거리 x R (0 = 익절 없음)
     exit_minutes: int = 350       # 9:30 부터 N분 뒤 정리 (350 = 15:20)
+    # 13시 조기 마감일(추수감사절 다음 날 등)에는 9:30 부터 N분 뒤 정리 (200 = 12:50, 0 = 그날은 쉼, 2026-11-27 사용자 요청)
+    early_exit_minutes: int = 200
     side: str = "both"            # both / long / short
     entry: str = "full"           # full = 갭 다 메움 / mid / edge
     loc: str = "zone"             # zone = 갭 전체가 첫 봉 밖 / mid
@@ -97,6 +99,7 @@ class BotConfig:
             short_max_need=f("BN_SHORT_MAX_NEED", "short_max_need"),
             target_r=f("BN_TARGET_R", "target_r"),
             exit_minutes=f("BN_EXIT_MINUTES", "exit_minutes", int),
+            early_exit_minutes=f("BN_EARLY_EXIT_MINUTES", "early_exit_minutes", int),
             side=_get("BN_SIDE", cls.side),
             entry=_get("BN_ENTRY", cls.entry),
             loc=_get("BN_LOC", cls.loc),
@@ -291,13 +294,15 @@ class FvgTrader:
         if not trading_day(day):
             log.info("%s 은 미국 휴장일(주말·공휴일)이라 쉽니다", day)
             return st
-        if day in US_EARLY_CLOSE:
+        if day in US_EARLY_CLOSE and self.cfg.early_exit_minutes <= 0:
             log.info("%s 은 13시 조기 마감이라 쉽니다", day)
             return st
         if st.phase == "done":
             log.info("%s 은 이미 끝났어요: %s", day, st.result)
             return st
-        exit_t = at(day, 9, 30) + timedelta(minutes=self.cfg.exit_minutes)
+        exit_t = at(day, 9, 30) + timedelta(minutes=exit_minutes_for(day, self.cfg.exit_minutes, self.cfg.early_exit_minutes))
+        if day in US_EARLY_CLOSE:
+            log.info("%s 은 13시 조기 마감 → %s 에 정리", day, exit_t.strftime("%H:%M"))
         if self.now() >= exit_t and not self.open_positions(st):
             log.info("정리 시각(%s ET)이 지나 오늘은 쉽니다", exit_t.strftime("%H:%M"))
             return st
@@ -579,22 +584,28 @@ class FvgTrader:
 LOOP_START = (9, 10)  # 미국 동부 (한국 시간 22:10, 서머타임 끝나면 23:10)
 
 
-def day_end(day: date, exit_minutes: int, overnight: bool) -> datetime:
+def exit_minutes_for(day: date, exit_minutes: int, early_exit_minutes: int = 0) -> int:
+    """조기 마감일이면 early_exit_minutes (켜져 있을 때), 아니면 exit_minutes."""
+    return early_exit_minutes if day in US_EARLY_CLOSE and early_exit_minutes > 0 else exit_minutes
+
+
+def day_end(day: date, exit_minutes: int, overnight: bool, early_exit_minutes: int = 0) -> datetime:
     """이 시각 전이면 오늘 run 을 시작(재시도)할 만함. 종가 매매를 켜면 15:57 (종가 매수 전)까지."""
-    end = at(day, 9, 30) + timedelta(minutes=exit_minutes)
+    end = at(day, 9, 30) + timedelta(minutes=exit_minutes_for(day, exit_minutes, early_exit_minutes))
     return max(end, at(day, 15, 57)) if overnight and day not in US_EARLY_CLOSE else end
 
 
-def next_start(now: datetime, last_run: str, exit_minutes: int = 350, overnight: bool = False) -> datetime:
-    """overnight(종가 매매)를 켜면 13시 조기 마감일에도 시작한다 (전날 산 종목을 9:30 에 정리해야 해서)."""
+def next_start(now: datetime, last_run: str, exit_minutes: int = 350, overnight: bool = False,
+               early_exit_minutes: int = 0) -> datetime:
+    """overnight(종가 매매)를 켜거나 early_exit_minutes > 0 이면 13시 조기 마감일에도 시작한다."""
     d = now
     for _ in range(10):
         day = d.date()
-        if trading_day(day) and (overnight or day not in US_EARLY_CLOSE) and day.isoformat() != last_run:
+        if trading_day(day) and (overnight or early_exit_minutes > 0 or day not in US_EARLY_CLOSE) and day.isoformat() != last_run:
             start = at(day, *LOOP_START)
             if day != now.date() or now < start:
                 return start
-            if now < day_end(day, exit_minutes, overnight):
+            if now < day_end(day, exit_minutes, overnight, early_exit_minutes):
                 return now
         d = datetime.combine(day + timedelta(days=1), time(0, 0), ET)
     raise RuntimeError("다음 거래일을 못 찾음")
@@ -604,7 +615,7 @@ def loop(make_trader, cfg: BotConfig, now_fn=None, sleep_fn=_time.sleep, retries
     now_fn = now_fn or (lambda: datetime.now(ET))
     last_run = ""
     while True:
-        start = next_start(now_fn(), last_run, cfg.exit_minutes, cfg.on_enabled)
+        start = next_start(now_fn(), last_run, cfg.exit_minutes, cfg.on_enabled, cfg.early_exit_minutes)
         if start > now_fn():
             log.info("다음 실행 %s (미국 동부) 까지 대기 — 이 창을 닫지 마세요", start.strftime("%m-%d %H:%M"))
             while now_fn() < start:
@@ -617,7 +628,7 @@ def loop(make_trader, cfg: BotConfig, now_fn=None, sleep_fn=_time.sleep, retries
                 break
             except Exception:  # noqa: BLE001
                 log.exception("실행 중 오류 (%d/%d)", attempt + 1, retries)
-                if attempt >= retries or now_fn() >= day_end(day, cfg.exit_minutes, cfg.on_enabled) + timedelta(minutes=5):
+                if attempt >= retries or now_fn() >= day_end(day, cfg.exit_minutes, cfg.on_enabled, cfg.early_exit_minutes) + timedelta(minutes=5):
                     log.error("오늘은 더 시도하지 않음 — 바이낸스 앱에서 포지션·주문을 직접 확인하세요")
                     break
                 sleep_fn(30)

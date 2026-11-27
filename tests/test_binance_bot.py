@@ -448,3 +448,18 @@ class AdrTest(unittest.TestCase):
         adr = t.adr(day, ["AUSDT"])["AUSDT"]
         # 전날까지 20거래일 중 11-10 ~ 11-19 의 8일이 10%, 나머지 12일이 2% → 평균 5.2%
         self.assertAlmostEqual(adr, (8 * 10 + 12 * 2) / 20, places=6)
+
+
+class EarlyCloseTest(unittest.TestCase):
+    def test_early_close_day_trades_until_1250(self):
+        """13시 조기 마감일(2026-11-27)도 BN_EARLY_EXIT_MINUTES(200분 = 12:50) 로 매매 (2026-11-27 사용자 요청)."""
+        from binancebot.bot import day_end, exit_minutes_for
+        d = date(2026, 11, 27)
+        now = datetime(2026, 11, 26, 22, 0, tzinfo=ET)
+        self.assertEqual(next_start(now, ""), datetime(2026, 11, 30, 9, 10, tzinfo=ET))          # 예전: 쉼
+        self.assertEqual(next_start(now, "", 350, False, 200), datetime(2026, 11, 27, 9, 10, tzinfo=ET))
+        self.assertEqual(exit_minutes_for(d, 350, 200), 200)
+        self.assertEqual(exit_minutes_for(date(2026, 11, 30), 350, 200), 350)
+        self.assertEqual(day_end(d, 350, False, 200), datetime(2026, 11, 27, 12, 50, tzinfo=ET))
+        late = datetime(2026, 11, 27, 13, 0, tzinfo=ET)
+        self.assertEqual(next_start(late, "", 350, False, 200), datetime(2026, 11, 30, 9, 10, tzinfo=ET))

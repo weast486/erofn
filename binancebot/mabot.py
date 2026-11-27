@@ -430,7 +430,7 @@ class MaBot:
         return False
 
     def fvg_guard(self) -> None:
-        """미국 거래일 정규장 시작 N분 전(동부 9:30 - N분 ~ 16:00)에 FVG 봇이 켜져 있으면 하루 한 번
+        """미국 거래일 정규장 시작 N분 전(동부 9:30 - N분 ~ 장 마감 16:00, 조기 마감일 13:00)에 FVG 봇이 켜져 있으면 하루 한 번
         자동 매매를 멈추고 포지션·주문을 정리 (같은 계정에서 포지션이 섞이지 않게)."""
         if self.cfg.fvg_stop_min <= 0:
             return
@@ -439,10 +439,10 @@ class MaBot:
         from .bot import trading_day
         t = datetime.fromtimestamp(self.now(), ET)
         d = t.date()
-        if not trading_day(d) or d in US_EARLY_CLOSE or self.st.get("fvg_stop_day") == d.isoformat():
+        if not trading_day(d) or self.st.get("fvg_stop_day") == d.isoformat():
             return
         start = datetime.combine(d, datetime.min.time(), ET).replace(hour=9, minute=30) - timedelta(minutes=self.cfg.fvg_stop_min)
-        if not (start <= t < start.replace(hour=16, minute=0)):
+        if not (start <= t < start.replace(hour=13 if d in US_EARLY_CLOSE else 16, minute=0)):
             return
         c = self.st.get("cfg")
         busy = self.st.get("enabled") or self.st.get("pos") or self.st.get("entry_orders")

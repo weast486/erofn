@@ -56,8 +56,8 @@ class BotConfig:
     short_max_need: float = 2.0   # 익절가까지 가려면 그날 폭(고점 → 익절가)이 ADR 의 이 배수 이상 필요하면 제외
     target_r: float = 2.0         # 익절 = 손절 거리 x R (0 = 익절 없음)
     exit_minutes: int = 350       # 9:30 부터 N분 뒤 정리 (350 = 15:20)
-    # 13시 조기 마감일(추수감사절 다음 날 등)에는 9:30 부터 N분 뒤 정리 (200 = 12:50, 0 = 그날은 쉼, 2026-11-27 사용자 요청)
-    early_exit_minutes: int = 200
+    # 13시 조기 마감일(추수감사절 다음 날 등)에는 9:30 부터 N분 뒤 정리 (209 = 12:59 장 마감 직전, 0 = 그날은 쉼, 2026-11-27 사용자 요청)
+    early_exit_minutes: int = 209
     side: str = "both"            # both / long / short
     entry: str = "full"           # full = 갭 다 메움 / mid / edge
     loc: str = "zone"             # zone = 갭 전체가 첫 봉 밖 / mid

@@ -110,6 +110,49 @@ class MaBotTest(unittest.TestCase):
         self.assertIsNone(self.bot.st["pos"])
         self.assertEqual(self.bot.st["trades"][-1]["reason"], "manual")
 
+    def test_fvg_guard_closes_before_us_open(self):
+        """바이낸스 FVG 봇이 켜져 있으면 정규장 10분 전(동부 9:20)에 자동 매매 멈춤·포지션 정리 (2026-11-27)."""
+        from datetime import datetime
+        from binancebot.backtest import ET
+        write_request(self.dir, {"cmd": "long", "q": Q, "usdt": 50, "lev": 1, "pin": ""})
+        self.bot.step()
+        self.bot.step()
+        self.bot.st["enabled"] = True
+        self.assertEqual(self.bot.st["pos"]["dir"], 1)
+        running = [True]
+        self.bot.fvg_running = lambda: running[0]
+        ts = lambda h, m: datetime(2026, 11, 30, h, m, tzinfo=ET).timestamp()   # 월요일
+        self.bot.now = lambda: ts(9, 15)          # 아직 10분 전 아님
+        self.bot.step()
+        self.assertTrue(self.bot.st["enabled"])
+        running[0] = False
+        self.bot.now = lambda: ts(9, 21)          # FVG 봇 꺼져 있으면 그대로
+        self.bot.step()
+        self.assertTrue(self.bot.st["enabled"])
+        running[0] = True
+        self.bot.step()
+        self.assertFalse(self.bot.st["enabled"])
+        self.bot.step()
+        self.assertIsNone(self.bot.st["pos"])
+        self.assertEqual(self.bot.st["trades"][-1]["reason"], "fvg")
+        self.bot.st["enabled"] = True             # 그날 다시 켜면 다시 막지 않음 (하루 한 번)
+        self.bot.step()
+        self.assertTrue(self.bot.st["enabled"])
+
+    def test_fvg_running_reads_lock(self):
+        from kiwoombot.__main__ import acquire_lock
+        d = Path(self.dir) / "fvg"
+        self.bot.cfg.fvg_state_dir = str(d)
+        self.assertFalse(self.bot.fvg_running())   # 잠금 파일 없음
+        f = acquire_lock(str(d))
+        try:
+            import os
+            if os.name == "nt":   # 윈도우 잠금은 같은 프로세스에서도 막힘
+                self.assertTrue(self.bot.fvg_running())
+        finally:
+            f.close()
+        self.assertFalse(self.bot.fvg_running())
+
     def test_safety_stop_when_rule_has_none(self):
         q = {**Q, "stop_mode": "pct", "sl": "0"}          # 규칙 손절 없음 → 비상 손절 -10%
         write_request(self.dir, {"cmd": "long", "q": q, "usdt": 50, "lev": 1, "pin": ""})

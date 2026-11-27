@@ -59,6 +59,10 @@ class Settings:
     # 거래소 손절도 그 가격에 걸고, 봇도 가격이 거기 닿으면 시장가 정리. 급변(갭)이면 조금 넘을 수 있음
     max_loss_usdt: float = 0.0
     state_dir: str = "state_ma"
+    # 바이낸스 FVG 봇과 같은 계정을 쓸 때: FVG 봇이 켜져 있으면 미국 정규장 시작 N분 전에 자동 매매를 멈추고 포지션 정리
+    # (2026-11-27 사용자 결정, 0 = 끔, FVG 봇 켜짐 = 그 상태 폴더의 bot.lock 이 잡혀 있음)
+    fvg_stop_min: int = 10
+    fvg_state_dir: str = "state_binance"
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -68,7 +72,8 @@ class Settings:
                    pin=e("MA_PIN", ""), max_usdt=_f(e("MA_MAX_USDT"), 100.0), max_lev=_f(e("MA_MAX_LEV"), 5.0),
                    paper_equity=_f(e("MA_PAPER_EQUITY"), 1000.0),
                    safety_stop=_f(e("MA_SAFETY_STOP"), 10.0), state_dir=e("MA_STATE_DIR", "state_ma"),
-                   exchange_lev=_f(e("MA_EXCHANGE_LEV"), 0.0), max_loss_usdt=_f(e("MA_MAX_LOSS_USDT"), 0.0))
+                   exchange_lev=_f(e("MA_EXCHANGE_LEV"), 0.0), max_loss_usdt=_f(e("MA_MAX_LOSS_USDT"), 0.0),
+                   fvg_stop_min=int(_f(e("MA_FVG_STOP_MIN"), 10)), fvg_state_dir=e("MA_FVG_STATE_DIR", "state_binance"))
 
 
 # ------------------------------------------------------------ 거래소 (실제 / 가상)
@@ -412,8 +417,48 @@ class MaBot:
         else:
             self.msg("정리할 포지션이 없어요 (남은 주문만 취소)")
 
+    def fvg_running(self) -> bool:
+        """바이낸스 FVG 봇(loop/run)이 켜져 있으면 그 상태 폴더의 bot.lock 이 잡혀 있음."""
+        d = Path(self.cfg.fvg_state_dir)
+        if not (d / "bot.lock").exists():
+            return False
+        from kiwoombot.__main__ import acquire_lock
+        f = acquire_lock(str(d))
+        if f is None:
+            return True
+        f.close()   # 잡혔으면 아무도 안 쓰는 것 → 바로 놓음
+        return False
+
+    def fvg_guard(self) -> None:
+        """미국 거래일 정규장 시작 N분 전(동부 9:30 - N분 ~ 16:00)에 FVG 봇이 켜져 있으면 하루 한 번
+        자동 매매를 멈추고 포지션·주문을 정리 (같은 계정에서 포지션이 섞이지 않게)."""
+        if self.cfg.fvg_stop_min <= 0:
+            return
+        from datetime import datetime, timedelta
+        from .backtest import ET, US_EARLY_CLOSE
+        from .bot import trading_day
+        t = datetime.fromtimestamp(self.now(), ET)
+        d = t.date()
+        if not trading_day(d) or d in US_EARLY_CLOSE or self.st.get("fvg_stop_day") == d.isoformat():
+            return
+        start = datetime.combine(d, datetime.min.time(), ET).replace(hour=9, minute=30) - timedelta(minutes=self.cfg.fvg_stop_min)
+        if not (start <= t < start.replace(hour=16, minute=0)):
+            return
+        c = self.st.get("cfg")
+        busy = self.st.get("enabled") or self.st.get("pos") or self.st.get("entry_orders")
+        if not busy or not self.fvg_running():
+            return
+        self.st["fvg_stop_day"] = d.isoformat()
+        self.st["enabled"] = False
+        self.st["once"] = False
+        self.msg(f"FVG 봇이 켜져 있어 정규장 {self.cfg.fvg_stop_min}분 전에 이평선 매매를 끝냄 (자동 매매 멈춤·포지션 정리)")
+        if c:
+            self.close_now(c["symbol"], "fvg")
+        self.save()
+
     def step(self) -> None:
         self.process_requests()
+        self.fvg_guard()
         c = self.st.get("cfg")
         if not c:
             self.write_status()
